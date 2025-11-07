@@ -162,43 +162,77 @@ func (c *Consumer) GetDownloadURL(ctx context.Context, datasetID string) (*Downl
 
 func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath string) error {
 	fmt.Printf("Downloading dataset %s...\n", datasetID)
-	
+
 	// Get dataset metadata
 	dataset, err := c.GetDataset(ctx, datasetID)
 	if err != nil {
 		return fmt.Errorf("failed to get dataset: %w", err)
 	}
-	
+
 	isCompressed := dataset.Metadata.CompressionEnabled
 	isEncrypted := dataset.Metadata.EncryptionEnabled
-	
+
 	fmt.Printf("   Compressed: %v\n", isCompressed)
 	fmt.Printf("   Encrypted: %v\n", isEncrypted)
-	
+
 	// Get download URL
 	urlInfo, err := c.GetDownloadURL(ctx, datasetID)
 	if err != nil {
 		return fmt.Errorf("failed to get download URL: %w", err)
 	}
-	
+
 	// Download file
 	resp, err := http.Get(urlInfo.DownloadURL)
 	if err != nil {
 		return fmt.Errorf("failed to download: %w", err)
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("download failed with status %d", resp.StatusCode)
 	}
-	
+
+	// Get content length
+	contentLength := resp.ContentLength
+	largeFileThreshold := int64(100 * 1024 * 1024) // 100MB
+
+	// For large unprocessed files, stream directly to disk
+	if !isEncrypted && !isCompressed && contentLength > largeFileThreshold {
+		sizeGB := float64(contentLength) / (1024 * 1024 * 1024)
+		fmt.Printf("Streaming large file directly to disk (%.2f GB)...\n", sizeGB)
+
+		// Create output file
+		outFile, err := os.Create(outputPath)
+		if err != nil {
+			return fmt.Errorf("failed to create output file: %w", err)
+		}
+		defer outFile.Close()
+
+		// Stream directly to file
+		written, err := io.Copy(outFile, resp.Body)
+		if err != nil {
+			return fmt.Errorf("failed to stream to file: %w", err)
+		}
+
+		fmt.Printf("Downloaded %d bytes\n", written)
+		fmt.Printf("Saved to %s\n", outputPath)
+		return nil
+	}
+
+	// For encrypted/compressed files or smaller files, process in memory
+	if contentLength > largeFileThreshold*10 { // >1GB
+		sizeGB := float64(contentLength) / (1024 * 1024 * 1024)
+		fmt.Printf("Warning: Large file (%.2f GB) requires processing.\n", sizeGB)
+		fmt.Printf("This may use significant memory. Consider processing in chunks if possible.\n")
+	}
+
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("failed to read response: %w", err)
 	}
-	
+
 	fmt.Printf("Downloaded %d bytes\n", len(data))
-	
+
 	// Step 1: Decrypt (if encrypted)
 	if isEncrypted {
 		fmt.Printf("Decrypting %d bytes with KMS...\n", len(data))
@@ -208,7 +242,7 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 		}
 		fmt.Printf("Decrypted to %d bytes\n", len(data))
 	}
-	
+
 	// Step 2: Decompress (if compressed)
 	if isCompressed {
 		fmt.Printf("Decompressing %d bytes...\n", len(data))
@@ -216,14 +250,19 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 		if err != nil {
 			return fmt.Errorf("decompression failed: %w", err)
 		}
-		fmt.Printf("Decompressed to %d bytes\n", len(data))
+		decompressedGB := float64(len(data)) / (1024 * 1024 * 1024)
+		if decompressedGB > 1 {
+			fmt.Printf("Decompressed to %.2f GB\n", decompressedGB)
+		} else {
+			fmt.Printf("Decompressed to %d bytes\n", len(data))
+		}
 	}
-	
+
 	// Write to file
 	if err := os.WriteFile(outputPath, data, 0644); err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
 	}
-	
+
 	fmt.Printf("Saved to %s\n", outputPath)
 	return nil
 }
