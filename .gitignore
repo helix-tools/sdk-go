@@ -1,0 +1,61 @@
+# Test binaries and artifacts
+test/e2e-test
+test/*.exe
+test/*.test
+*.test
+test*
+test/*
+test
+
+# Environment files (credentials)
+.env
+.env.local
+.env.*.local
+*.env
+
+# Test data files
+test/*.json
+test/*.csv
+test/*.ndjson
+test/*.gz
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+
+# Go build cache
+go.work
+go.work.sum
+
+# Coverage and profiling
+*.out
+*.prof
+coverage.txt
+coverage.html
+
+# Credentials and secrets (extra safety)
+*credentials*
+*secrets*
+*keys.json
+*key.json
