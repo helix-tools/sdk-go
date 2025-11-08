@@ -86,7 +86,7 @@ func NewProducer(cfg types.Config) (*Producer, error) {
 	// Basic validation.
 	if cfg.APIEndpoint == "" {
 		// TODO: Get this from AWS SSM.
-		cfg.APIEndpoint = "https://api.helix.tools"
+		cfg.APIEndpoint = "https://z94fkomfij.execute-api.us-east-1.amazonaws.com"
 	}
 
 	if cfg.Region == "" {
