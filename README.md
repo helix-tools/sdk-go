@@ -20,4 +20,4 @@ go get github.com/helix-tools/sdk-go
 
 ## License
 
-See LICENSE file for details
+See LICENSE file for details.
