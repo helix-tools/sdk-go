@@ -415,7 +415,8 @@ func (p *Producer) makeAPIRequest(ctx context.Context, method, path string, body
 	)
 
 	if body != nil {
-		jsonData, err := json.Marshal(body)
+		var err error
+		jsonData, err = json.Marshal(body)
 		if err != nil {
 			return fmt.Errorf("failed to marshal request body: %w", err)
 		}
