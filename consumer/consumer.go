@@ -92,13 +92,21 @@ type Notification struct {
 
 // Subscription represents a subscription to a producer's datasets.
 type Subscription struct {
-	ConsumerID  string  `json:"consumer_id"`
 	ID          string  `json:"_id"`
+	ConsumerID  string  `json:"consumer_id"`
+	CustomerID  string  `json:"customer_id,omitempty"`
+	DatasetID   *string `json:"dataset_id,omitempty"`
+	DatasetName string  `json:"dataset_name,omitempty"`
 	ProducerID  string  `json:"producer_id"`
+	RequestID   string  `json:"request_id,omitempty"`
+	Tier        string  `json:"tier"`
+	Status      string  `json:"status"`
+	KMSGrantID  *string `json:"kms_grant_id,omitempty"`
 	SNSSubARN   *string `json:"sns_subscription_arn,omitempty"`
 	SQSQueueARN *string `json:"sqs_queue_arn,omitempty"`
 	SQSQueueURL *string `json:"sqs_queue_url,omitempty"`
-	Status      string  `json:"status"`
+	CreatedAt   string  `json:"created_at"`
+	UpdatedAt   string  `json:"updated_at"`
 }
 
 // PollNotificationsOptions contains options for polling notifications from SQS.

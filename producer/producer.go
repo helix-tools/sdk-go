@@ -63,6 +63,7 @@ type UploadOptions struct {
 	Description      string
 	Encrypt          bool
 	Metadata         map[string]any
+	DatasetOverrides map[string]any
 }
 
 // NewUploadOptions creates UploadOptions with sane defaults.
@@ -282,6 +283,16 @@ func (p *Producer) UploadDataset(ctx context.Context, filePath string, opts Uplo
 
 	}
 
+	// Analyze data before compression/encryption (memory-efficient streaming).
+	// This extracts JSON schema and field emptiness statistics.
+	var analysis *AnalysisResult
+	analysisResult, err := p.analyzeData(filePath, DefaultAnalysisOptions())
+	if err != nil {
+		fmt.Printf("⚠️  Warning: Data analysis failed, continuing without analysis: %v\n", err)
+	} else {
+		analysis = analysisResult
+	}
+
 	// Read original file.
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -376,26 +387,58 @@ func (p *Producer) UploadDataset(ctx context.Context, filePath string, opts Uplo
 	// Copy sizes next (overwrites any user-provided size fields).
 	maps.Copy(finalMetadata, sizes)
 
-	// Register dataset in catalog via API
-	dataset := &types.Dataset{
-		Category:      opts.Category,
-		DataFreshness: opts.DataFreshness,
-		Description:   opts.Description,
-		Metadata:      finalMetadata,
-		Name:          opts.DatasetName,
-		ProducerID:    p.CustomerID,
-		S3Key:         s3Key,
-		SizeBytes:     sizes["compressed_size_bytes"].(int64),
+	// Add analysis results to metadata.
+	if analysis != nil {
+		finalMetadata["schema"] = analysis.Schema
+		finalMetadata["field_emptiness"] = analysis.FieldEmptiness
+		finalMetadata["record_count"] = analysis.RecordCount
+		if analysis.AnalysisErrors > 0 {
+			finalMetadata["analysis_errors"] = analysis.AnalysisErrors
+		}
 	}
 
+	// Determine final size (what's actually stored in S3).
+	// If encrypted, use encrypted size; otherwise use compressed size.
+	var finalSize int64
+	if opts.Encrypt {
+		finalSize = sizes["encrypted_size_bytes"].(int64)
+	} else {
+		finalSize = sizes["compressed_size_bytes"].(int64)
+	}
+
+	datasetPayload := p.buildDatasetPayload(
+		opts.DatasetName,
+		opts.Description,
+		opts.Category,
+		opts.DataFreshness,
+		s3Key,
+		finalSize,
+		finalMetadata,
+		analysis,
+		opts.DatasetOverrides,
+	)
+
 	// Make API request to register dataset.
-	err = p.makeAPIRequest(ctx, "POST", "/v1/datasets", dataset, dataset)
+	dataset := &types.Dataset{}
+	err = p.makeAPIRequest(ctx, "POST", "/v1/datasets", datasetPayload, dataset)
 	if err != nil {
 		fmt.Printf("⚠️  Warning: File uploaded but catalog registration failed: %v\n", err)
 
 		return &types.Dataset{
-			S3Key:    s3Key,
-			Metadata: map[string]any{"status": "uploaded_unregistered", "error": err.Error()},
+			Name:          opts.DatasetName,
+			ProducerID:    p.CustomerID,
+			Category:      opts.Category,
+			DataFreshness: opts.DataFreshness,
+			Visibility:    "private",
+			Status:        "active",
+			S3Key:         s3Key,
+			S3Bucket:      p.BucketName,
+			SizeBytes:     finalSize,
+			Metadata: map[string]any{
+				"status":  "uploaded_unregistered",
+				"error":   err.Error(),
+				"payload": datasetPayload,
+			},
 		}, nil
 	}
 
