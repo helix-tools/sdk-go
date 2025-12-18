@@ -301,6 +301,11 @@ func (p *Producer) UploadDataset(ctx context.Context, filePath string, opts Uplo
 
 	originalSize := int64(len(data))
 
+	// Validate file is not empty.
+	if originalSize == 0 {
+		return nil, fmt.Errorf("file is empty: %s (no data to upload)", filePath)
+	}
+
 	// Track sizes for metadata.
 	sizes := map[string]any{
 		"original_size_bytes":   originalSize,

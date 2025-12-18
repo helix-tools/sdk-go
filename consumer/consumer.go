@@ -597,19 +597,20 @@ func (c *Consumer) PollNotifications(ctx context.Context, opts PollNotifications
 	var notifications []Notification
 
 	for _, message := range receiveOutput.Messages {
-		// Parse SNS message.
-		var snsMessage struct {
-			Message string `json:"Message"`
-		}
+		// Parse message body - handle both SNS-wrapped and raw message formats.
+		// SNS-wrapped messages have a "Message" field containing the stringified notification.
+		// Raw messages contain the notification fields directly (event_type, producer_id, etc.).
 
-		if err := json.Unmarshal([]byte(aws.ToString(message.Body)), &snsMessage); err != nil {
-			// TODO: This should be observed/monitored properly.
-			fmt.Printf("Warning: Failed to parse SNS message: %v\n", err)
+		messageBody := aws.ToString(message.Body)
 
+		// First, try to parse as a generic JSON to determine format.
+		var parsedBody map[string]any
+		if err := json.Unmarshal([]byte(messageBody), &parsedBody); err != nil {
+			fmt.Printf("Warning: Failed to parse message body: %v\n", err)
 			continue
 		}
 
-		// Parse custom notification payload.
+		// Notification data structure.
 		var notificationData struct {
 			DatasetID      string `json:"dataset_id"`
 			DatasetName    string `json:"dataset_name"`
@@ -622,10 +623,22 @@ func (c *Consumer) PollNotifications(ctx context.Context, opts PollNotifications
 			SubscriptionID string `json:"subscription_id"`
 			Timestamp      string `json:"timestamp"`
 		}
-		if err := json.Unmarshal([]byte(snsMessage.Message), &notificationData); err != nil {
-			// TODO: This should be observed/monitored properly.
-			fmt.Printf("Warning: Failed to parse notification payload: %v\n", err)
 
+		// Determine message format and parse notification data.
+		if snsMessage, hasSNSWrapper := parsedBody["Message"].(string); hasSNSWrapper {
+			// SNS-wrapped format: { "Type": "Notification", "Message": "{...}", ... }
+			if err := json.Unmarshal([]byte(snsMessage), &notificationData); err != nil {
+				fmt.Printf("Warning: Failed to parse notification payload from SNS wrapper: %v\n", err)
+				continue
+			}
+		} else if _, hasEventType := parsedBody["event_type"]; hasEventType {
+			// Raw notification payload format (raw_message_delivery = true or direct SQS).
+			if err := json.Unmarshal([]byte(messageBody), &notificationData); err != nil {
+				fmt.Printf("Warning: Failed to parse raw notification payload: %v\n", err)
+				continue
+			}
+		} else {
+			fmt.Printf("Warning: Unknown message format for %s, skipping\n", aws.ToString(message.MessageId))
 			continue
 		}
 
