@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/helix-tools/sdk-go/types"
@@ -121,33 +122,25 @@ func NewProducer(cfg types.Config) (*Producer, error) {
 	ssmClient := ssm.NewFromConfig(awsCfg)
 
 	// Get S3 bucket name.
-	//
-	// TODO: Get pattern from AWS SSM.
-	bucketParam := fmt.Sprintf("/helix/customers/%s/s3_bucket", cfg.CustomerID)
-	bucketResp, err := ssmClient.GetParameter(context.Background(), &ssm.GetParameterInput{
-		Name: aws.String(bucketParam),
-	})
+	bucketParamCandidates := ssmParamCandidates(cfg.CustomerID, "s3_bucket")
+	bucketValue, err := getSSMParameterValue(context.Background(), ssmClient, bucketParamCandidates)
 	if err != nil {
 		return nil, fmt.Errorf("S3 bucket not found for producer %s: %w", cfg.CustomerID, err)
 	}
 
 	// Get KMS key ID.
-	//
-	// TODO: Get pattern from AWS SSM.
 	kmsKeyID := ""
-	kmsParam := fmt.Sprintf("/helix/customers/%s/kms_key_id", cfg.CustomerID)
-	kmsResp, err := ssmClient.GetParameter(context.Background(), &ssm.GetParameterInput{
-		Name: aws.String(kmsParam),
-	})
+	kmsParamCandidates := ssmParamCandidates(cfg.CustomerID, "kms_key_id")
+	kmsValue, err := getSSMParameterValue(context.Background(), ssmClient, kmsParamCandidates)
 	if err != nil {
 		fmt.Printf("Warning: KMS key not found, encryption will be disabled: %v\n", err)
 	} else {
-		kmsKeyID = *kmsResp.Parameter.Value
+		kmsKeyID = kmsValue
 	}
 
 	return &Producer{
 		APIEndpoint: cfg.APIEndpoint,
-		BucketName:  *bucketResp.Parameter.Value,
+		BucketName:  bucketValue,
 		CustomerID:  cfg.CustomerID,
 		KMSKeyID:    kmsKeyID,
 		Region:      cfg.Region,
@@ -157,6 +150,66 @@ func NewProducer(cfg types.Config) (*Producer, error) {
 		kmsClient:  kms.NewFromConfig(awsCfg),
 		s3Client:   s3.NewFromConfig(awsCfg),
 	}, nil
+}
+
+func ssmParamCandidates(customerID, paramName string) []string {
+	if customerID == "" || paramName == "" {
+		return nil
+	}
+
+	env := os.Getenv("HELIX_ENVIRONMENT")
+	if env == "" {
+		env = os.Getenv("ENVIRONMENT")
+	}
+	if env == "" {
+		env = "production"
+	}
+
+	prefixes := []string{}
+	if prefix := strings.TrimRight(os.Getenv("HELIX_SSM_CUSTOMER_PREFIX"), "/"); prefix != "" {
+		prefixes = append(prefixes, prefix)
+	}
+	prefixes = append(prefixes,
+		fmt.Sprintf("/helix-tools/%s/customers", env),
+		fmt.Sprintf("/helix/%s/customers", env),
+		"/helix/customers",
+	)
+
+	seen := map[string]struct{}{}
+	candidates := []string{}
+	for _, prefix := range prefixes {
+		if prefix == "" {
+			continue
+		}
+		if _, ok := seen[prefix]; ok {
+			continue
+		}
+		seen[prefix] = struct{}{}
+		candidates = append(candidates, fmt.Sprintf("%s/%s/%s", prefix, customerID, paramName))
+	}
+	return candidates
+}
+
+func getSSMParameterValue(ctx context.Context, client *ssm.Client, names []string) (string, error) {
+	var lastErr error
+	for _, name := range names {
+		resp, err := client.GetParameter(ctx, &ssm.GetParameterInput{
+			Name:           aws.String(name),
+			WithDecryption: aws.Bool(true),
+		})
+		if err == nil && resp.Parameter != nil && resp.Parameter.Value != nil {
+			return aws.ToString(resp.Parameter.Value), nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = fmt.Errorf("empty SSM parameter value for %s", name)
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("SSM parameter not found")
+	}
+	return "", lastErr
 }
 
 // compressData compresses data using gzip.
@@ -541,4 +594,32 @@ func (p *Producer) ListMyDatasets(ctx context.Context) ([]types.Dataset, error) 
 	}
 
 	return datasets, nil
+}
+
+// GetDatasetSubscribers lists all subscribers for a specific dataset.
+func (p *Producer) GetDatasetSubscribers(ctx context.Context, datasetID string) ([]types.Subscription, error) {
+	var response struct {
+		Subscriptions []types.Subscription `json:"subscriptions"`
+		Count         int                  `json:"count"`
+	}
+
+	path := fmt.Sprintf("/v1/subscriptions?dataset_id=%s", url.QueryEscape(datasetID))
+
+	if err := p.makeAPIRequest(ctx, http.MethodGet, path, nil, &response); err != nil {
+		return nil, err
+	}
+
+	return response.Subscriptions, nil
+}
+
+// RevokeSubscription revokes a subscription.
+func (p *Producer) RevokeSubscription(ctx context.Context, subscriptionID string) error {
+	path := fmt.Sprintf("/v1/subscriptions/%s/revoke", url.PathEscape(subscriptionID))
+
+	// PUT request with empty body
+	if err := p.makeAPIRequest(ctx, http.MethodPut, path, map[string]string{}, nil); err != nil {
+		return err
+	}
+
+	return nil
 }

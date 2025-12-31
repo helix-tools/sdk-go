@@ -1,5 +1,36 @@
 # Changelog
 
+## 2025-12-31
+
+### Fixed
+- **SSM Path Fallbacks**: Producer now resolves SSM parameters from `/helix-tools/{env}/customers` with legacy fallbacks and optional `HELIX_SSM_CUSTOMER_PREFIX` override.
+
+## 2025-12-29
+
+### Added
+- **Integration Test Package**: New `/api` package with comprehensive integration tests for the Go API.
+  - `client.go`: HTTP client with AWS SigV4 authentication for API testing
+  - `config.go`: Environment-based test configuration loader
+  - `cleanup.go`: LIFO cleanup registry for test resource management
+  - `fixtures.go`: Test data generators with TEST_ prefix for isolation
+  - `companies_test.go`: Company CRUD integration tests
+  - `datasets_test.go`: Dataset CRUD integration tests
+  - `subscription_requests_test.go`: Subscription request flow tests
+  - `subscriptions_test.go`: Subscription management tests
+
+- **Type Definitions**: Added new types in `/types` package:
+  - `company.go`: Company, Address, CreateCompanyRequest, UpdateCompanyRequest
+  - `subscription.go`: Subscription, SubscriptionsResponse, RevokeSubscriptionResponse
+  - `subscription_request.go`: SubscriptionRequest, ApproveRejectPayload
+
+- **Makefile**: Added Makefile with test targets:
+  - `make test-integration`: Run integration tests
+  - `make test-integration-local`: Run against localhost
+  - `make test-integration-prod`: Run against production
+
+### Documentation
+- Created ADR-0022: Integration and E2E Test Architecture
+
 ## 2025-12-18
 
 ### Added
