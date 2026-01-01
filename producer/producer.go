@@ -88,7 +88,12 @@ func NewProducer(cfg types.Config) (*Producer, error) {
 	// Basic validation.
 	if cfg.APIEndpoint == "" {
 		// TODO: Get this from AWS SSM.
-		cfg.APIEndpoint = "https://z94fkomfij.execute-api.us-east-1.amazonaws.com"
+		envEndpoint := strings.TrimSpace(os.Getenv("HELIX_API_ENDPOINT"))
+		if envEndpoint != "" {
+			cfg.APIEndpoint = envEndpoint
+		} else {
+			cfg.APIEndpoint = "https://api-go.helix.tools"
+		}
 	}
 
 	if cfg.Region == "" {
@@ -489,7 +494,9 @@ func (p *Producer) UploadDataset(ctx context.Context, filePath string, opts Uplo
 			DataFreshness: opts.DataFreshness,
 			Visibility:    "private",
 			Status:        "active",
+			AccessTier:    "free",
 			S3Key:         s3Key,
+			S3BucketName:  p.BucketName,
 			S3Bucket:      p.BucketName,
 			SizeBytes:     finalSize,
 			Metadata: map[string]any{

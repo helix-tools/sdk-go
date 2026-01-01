@@ -40,7 +40,9 @@ type Dataset struct {
 	DataFreshness   DataFreshness  `json:"data_freshness"`
 	Visibility      string         `json:"visibility"`
 	Status          string         `json:"status"`
+	AccessTier      string         `json:"access_tier,omitempty"`
 	S3Key           string         `json:"s3_key"`
+	S3BucketName    string         `json:"s3_bucket_name,omitempty"`
 	S3Bucket        string         `json:"s3_bucket"`
 	SizeBytes       int64          `json:"size_bytes"`
 	RecordCount     int            `json:"record_count"`

@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/helix-tools/sdk-go/types"
@@ -129,7 +130,12 @@ func NewConsumer(cfg types.Config) (*Consumer, error) {
 	//
 	if cfg.APIEndpoint == "" {
 		// TODO: Get this from AWS SSM.
-		cfg.APIEndpoint = "https://api.helix.tools"
+		envEndpoint := strings.TrimSpace(os.Getenv("HELIX_API_ENDPOINT"))
+		if envEndpoint != "" {
+			cfg.APIEndpoint = envEndpoint
+		} else {
+			cfg.APIEndpoint = "https://api-go.helix.tools"
+		}
 	}
 
 	if cfg.Region == "" {
