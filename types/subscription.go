@@ -5,7 +5,7 @@ type Subscription struct {
 	ID               string  `json:"_id"`
 	ConsumerID       string  `json:"consumer_id"`
 	CustomerID       string  `json:"customer_id,omitempty"` // Legacy field
-	DatasetID        *string `json:"dataset_id,omitempty"` // Null for all-datasets subscription
+	DatasetID        *string `json:"dataset_id"` // Required field, null for all-datasets subscription
 	DatasetName      string  `json:"dataset_name,omitempty"`
 	ProducerID       string  `json:"producer_id"`
 	RequestID        string  `json:"request_id,omitempty"`
