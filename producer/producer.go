@@ -587,15 +587,53 @@ func (p *Producer) updateDataset(ctx context.Context, datasetID string, payload 
 		}
 	}
 
-	// Make PATCH request
+	// Make PATCH request (ignore response body - API returns different field names)
 	path := fmt.Sprintf("/v1/datasets/%s", url.PathEscape(datasetID))
-	dataset := &types.Dataset{}
 
-	if err := p.makeAPIRequest(ctx, "PATCH", path, updatePayload, dataset); err != nil {
+	if err := p.makeAPIRequest(ctx, "PATCH", path, updatePayload, nil); err != nil {
 		return nil, fmt.Errorf("failed to update dataset: %w", err)
 	}
 
-	return dataset, nil
+	// Construct return value from the payload since PATCH succeeded
+	// (API response has different field names like 'id' vs '_id', 'total_size_bytes' vs 'size_bytes')
+	sizeBytes, _ := payload["size_bytes"].(int64)
+	recordCount, _ := payload["record_count"].(int)
+	metadata, _ := payload["metadata"].(map[string]any)
+	schema, _ := payload["schema"].(map[string]any)
+	tags, _ := payload["tags"].([]string)
+
+	return &types.Dataset{
+		ID:            datasetID,
+		IDAlias:       datasetID,
+		Name:          getStringField(payload, "name"),
+		Description:   getStringField(payload, "description"),
+		ProducerID:    p.CustomerID,
+		Category:      getStringField(payload, "category"),
+		DataFreshness: types.DataFreshness(getStringField(payload, "data_freshness")),
+		Visibility:    getStringField(payload, "visibility"),
+		Status:        getStringField(payload, "status"),
+		AccessTier:    getStringField(payload, "access_tier"),
+		S3Key:         getStringField(payload, "s3_key"),
+		S3BucketName:  p.BucketName,
+		S3Bucket:      p.BucketName,
+		SizeBytes:     sizeBytes,
+		RecordCount:   recordCount,
+		Version:       getStringField(payload, "version"),
+		Metadata:      metadata,
+		Schema:        schema,
+		Tags:          tags,
+		LastUpdated:   getStringField(payload, "last_updated"),
+		UpdatedAt:     getStringField(payload, "updated_at"),
+		UpdatedBy:     getStringField(payload, "updated_by"),
+	}, nil
+}
+
+// getStringField safely extracts a string field from a map
+func getStringField(m map[string]any, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
 }
 
 // makeAPIRequest makes an authenticated API request.

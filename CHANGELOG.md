@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-01-06
+
+### Fixed
+- **Dataset Upsert Response**: Fixed `updateDataset` to construct the return value from the payload instead of parsing the API response. The API returns different field names (`id` vs `_id`, `total_size_bytes` vs `size_bytes`), causing empty dataset fields. Now the SDK returns a properly populated Dataset object after update.
+
 ## 2026-01-05
 
 ### Added
