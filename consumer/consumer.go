@@ -226,8 +226,20 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 		return fmt.Errorf("failed to get dataset metadata: %w", err)
 	}
 
-	isEncrypted := dataset.Metadata["encryption_enabled"].(bool)
-	isCompressed := dataset.Metadata["compression_enabled"].(bool)
+	// Safely extract encryption/compression settings with defaults.
+	isEncrypted := false
+	isCompressed := false
+	if dataset.Metadata != nil {
+		if enc, ok := dataset.Metadata["encryption_enabled"].(bool); ok {
+			isEncrypted = enc
+		}
+		if comp, ok := dataset.Metadata["compression_enabled"].(bool); ok {
+			isCompressed = comp
+		}
+	}
+
+	fmt.Printf("   Compressed: %v\n", isCompressed)
+	fmt.Printf("   Encrypted: %v\n", isEncrypted)
 
 	// Download file.
 	resp, err := http.Get(urlInfo.DownloadURL)
