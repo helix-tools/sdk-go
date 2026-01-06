@@ -16,6 +16,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -49,6 +50,21 @@ type Producer struct {
 	httpClient *http.Client
 	kmsClient  *kms.Client
 	s3Client   *s3.Client
+}
+
+// APIError represents an error returned by the Helix API with status code.
+type APIError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("API error %d: %s", e.StatusCode, e.Body)
+}
+
+// IsConflict returns true if the error is a 409 Conflict (duplicate resource).
+func (e *APIError) IsConflict() bool {
+	return e.StatusCode == http.StatusConflict
 }
 
 // UploadOptions contains options for uploading datasets.
@@ -481,10 +497,50 @@ func (p *Producer) UploadDataset(ctx context.Context, filePath string, opts Uplo
 		opts.DatasetOverrides,
 	)
 
-	// Make API request to register dataset.
+	// Extract dataset ID from payload for potential update
+	datasetID, _ := datasetPayload["_id"].(string)
+
+	// Make API request to register dataset (upsert behavior).
+	// Try POST first, if 409 conflict then PATCH to update existing.
 	dataset := &types.Dataset{}
 	err = p.makeAPIRequest(ctx, "POST", "/v1/datasets", datasetPayload, dataset)
 	if err != nil {
+		// Check if this is a 409 Conflict (dataset already exists)
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.IsConflict() {
+			fmt.Printf("📝 Dataset already exists, updating metadata...\n")
+
+			// Update existing dataset instead of creating new
+			dataset, err = p.updateDataset(ctx, datasetID, datasetPayload)
+			if err != nil {
+				fmt.Printf("⚠️  Warning: File uploaded but catalog update failed: %v\n", err)
+
+				return &types.Dataset{
+					ID:            datasetID,
+					Name:          opts.DatasetName,
+					ProducerID:    p.CustomerID,
+					Category:      opts.Category,
+					DataFreshness: opts.DataFreshness,
+					Visibility:    "private",
+					Status:        "active",
+					AccessTier:    "free",
+					S3Key:         s3Key,
+					S3BucketName:  p.BucketName,
+					S3Bucket:      p.BucketName,
+					SizeBytes:     finalSize,
+					Metadata: map[string]any{
+						"status":  "uploaded_update_failed",
+						"error":   err.Error(),
+						"payload": datasetPayload,
+					},
+				}, nil
+			}
+
+			fmt.Printf("✅ Dataset updated: %s\n", datasetID)
+			return dataset, nil
+		}
+
+		// Non-409 error: keep original behavior
 		fmt.Printf("⚠️  Warning: File uploaded but catalog registration failed: %v\n", err)
 
 		return &types.Dataset{
@@ -505,6 +561,38 @@ func (p *Producer) UploadDataset(ctx context.Context, filePath string, opts Uplo
 				"payload": datasetPayload,
 			},
 		}, nil
+	}
+
+	return dataset, nil
+}
+
+// updateDataset updates an existing dataset via PATCH /v1/datasets/:id.
+// This is used internally when UploadDataset encounters a 409 conflict.
+func (p *Producer) updateDataset(ctx context.Context, datasetID string, payload map[string]any) (*types.Dataset, error) {
+	// Build update request with only the fields that can be updated
+	updatePayload := map[string]any{}
+
+	// Copy allowed update fields from the full payload
+	updateableFields := []string{
+		"name", "description", "schema", "metadata", "status",
+		"visibility", "category", "access_tier", "tags",
+		"size_bytes", "record_count", "s3_key", "s3_bucket_name",
+		"data_freshness", "version", "version_notes", "last_updated",
+		"updated_at", "updated_by",
+	}
+
+	for _, field := range updateableFields {
+		if val, ok := payload[field]; ok {
+			updatePayload[field] = val
+		}
+	}
+
+	// Make PATCH request
+	path := fmt.Sprintf("/v1/datasets/%s", url.PathEscape(datasetID))
+	dataset := &types.Dataset{}
+
+	if err := p.makeAPIRequest(ctx, "PATCH", path, updatePayload, dataset); err != nil {
+		return nil, fmt.Errorf("failed to update dataset: %w", err)
 	}
 
 	return dataset, nil
@@ -578,7 +666,10 @@ func (p *Producer) makeAPIRequest(ctx context.Context, method, path string, body
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 
-		return fmt.Errorf("API error %d: %s", resp.StatusCode, string(bodyBytes))
+		return &APIError{
+			StatusCode: resp.StatusCode,
+			Body:       string(bodyBytes),
+		}
 	}
 
 	if response != nil {

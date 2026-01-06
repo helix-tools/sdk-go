@@ -2,6 +2,10 @@
 
 ## 2026-01-05
 
+### Added
+- **Dataset Upsert Behavior**: `UploadDataset` now automatically updates existing datasets instead of failing with 409 conflict. When uploading a dataset with the same name, the SDK detects the conflict and calls `PATCH /v1/datasets/:id` to update the metadata. This enables seamless repeated uploads for data freshness updates.
+- **APIError Type**: Added `APIError` type with `IsConflict()` method for detecting 409 status codes.
+
 ### Fixed
 - **SDK Parity - Dataset ID**: Removed timestamp from dataset ID generation. IDs are now `{producer_id}-{slugified_name}` instead of `{producer_id}-{slugified_name}-{timestamp}`. This matches Portal behavior and prevents duplicate datasets when uploading the same dataset multiple times.
 - **SDK Parity - S3 Bucket Field**: Removed redundant `s3_bucket` field from dataset payload. Now only sends `s3_bucket_name` which is what the Go API expects. This fixes MongoDB field naming mismatch issues.
