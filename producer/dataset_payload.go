@@ -25,8 +25,10 @@ func (p *Producer) generateDatasetID(name string, explicitID *string) string {
 	if explicitID != nil && *explicitID != "" {
 		return *explicitID
 	}
-	timestamp := time.Now().UTC().Format("20060102150405")
-	return p.CustomerID + "-" + slugify(name) + "-" + timestamp
+	// Generate consistent dataset ID without timestamp
+	// This matches Portal behavior and prevents duplicate datasets
+	// Format: {producer_id}-{slugified_name}
+	return p.CustomerID + "-" + slugify(name)
 }
 
 func defaultPricing() map[string]any {
@@ -162,8 +164,7 @@ func (p *Producer) buildDatasetPayload(
 		"status":            "active",
 		"access_tier":       "free",
 		"s3_key":            s3Key,
-		"s3_bucket_name":    p.BucketName,
-		"s3_bucket":         p.BucketName,
+		"s3_bucket_name":    p.BucketName, // Go API expects s3_bucket_name
 		"size_bytes":        finalSize,
 		"record_count":      recordCount,
 		"version":           version,

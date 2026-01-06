@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-01-05
+
+### Fixed
+- **SDK Parity - Dataset ID**: Removed timestamp from dataset ID generation. IDs are now `{producer_id}-{slugified_name}` instead of `{producer_id}-{slugified_name}-{timestamp}`. This matches Portal behavior and prevents duplicate datasets when uploading the same dataset multiple times.
+- **SDK Parity - S3 Bucket Field**: Removed redundant `s3_bucket` field from dataset payload. Now only sends `s3_bucket_name` which is what the Go API expects. This fixes MongoDB field naming mismatch issues.
+
+## 2026-01-03
+
+### Fixed
+- **SDK Parity**: Added `Tier` field to `Company` struct to match customer.schema.json
+- **SDK Parity**: Updated `OnboardingInfo` struct with `WelcomeEmailSent` and `WelcomeEmailSentAt` fields
+- **SDK Parity**: Updated `InfrastructureInfo` struct - renamed `IAMUser` to `IAMUserARN`, added `CredentialsSSMPath`
+- **SDK Parity**: Fixed `DownloadURLInfo` in consumer.go to handle both Go API format (flat `file_name`, `file_size`) and legacy nested `dataset` object
+- **SDK Parity**: Fixed `InviteUserRequest` role comment to include `superadmin`
+
+## 2026-01-01
+
+### Fixed
+- **SQS Polling Timeouts**: Configure AWS HTTP client timeouts to avoid long-poll hangs during notification polling.
+
 ## 2025-12-31
 
 ### Fixed

@@ -46,6 +46,11 @@ func TestBuildDatasetPayloadDefaults(t *testing.T) {
 	if !ok || id == "" {
 		t.Fatalf("expected generated dataset id")
 	}
+	// Verify dataset ID format: {customer_id}-{slugified_name} (no timestamp)
+	expectedID := "customer-123-sample-dataset"
+	if id != expectedID {
+		t.Fatalf("expected dataset id %q, got %q", expectedID, id)
+	}
 	if payload["visibility"] != "private" {
 		t.Fatalf("expected visibility private, got %v", payload["visibility"])
 	}
