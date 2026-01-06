@@ -53,15 +53,18 @@ type Consumer struct {
 }
 
 // DownloadURLInfo contains information about a dataset download URL.
+// Note: Go API returns file_name, file_size instead of nested dataset object.
 type DownloadURLInfo struct {
 	DownloadURL string `json:"download_url"`
 	ExpiresAt   string `json:"expires_at"`
-	Dataset     struct {
-		// TODO: Fix inconsistency with `ID`.
-		ID        string `json:"id"`
+	FileName    string `json:"file_name,omitempty"`
+	FileSize    int64  `json:"file_size,omitempty"`
+	// Legacy nested dataset object (for backward compatibility).
+	Dataset *struct {
+		ID        string `json:"_id"`
 		Name      string `json:"name"`
 		SizeBytes int64  `json:"size_bytes"`
-	} `json:"dataset"`
+	} `json:"dataset,omitempty"`
 }
 
 // Dataset represents a dataset in the catalog.
@@ -143,6 +146,10 @@ func NewConsumer(cfg types.Config) (*Consumer, error) {
 		cfg.Region = "us-east-1"
 	}
 
+	awsHTTPClient := &http.Client{
+		Timeout: 25 * time.Second,
+	}
+
 	// Load AWS config.
 	awsCfg, err := config.LoadDefaultConfig(context.Background(),
 		config.WithRegion(cfg.Region),
@@ -151,6 +158,7 @@ func NewConsumer(cfg types.Config) (*Consumer, error) {
 			cfg.AWSSecretAccessKey,
 			"",
 		)),
+		config.WithHTTPClient(awsHTTPClient),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
