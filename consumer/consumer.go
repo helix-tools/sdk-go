@@ -734,3 +734,57 @@ func (c *Consumer) DeleteNotification(ctx context.Context, receiptHandle string)
 
 	return nil
 }
+
+// ClearQueue clears all messages from the consumer's notification queue.
+//
+// This permanently deletes all messages in the queue. Use with caution.
+//
+// IMPORTANT: AWS limits PurgeQueue to once every 60 seconds per queue.
+// Calling this method more frequently will result in an error.
+func (c *Consumer) ClearQueue(ctx context.Context) error {
+	// Initialize queue URL if not already set.
+	if c.queueURL == nil {
+		subscriptions, err := c.ListSubscriptions(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to get subscriptions: %w", err)
+		}
+
+		if len(subscriptions) == 0 {
+			return fmt.Errorf("no active subscriptions found. Cannot determine queue URL")
+		}
+
+		// Get queue URL from first subscription with a queue.
+		var queueURL *string
+
+		for _, sub := range subscriptions {
+			if sub.SQSQueueURL != nil {
+				queueURL = sub.SQSQueueURL
+
+				break
+			}
+		}
+
+		if queueURL == nil {
+			return fmt.Errorf("per-consumer queue not provisioned. This may be a legacy subscription. " +
+				"Please contact support or create a new subscription to get a dedicated queue.")
+		}
+
+		c.queueURL = queueURL
+	}
+
+	queueURL := aws.ToString(c.queueURL)
+
+	// Purge queue.
+	if _, err := c.sqsClient.PurgeQueue(ctx, &sqs.PurgeQueueInput{
+		QueueUrl: aws.String(queueURL),
+	}); err != nil {
+		// Check for PurgeQueueInProgress error.
+		if strings.Contains(err.Error(), "PurgeQueueInProgress") {
+			return fmt.Errorf("queue purge already in progress. AWS limits PurgeQueue to once every 60 seconds per queue")
+		}
+
+		return fmt.Errorf("failed to clear queue: %w", err)
+	}
+
+	return nil
+}

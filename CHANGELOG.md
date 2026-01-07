@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-01-07
+
+### Added
+- **Consumer Queue Management**: Added `ClearQueue()` method to Consumer. Allows consumers to purge all messages from their notification queue. Uses AWS SQS PurgeQueue API with 60-second rate limit handling.
+
 ## 2026-01-06
 
 ### Fixed
