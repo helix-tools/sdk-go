@@ -9,13 +9,15 @@ type Company struct {
 	CustomerType     string              `json:"customer_type"` // "producer", "consumer", or "both"
 	Phone            *string             `json:"phone,omitempty"`
 	Address          *Address            `json:"address,omitempty"`
-	StripeCustomerID *string             `json:"stripe_customer_id,omitempty"`
-	AWSCustomerID    *string             `json:"aws_customer_id,omitempty"`
+	StripeCustomerID     *string             `json:"stripe_customer_id,omitempty"`
+	StripeSubscriptionID string              `json:"stripe_subscription_id,omitempty"`
+	StripeStatus         string              `json:"stripe_status,omitempty"`
+	AWSCustomerID        *string             `json:"aws_customer_id,omitempty"`
 	S3Bucket         string              `json:"s3_bucket,omitempty"`
 	KMSKeyID         string              `json:"kms_key_id,omitempty"`
 	SNSTopicARN      string              `json:"sns_topic_arn,omitempty"`
 	Status           string              `json:"status"` // "provisioning", "active", "inactive", "provisioning_failed"
-	Tier             string              `json:"tier,omitempty"` // "free", "basic", "premium", "professional", "enterprise", "starter"
+	Tier             string              `json:"tier,omitempty"` // "basic", "professional", "enterprise"
 	Settings         *CompanySettings    `json:"settings,omitempty"`
 	Onboarding       *OnboardingInfo     `json:"onboarding,omitempty"`
 	Infrastructure   *InfrastructureInfo `json:"infrastructure,omitempty"`

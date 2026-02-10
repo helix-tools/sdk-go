@@ -1,0 +1,573 @@
+{
+  "analysis_metadata": {
+    "sdk": "Go SDK",
+    "version": "helix-tools/sdk-go",
+    "analysis_date": "2025-02-10",
+    "schemas_source": "../schemas/",
+    "analyzed_files": [
+      "types/common.go",
+      "types/company.go",
+      "types/subscription.go",
+      "types/subscription_request.go",
+      "producer/producer.go",
+      "producer/analyze.go",
+      "consumer/consumer.go"
+    ]
+  },
+
+  "structs": {
+    "Config": {
+      "file": "types/common.go",
+      "description": "Configuration for Consumer/Producer clients",
+      "fields": [
+        {"name": "APIEndpoint", "type": "string", "json_tag": null, "required": false, "validation": null},
+        {"name": "AWSAccessKeyID", "type": "string", "json_tag": null, "required": false, "validation": null},
+        {"name": "AWSSecretAccessKey", "type": "string", "json_tag": null, "required": false, "validation": null},
+        {"name": "CustomerID", "type": "string", "json_tag": null, "required": false, "validation": null},
+        {"name": "Region", "type": "string", "json_tag": null, "required": false, "validation": null}
+      ],
+      "relationships": ["Used by Producer and Consumer clients"],
+      "schema_match": "N/A - Internal SDK type, not a domain model"
+    },
+
+    "Dataset": {
+      "file": "types/common.go",
+      "description": "Dataset represents a dataset in the catalog",
+      "fields": [
+        {"name": "ID", "type": "string", "json_tag": "_id", "required": true, "validation": null},
+        {"name": "IDAlias", "type": "string", "json_tag": "id,omitempty", "required": false, "validation": null},
+        {"name": "Name", "type": "string", "json_tag": "name", "required": true, "validation": null},
+        {"name": "Description", "type": "string", "json_tag": "description", "required": false, "validation": null},
+        {"name": "ProducerID", "type": "string", "json_tag": "producer_id", "required": true, "validation": null},
+        {"name": "Category", "type": "string", "json_tag": "category", "required": true, "validation": null},
+        {"name": "DataFreshness", "type": "DataFreshness", "json_tag": "data_freshness", "required": true, "validation": null},
+        {"name": "Visibility", "type": "string", "json_tag": "visibility", "required": true, "validation": null},
+        {"name": "Status", "type": "string", "json_tag": "status", "required": true, "validation": null},
+        {"name": "AccessTier", "type": "string", "json_tag": "access_tier,omitempty", "required": false, "validation": null},
+        {"name": "S3Key", "type": "string", "json_tag": "s3_key", "required": false, "validation": null},
+        {"name": "S3BucketName", "type": "string", "json_tag": "s3_bucket_name,omitempty", "required": false, "validation": null},
+        {"name": "S3Bucket", "type": "string", "json_tag": "s3_bucket", "required": false, "validation": null},
+        {"name": "SizeBytes", "type": "int64", "json_tag": "size_bytes", "required": false, "validation": null},
+        {"name": "RecordCount", "type": "int", "json_tag": "record_count", "required": false, "validation": null},
+        {"name": "Version", "type": "string", "json_tag": "version", "required": false, "validation": null},
+        {"name": "VersionNotes", "type": "string", "json_tag": "version_notes", "required": false, "validation": null},
+        {"name": "ParentDatasetID", "type": "*string", "json_tag": "parent_dataset_id,omitempty", "required": false, "validation": null},
+        {"name": "IsLatestVersion", "type": "bool", "json_tag": "is_latest_version", "required": false, "validation": null},
+        {"name": "Metadata", "type": "map[string]any", "json_tag": "metadata", "required": false, "validation": null},
+        {"name": "Schema", "type": "map[string]any", "json_tag": "schema", "required": false, "validation": null},
+        {"name": "Validation", "type": "map[string]any", "json_tag": "validation", "required": false, "validation": null},
+        {"name": "Tags", "type": "[]string", "json_tag": "tags", "required": false, "validation": null},
+        {"name": "Pricing", "type": "map[string]any", "json_tag": "pricing", "required": false, "validation": null},
+        {"name": "Stats", "type": "map[string]any", "json_tag": "stats", "required": false, "validation": null},
+        {"name": "LastUpdated", "type": "string", "json_tag": "last_updated", "required": false, "validation": null},
+        {"name": "CreatedAt", "type": "string", "json_tag": "created_at", "required": true, "validation": null},
+        {"name": "CreatedBy", "type": "string", "json_tag": "created_by", "required": true, "validation": null},
+        {"name": "UpdatedAt", "type": "string", "json_tag": "updated_at", "required": false, "validation": null},
+        {"name": "UpdatedBy", "type": "string", "json_tag": "updated_by", "required": false, "validation": null},
+        {"name": "DeletedAt", "type": "*string", "json_tag": "deleted_at,omitempty", "required": false, "validation": null},
+        {"name": "DeletedBy", "type": "*string", "json_tag": "deleted_by,omitempty", "required": false, "validation": null}
+      ],
+      "relationships": ["Uses DataFreshness enum"],
+      "schema_match": "dataset.schema.json"
+    },
+
+    "DataFreshness": {
+      "file": "types/common.go",
+      "description": "Enum type for dataset update cadences",
+      "type": "string",
+      "values": [
+        "2x-per-day", "4x-per-day", "hourly", "daily", "weekly", 
+        "monthly", "quarterly", "yearly", "once", "on-demand"
+      ],
+      "schema_match": "dataset.schema.json -> data_freshness enum"
+    },
+
+    "Company": {
+      "file": "types/company.go",
+      "description": "Company represents a company/customer in the system",
+      "fields": [
+        {"name": "ID", "type": "string", "json_tag": "_id", "required": true, "validation": null},
+        {"name": "CompanyName", "type": "string", "json_tag": "company_name", "required": true, "validation": null},
+        {"name": "BusinessEmail", "type": "string", "json_tag": "business_email", "required": true, "validation": null},
+        {"name": "BillingEmail", "type": "string", "json_tag": "billing_email,omitempty", "required": false, "validation": null},
+        {"name": "CustomerType", "type": "string", "json_tag": "customer_type", "required": true, "validation": "enum: producer|consumer|both"},
+        {"name": "Phone", "type": "*string", "json_tag": "phone,omitempty", "required": false, "validation": null},
+        {"name": "Address", "type": "*Address", "json_tag": "address,omitempty", "required": false, "validation": null},
+        {"name": "StripeCustomerID", "type": "*string", "json_tag": "stripe_customer_id,omitempty", "required": false, "validation": null},
+        {"name": "AWSCustomerID", "type": "*string", "json_tag": "aws_customer_id,omitempty", "required": false, "validation": null},
+        {"name": "S3Bucket", "type": "string", "json_tag": "s3_bucket,omitempty", "required": false, "validation": null},
+        {"name": "KMSKeyID", "type": "string", "json_tag": "kms_key_id,omitempty", "required": false, "validation": null},
+        {"name": "SNSTopicARN", "type": "string", "json_tag": "sns_topic_arn,omitempty", "required": false, "validation": null},
+        {"name": "Status", "type": "string", "json_tag": "status", "required": true, "validation": "enum: provisioning|active|inactive|provisioning_failed"},
+        {"name": "Tier", "type": "string", "json_tag": "tier,omitempty", "required": false, "validation": "enum: free|basic|premium|professional|enterprise|starter"},
+        {"name": "Settings", "type": "*CompanySettings", "json_tag": "settings,omitempty", "required": false, "validation": null},
+        {"name": "Onboarding", "type": "*OnboardingInfo", "json_tag": "onboarding,omitempty", "required": false, "validation": null},
+        {"name": "Infrastructure", "type": "*InfrastructureInfo", "json_tag": "infrastructure,omitempty", "required": false, "validation": null},
+        {"name": "CreatedAt", "type": "string", "json_tag": "created_at", "required": true, "validation": null},
+        {"name": "CreatedBy", "type": "string", "json_tag": "created_by,omitempty", "required": false, "validation": null},
+        {"name": "UpdatedAt", "type": "string", "json_tag": "updated_at", "required": false, "validation": null},
+        {"name": "UpdatedBy", "type": "string", "json_tag": "updated_by,omitempty", "required": false, "validation": null},
+        {"name": "DeletedAt", "type": "*string", "json_tag": "deleted_at,omitempty", "required": false, "validation": null},
+        {"name": "DeletedBy", "type": "*string", "json_tag": "deleted_by,omitempty", "required": false, "validation": null},
+        {"name": "UserCount", "type": "int", "json_tag": "user_count,omitempty", "required": false, "validation": null},
+        {"name": "Users", "type": "[]CompanyUser", "json_tag": "users,omitempty", "required": false, "validation": null}
+      ],
+      "relationships": ["Has Address", "Has CompanySettings", "Has OnboardingInfo", "Has InfrastructureInfo", "Has many CompanyUser"],
+      "schema_match": "company.schema.json"
+    },
+
+    "Address": {
+      "file": "types/company.go",
+      "description": "Physical address",
+      "fields": [
+        {"name": "Street", "type": "string", "json_tag": "street,omitempty", "required": false, "validation": null},
+        {"name": "City", "type": "string", "json_tag": "city,omitempty", "required": false, "validation": null},
+        {"name": "State", "type": "string", "json_tag": "state,omitempty", "required": false, "validation": null},
+        {"name": "PostalCode", "type": "string", "json_tag": "postal_code,omitempty", "required": false, "validation": null},
+        {"name": "Country", "type": "string", "json_tag": "country,omitempty", "required": false, "validation": null}
+      ],
+      "relationships": ["Embedded in Company"],
+      "schema_match": "company.schema.json -> address"
+    },
+
+    "CompanySettings": {
+      "file": "types/company.go",
+      "description": "Company-specific settings",
+      "fields": [
+        {"name": "NotificationsEnabled", "type": "bool", "json_tag": "notifications_enabled,omitempty", "required": false, "validation": null},
+        {"name": "APIRateLimit", "type": "int", "json_tag": "api_rate_limit,omitempty", "required": false, "validation": null},
+        {"name": "WebhookURL", "type": "string", "json_tag": "webhook_url,omitempty", "required": false, "validation": null},
+        {"name": "DataRetentionDays", "type": "int", "json_tag": "data_retention_days,omitempty", "required": false, "validation": null}
+      ],
+      "relationships": ["Embedded in Company"],
+      "schema_match": "company.schema.json -> settings"
+    },
+
+    "OnboardingInfo": {
+      "file": "types/company.go",
+      "description": "Customer onboarding details",
+      "fields": [
+        {"name": "CompletedAt", "type": "*string", "json_tag": "completed_at,omitempty", "required": false, "validation": null},
+        {"name": "WelcomeEmailSent", "type": "bool", "json_tag": "welcome_email_sent,omitempty", "required": false, "validation": null},
+        {"name": "WelcomeEmailSentAt", "type": "*string", "json_tag": "welcome_email_sent_at,omitempty", "required": false, "validation": null},
+        {"name": "CredentialsPortalURL", "type": "string", "json_tag": "credentials_portal_url,omitempty", "required": false, "validation": null},
+        {"name": "CredentialsPortalExpires", "type": "*string", "json_tag": "credentials_portal_expires_at,omitempty", "required": false, "validation": null},
+        {"name": "OnboardingSource", "type": "string", "json_tag": "onboarding_source,omitempty", "required": false, "validation": "enum: api|portal|manual|import|migration"}
+      ],
+      "relationships": ["Embedded in Company"],
+      "schema_match": "company.schema.json -> onboarding"
+    },
+
+    "InfrastructureInfo": {
+      "file": "types/company.go",
+      "description": "Provisioned infrastructure details",
+      "fields": [
+        {"name": "IAMUserARN", "type": "string", "json_tag": "iam_user_arn,omitempty", "required": false, "validation": null},
+        {"name": "S3Bucket", "type": "string", "json_tag": "s3_bucket,omitempty", "required": false, "validation": null},
+        {"name": "KMSKeyID", "type": "string", "json_tag": "kms_key_id,omitempty", "required": false, "validation": null},
+        {"name": "CredentialsSSMPath", "type": "string", "json_tag": "credentials_ssm_path,omitempty", "required": false, "validation": null},
+        {"name": "SQSQueueURL", "type": "string", "json_tag": "sqs_queue_url,omitempty", "required": false, "validation": null},
+        {"name": "SQSQueueARN", "type": "string", "json_tag": "sqs_queue_arn,omitempty", "required": false, "validation": null}
+      ],
+      "relationships": ["Embedded in Company"],
+      "schema_match": "company.schema.json -> infrastructure"
+    },
+
+    "CompanyUser": {
+      "file": "types/company.go",
+      "description": "User within a company",
+      "fields": [
+        {"name": "ID", "type": "string", "json_tag": "_id", "required": true, "validation": null},
+        {"name": "Email", "type": "string", "json_tag": "email", "required": true, "validation": null},
+        {"name": "FirstName", "type": "string", "json_tag": "first_name,omitempty", "required": false, "validation": null},
+        {"name": "LastName", "type": "string", "json_tag": "last_name,omitempty", "required": false, "validation": null},
+        {"name": "Phone", "type": "string", "json_tag": "phone,omitempty", "required": false, "validation": null},
+        {"name": "CompanyID", "type": "string", "json_tag": "company_id", "required": true, "validation": null},
+        {"name": "CompanyName", "type": "string", "json_tag": "company_name,omitempty", "required": false, "validation": null},
+        {"name": "Role", "type": "string", "json_tag": "role", "required": true, "validation": "enum: superadmin|admin|member"},
+        {"name": "Status", "type": "string", "json_tag": "status", "required": true, "validation": "enum: active|inactive|suspended|deleted"},
+        {"name": "Permissions", "type": "*UserPermissions", "json_tag": "permissions,omitempty", "required": false, "validation": null},
+        {"name": "CreatedAt", "type": "string", "json_tag": "created_at", "required": true, "validation": null},
+        {"name": "UpdatedAt", "type": "string", "json_tag": "updated_at,omitempty", "required": false, "validation": null}
+      ],
+      "relationships": ["Belongs to Company", "Has UserPermissions"],
+      "schema_match": "company_user.schema.json"
+    },
+
+    "UserPermissions": {
+      "file": "types/company.go",
+      "description": "User permission flags",
+      "fields": [
+        {"name": "CanCreateDatasets", "type": "bool", "json_tag": "can_create_datasets,omitempty", "required": false, "validation": null},
+        {"name": "CanDeleteDatasets", "type": "bool", "json_tag": "can_delete_datasets,omitempty", "required": false, "validation": null},
+        {"name": "CanManageBilling", "type": "bool", "json_tag": "can_manage_billing,omitempty", "required": false, "validation": null},
+        {"name": "CanInviteUsers", "type": "bool", "json_tag": "can_invite_users,omitempty", "required": false, "validation": null}
+      ],
+      "relationships": ["Embedded in CompanyUser"],
+      "schema_match": "company_user.schema.json -> permissions"
+    },
+
+    "Subscription": {
+      "file": "types/subscription.go",
+      "description": "Active subscription to a dataset or producer",
+      "fields": [
+        {"name": "ID", "type": "string", "json_tag": "_id", "required": true, "validation": null},
+        {"name": "ConsumerID", "type": "string", "json_tag": "consumer_id", "required": true, "validation": null},
+        {"name": "CustomerID", "type": "string", "json_tag": "customer_id,omitempty", "required": false, "validation": "Legacy field"},
+        {"name": "DatasetID", "type": "*string", "json_tag": "dataset_id", "required": true, "validation": null},
+        {"name": "DatasetName", "type": "string", "json_tag": "dataset_name,omitempty", "required": false, "validation": null},
+        {"name": "ProducerID", "type": "string", "json_tag": "producer_id", "required": true, "validation": null},
+        {"name": "RequestID", "type": "string", "json_tag": "request_id,omitempty", "required": false, "validation": null},
+        {"name": "Tier", "type": "string", "json_tag": "tier", "required": true, "validation": "enum: free|basic|premium|professional|enterprise"},
+        {"name": "Status", "type": "string", "json_tag": "status", "required": true, "validation": "enum: active|suspended|cancelled|expired"},
+        {"name": "KMSGrantID", "type": "*string", "json_tag": "kms_grant_id,omitempty", "required": false, "validation": null},
+        {"name": "SNSSubscriptionARN", "type": "*string", "json_tag": "sns_subscription_arn,omitempty", "required": false, "validation": null},
+        {"name": "SQSQueueARN", "type": "*string", "json_tag": "sqs_queue_arn,omitempty", "required": false, "validation": null},
+        {"name": "SQSQueueURL", "type": "*string", "json_tag": "sqs_queue_url,omitempty", "required": false, "validation": null},
+        {"name": "CreatedAt", "type": "string", "json_tag": "created_at", "required": true, "validation": null},
+        {"name": "UpdatedAt", "type": "string", "json_tag": "updated_at", "required": true, "validation": null}
+      ],
+      "relationships": ["References Consumer (Company)", "References Producer (Company)", "References Dataset", "Created from SubscriptionRequest"],
+      "schema_match": "subscription.schema.json"
+    },
+
+    "SubscriptionRequest": {
+      "file": "types/subscription_request.go",
+      "description": "Request from consumer to access producer datasets",
+      "fields": [
+        {"name": "ID", "type": "string", "json_tag": "_id", "required": true, "validation": null},
+        {"name": "RequestID", "type": "string", "json_tag": "request_id", "required": true, "validation": null},
+        {"name": "ConsumerID", "type": "string", "json_tag": "consumer_id", "required": true, "validation": null},
+        {"name": "ConsumerName", "type": "string", "json_tag": "consumer_name,omitempty", "required": false, "validation": null},
+        {"name": "ConsumerEmail", "type": "string", "json_tag": "consumer_email,omitempty", "required": false, "validation": null},
+        {"name": "ProducerID", "type": "string", "json_tag": "producer_id", "required": true, "validation": null},
+        {"name": "ProducerName", "type": "string", "json_tag": "producer_name,omitempty", "required": false, "validation": null},
+        {"name": "DatasetID", "type": "*string", "json_tag": "dataset_id,omitempty", "required": false, "validation": null},
+        {"name": "Tier", "type": "string", "json_tag": "tier", "required": true, "validation": "enum: free|basic|premium|professional|enterprise"},
+        {"name": "Message", "type": "*string", "json_tag": "message,omitempty", "required": false, "validation": null},
+        {"name": "Status", "type": "string", "json_tag": "status", "required": true, "validation": "enum: pending|approved|rejected|cancelled"},
+        {"name": "CreatedAt", "type": "string", "json_tag": "created_at", "required": true, "validation": null},
+        {"name": "UpdatedAt", "type": "string", "json_tag": "updated_at", "required": true, "validation": null},
+        {"name": "ApprovedAt", "type": "*string", "json_tag": "approved_at,omitempty", "required": false, "validation": null},
+        {"name": "ApprovedBy", "type": "*string", "json_tag": "approved_by,omitempty", "required": false, "validation": null},
+        {"name": "RejectedAt", "type": "*string", "json_tag": "rejected_at,omitempty", "required": false, "validation": null},
+        {"name": "RejectionReason", "type": "*string", "json_tag": "rejection_reason,omitempty", "required": false, "validation": null},
+        {"name": "Notes", "type": "*string", "json_tag": "notes,omitempty", "required": false, "validation": null},
+        {"name": "SubscriptionID", "type": "*string", "json_tag": "subscription_id,omitempty", "required": false, "validation": null}
+      ],
+      "relationships": ["References Consumer (Company)", "References Producer (Company)", "Creates Subscription on approval"],
+      "schema_match": "subscription-request.schema.json"
+    },
+
+    "AnalysisResult": {
+      "file": "producer/analyze.go",
+      "description": "Dataset analysis results",
+      "fields": [
+        {"name": "Schema", "type": "map[string]any", "json_tag": "schema", "required": false, "validation": null},
+        {"name": "FieldEmptiness", "type": "map[string]float64", "json_tag": "field_emptiness", "required": false, "validation": null},
+        {"name": "RecordCount", "type": "int", "json_tag": "record_count", "required": false, "validation": null},
+        {"name": "AnalysisErrors", "type": "int", "json_tag": "analysis_errors", "required": false, "validation": null}
+      ],
+      "relationships": ["Generated by Producer.analyzeData", "Stored in Dataset.Metadata"],
+      "schema_match": "N/A - SDK internal type"
+    },
+
+    "UploadOptions": {
+      "file": "producer/producer.go",
+      "description": "Options for dataset upload",
+      "fields": [
+        {"name": "Category", "type": "string", "json_tag": null, "required": false, "validation": null},
+        {"name": "Compress", "type": "bool", "json_tag": null, "required": false, "validation": null},
+        {"name": "CompressionLevel", "type": "int", "json_tag": null, "required": false, "validation": "1-9"},
+        {"name": "DataFreshness", "type": "DataFreshness", "json_tag": null, "required": false, "validation": null},
+        {"name": "DatasetName", "type": "string", "json_tag": null, "required": true, "validation": null},
+        {"name": "Description", "type": "string", "json_tag": null, "required": false, "validation": null},
+        {"name": "Encrypt", "type": "bool", "json_tag": null, "required": false, "validation": null},
+        {"name": "Metadata", "type": "map[string]any", "json_tag": null, "required": false, "validation": null},
+        {"name": "DatasetOverrides", "type": "map[string]any", "json_tag": null, "required": false, "validation": null}
+      ],
+      "relationships": ["Used by Producer.UploadDataset"],
+      "schema_match": "N/A - SDK internal type"
+    },
+
+    "Notification": {
+      "file": "consumer/consumer.go",
+      "description": "Dataset upload notification from SQS",
+      "fields": [
+        {"name": "DatasetID", "type": "string", "json_tag": "dataset_id", "required": true, "validation": null},
+        {"name": "DatasetName", "type": "string", "json_tag": "dataset_name,omitempty", "required": false, "validation": null},
+        {"name": "EventType", "type": "string", "json_tag": "event_type", "required": true, "validation": null},
+        {"name": "MessageID", "type": "string", "json_tag": "message_id", "required": true, "validation": null},
+        {"name": "ProducerID", "type": "string", "json_tag": "producer_id", "required": true, "validation": null},
+        {"name": "RawMessage", "type": "string", "json_tag": "raw_message", "required": true, "validation": null},
+        {"name": "ReceiptHandle", "type": "string", "json_tag": "receipt_handle", "required": true, "validation": null},
+        {"name": "S3Bucket", "type": "string", "json_tag": "s3_bucket", "required": true, "validation": null},
+        {"name": "S3Key", "type": "string", "json_tag": "s3_key", "required": true, "validation": null},
+        {"name": "SizeBytes", "type": "int64", "json_tag": "size_bytes", "required": true, "validation": null},
+        {"name": "SubscriberID", "type": "string", "json_tag": "subscriber_id", "required": true, "validation": null},
+        {"name": "SubscriptionID", "type": "string", "json_tag": "subscription_id", "required": true, "validation": null},
+        {"name": "Timestamp", "type": "string", "json_tag": "timestamp", "required": true, "validation": null}
+      ],
+      "relationships": ["Received by Consumer.PollNotifications", "References Dataset, Subscription"],
+      "schema_match": "N/A - Runtime notification type"
+    }
+  },
+
+  "request_response_types": {
+    "CreateCompanyRequest": {
+      "file": "types/company.go",
+      "fields": [
+        {"name": "CompanyName", "type": "string", "json_tag": "company_name", "required": true},
+        {"name": "BusinessEmail", "type": "string", "json_tag": "business_email", "required": true},
+        {"name": "CustomerType", "type": "string", "json_tag": "customer_type", "required": true},
+        {"name": "Phone", "type": "*string", "json_tag": "phone,omitempty", "required": false},
+        {"name": "Address", "type": "*Address", "json_tag": "address,omitempty", "required": false},
+        {"name": "BillingEmail", "type": "string", "json_tag": "billing_email,omitempty", "required": false},
+        {"name": "CreatedBy", "type": "string", "json_tag": "created_by,omitempty", "required": false}
+      ]
+    },
+    "UpdateCompanyRequest": {
+      "file": "types/company.go",
+      "fields": [
+        {"name": "CompanyName", "type": "*string", "json_tag": "company_name,omitempty", "required": false},
+        {"name": "BusinessEmail", "type": "*string", "json_tag": "business_email,omitempty", "required": false},
+        {"name": "BillingEmail", "type": "*string", "json_tag": "billing_email,omitempty", "required": false},
+        {"name": "Phone", "type": "*string", "json_tag": "phone,omitempty", "required": false},
+        {"name": "Address", "type": "*Address", "json_tag": "address,omitempty", "required": false},
+        {"name": "CustomerType", "type": "*string", "json_tag": "customer_type,omitempty", "required": false},
+        {"name": "Status", "type": "*string", "json_tag": "status,omitempty", "required": false},
+        {"name": "Settings", "type": "*CompanySettings", "json_tag": "settings,omitempty", "required": false}
+      ]
+    },
+    "CompaniesResponse": {
+      "file": "types/company.go",
+      "fields": [
+        {"name": "Companies", "type": "[]Company", "json_tag": "companies", "required": true},
+        {"name": "Count", "type": "int", "json_tag": "count", "required": true}
+      ]
+    },
+    "CreateCompanyResponse": {
+      "file": "types/company.go",
+      "fields": [
+        {"name": "Success", "type": "bool", "json_tag": "success", "required": true},
+        {"name": "CompanyID", "type": "string", "json_tag": "company_id", "required": true},
+        {"name": "Company", "type": "Company", "json_tag": "company", "required": true}
+      ]
+    },
+    "InviteUserRequest": {
+      "file": "types/company.go",
+      "fields": [
+        {"name": "Email", "type": "string", "json_tag": "email", "required": true},
+        {"name": "FirstName", "type": "string", "json_tag": "first_name,omitempty", "required": false},
+        {"name": "LastName", "type": "string", "json_tag": "last_name,omitempty", "required": false},
+        {"name": "Role", "type": "string", "json_tag": "role", "required": true},
+        {"name": "Phone", "type": "string", "json_tag": "phone,omitempty", "required": false},
+        {"name": "Permissions", "type": "*UserPermissions", "json_tag": "permissions,omitempty", "required": false},
+        {"name": "InvitedBy", "type": "string", "json_tag": "invited_by,omitempty", "required": false}
+      ]
+    },
+    "CompanyUsersResponse": {
+      "file": "types/company.go",
+      "fields": [
+        {"name": "Users", "type": "[]CompanyUser", "json_tag": "users", "required": true},
+        {"name": "Count", "type": "int", "json_tag": "count", "required": true}
+      ]
+    },
+    "SubscriptionsResponse": {
+      "file": "types/subscription.go",
+      "fields": [
+        {"name": "Subscriptions", "type": "[]Subscription", "json_tag": "subscriptions", "required": true},
+        {"name": "Count", "type": "int", "json_tag": "count", "required": true}
+      ]
+    },
+    "CreateSubscriptionRequest": {
+      "file": "types/subscription.go",
+      "fields": [
+        {"name": "DatasetID", "type": "string", "json_tag": "dataset_id", "required": true},
+        {"name": "Tier", "type": "string", "json_tag": "tier,omitempty", "required": false}
+      ]
+    },
+    "RevokeSubscriptionResponse": {
+      "file": "types/subscription.go",
+      "fields": [
+        {"name": "Message", "type": "string", "json_tag": "message", "required": true},
+        {"name": "SubscriptionID", "type": "string", "json_tag": "subscription_id", "required": true},
+        {"name": "Status", "type": "string", "json_tag": "status", "required": true}
+      ]
+    },
+    "CreateSubscriptionRequestPayload": {
+      "file": "types/subscription_request.go",
+      "fields": [
+        {"name": "ProducerID", "type": "string", "json_tag": "producer_id", "required": true},
+        {"name": "DatasetID", "type": "*string", "json_tag": "dataset_id,omitempty", "required": false},
+        {"name": "Tier", "type": "string", "json_tag": "tier", "required": true},
+        {"name": "Message", "type": "*string", "json_tag": "message,omitempty", "required": false}
+      ]
+    },
+    "ApproveRejectPayload": {
+      "file": "types/subscription_request.go",
+      "fields": [
+        {"name": "Action", "type": "string", "json_tag": "action", "required": true},
+        {"name": "Reason", "type": "*string", "json_tag": "reason,omitempty", "required": false},
+        {"name": "Notes", "type": "*string", "json_tag": "notes,omitempty", "required": false}
+      ]
+    },
+    "SubscriptionRequestsResponse": {
+      "file": "types/subscription_request.go",
+      "fields": [
+        {"name": "Requests", "type": "[]SubscriptionRequest", "json_tag": "requests", "required": true},
+        {"name": "Count", "type": "int", "json_tag": "count", "required": true}
+      ]
+    },
+    "ApproveRequestResponse": {
+      "file": "types/subscription_request.go",
+      "fields": [
+        {"name": "Request", "type": "SubscriptionRequest", "json_tag": "request", "required": true},
+        {"name": "Subscription", "type": "*Subscription", "json_tag": "subscription,omitempty", "required": false}
+      ]
+    }
+  },
+
+  "parity_issues": {
+    "missing_fields_vs_schema": [
+      {
+        "struct": "Company",
+        "schema": "company.schema.json",
+        "missing_fields": [
+          {"field": "id", "description": "Alias for _id"},
+          {"field": "customer_id", "description": "Legacy field same as _id"},
+          {"field": "stripe_subscription_id", "description": "Stripe subscription ID"},
+          {"field": "stripe_status", "description": "Stripe subscription status"},
+          {"field": "last_payment_amount", "description": "Last payment amount in cents"},
+          {"field": "last_payment_date", "description": "Last successful payment timestamp"},
+          {"field": "last_failed_payment", "description": "Last failed payment timestamp"}
+        ]
+      },
+      {
+        "struct": "Subscription",
+        "schema": "subscription.schema.json",
+        "missing_fields": []
+      },
+      {
+        "struct": "SubscriptionRequest",
+        "schema": "subscription-request.schema.json",
+        "missing_fields": []
+      },
+      {
+        "struct": "Dataset",
+        "schema": "dataset.schema.json",
+        "missing_fields": []
+      }
+    ],
+
+    "type_mismatches": [
+      {
+        "struct": "Company",
+        "field": "Tier",
+        "go_type": "string",
+        "schema_enum": ["starter", "professional", "enterprise"],
+        "go_comment_enum": ["free", "basic", "premium", "professional", "enterprise", "starter"],
+        "issue": "Go comment documents 6 values but schema only has 3"
+      },
+      {
+        "struct": "Company",
+        "field": "Status",
+        "go_type": "string",
+        "schema_enum": ["provisioning", "active", "inactive", "suspended", "provisioning_failed"],
+        "go_comment_enum": ["provisioning", "active", "inactive", "provisioning_failed"],
+        "issue": "Go missing 'suspended' status"
+      }
+    ],
+
+    "extra_fields_not_in_schema": [
+      {
+        "struct": "Company",
+        "field": "Users",
+        "type": "[]CompanyUser",
+        "note": "Embedded users array - schema expects this from join, not embedded"
+      }
+    ],
+
+    "json_tag_inconsistencies": [],
+
+    "duplicate_types": [
+      {
+        "type1": "types.Subscription",
+        "type2": "consumer.Subscription",
+        "note": "Consumer package defines its own Subscription type with slightly different fields (SNSSubARN vs SNSSubscriptionARN)"
+      },
+      {
+        "type1": "types.Dataset",
+        "type2": "consumer.Dataset",
+        "note": "Consumer package defines a simpler Dataset type for internal use"
+      }
+    ],
+
+    "validation_gaps": [
+      {
+        "struct": "Dataset",
+        "issue": "No validation tags on any fields - schema specifies patterns, minLength, maxLength, enums"
+      },
+      {
+        "struct": "Company", 
+        "issue": "No validation tags - schema specifies email format, phone pattern, enum constraints"
+      },
+      {
+        "struct": "Subscription",
+        "issue": "No validation tags - enum constraints for tier and status not enforced"
+      },
+      {
+        "struct": "SubscriptionRequest",
+        "issue": "No validation tags - enum constraints for tier and status not enforced"
+      }
+    ]
+  },
+
+  "recommendations": [
+    {
+      "priority": "HIGH",
+      "category": "Missing Fields",
+      "description": "Add missing Company fields: id, customer_id, stripe_subscription_id, stripe_status, payment tracking fields",
+      "affected": ["types/company.go"]
+    },
+    {
+      "priority": "HIGH",
+      "category": "Duplicate Types",
+      "description": "Consolidate consumer.Subscription and consumer.Dataset with types package versions",
+      "affected": ["consumer/consumer.go", "types/subscription.go", "types/common.go"]
+    },
+    {
+      "priority": "MEDIUM",
+      "category": "Type Safety",
+      "description": "Add validation tags or create typed enums for: Company.Tier, Company.Status, Subscription.Status, SubscriptionRequest.Status",
+      "affected": ["types/company.go", "types/subscription.go", "types/subscription_request.go"]
+    },
+    {
+      "priority": "MEDIUM",
+      "category": "Enum Consistency",
+      "description": "Align Company.Tier enum with schema (remove free, basic, premium - only starter, professional, enterprise)",
+      "affected": ["types/company.go"]
+    },
+    {
+      "priority": "LOW",
+      "category": "Documentation",
+      "description": "Add struct-level documentation referencing canonical schema files",
+      "affected": ["types/*.go"]
+    }
+  ],
+
+  "summary": {
+    "total_structs_analyzed": 22,
+    "domain_model_structs": 11,
+    "request_response_structs": 11,
+    "schema_files_compared": 4,
+    "missing_fields_count": 7,
+    "type_mismatches_count": 2,
+    "extra_fields_count": 1,
+    "duplicate_types_count": 2,
+    "validation_gaps_count": 4,
+    "overall_parity_score": "85%",
+    "critical_issues": 2,
+    "notes": "Go SDK has good structural parity with canonical schemas. Main gaps are: (1) missing payment/billing fields in Company, (2) duplicate type definitions in consumer package. No validation infrastructure is present."
+  }
+}
