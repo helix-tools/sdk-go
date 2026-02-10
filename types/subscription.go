@@ -9,7 +9,7 @@ type Subscription struct {
 	DatasetName      string  `json:"dataset_name,omitempty"`
 	ProducerID       string  `json:"producer_id"`
 	RequestID        string  `json:"request_id,omitempty"`
-	Tier             string  `json:"tier"` // "free", "basic", "premium", "professional", "enterprise"
+	Tier             string  `json:"tier"` // "basic", "professional", "enterprise"
 	Status           string  `json:"status"` // "active", "suspended", "cancelled", "expired"
 	KMSGrantID       *string `json:"kms_grant_id,omitempty"`
 	SNSSubscriptionARN *string `json:"sns_subscription_arn,omitempty"`
