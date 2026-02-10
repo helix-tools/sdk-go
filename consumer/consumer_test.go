@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+
+	"github.com/helix-tools/sdk-go/types"
 )
 
 // TestSubscriptionUnmarshalPreservesExtendedFields ensures Subscription captures metadata new consumers rely on.
@@ -228,5 +230,247 @@ func TestNotificationParsingPreviouslyFailingCase(t *testing.T) {
 
 	if result.EventType != "dataset_updated" {
 		t.Errorf("expected event_type 'dataset_updated', got '%s'", result.EventType)
+	}
+}
+
+// TestCreateSubscriptionRequestPayloadMarshal tests that the payload is correctly marshaled.
+func TestCreateSubscriptionRequestPayloadMarshal(t *testing.T) {
+	datasetID := "dataset-123"
+	message := "Please grant me access"
+
+	payload := types.CreateSubscriptionRequestPayload{
+		ProducerID: "company-456",
+		DatasetID:  &datasetID,
+		Tier:       "premium",
+		Message:    &message,
+	}
+
+	jsonBytes, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("failed to marshal payload: %v", err)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(jsonBytes, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	if parsed["producer_id"] != "company-456" {
+		t.Errorf("expected producer_id 'company-456', got '%v'", parsed["producer_id"])
+	}
+
+	if parsed["dataset_id"] != "dataset-123" {
+		t.Errorf("expected dataset_id 'dataset-123', got '%v'", parsed["dataset_id"])
+	}
+
+	if parsed["tier"] != "premium" {
+		t.Errorf("expected tier 'premium', got '%v'", parsed["tier"])
+	}
+
+	if parsed["message"] != "Please grant me access" {
+		t.Errorf("expected message 'Please grant me access', got '%v'", parsed["message"])
+	}
+}
+
+// TestCreateSubscriptionRequestPayloadWithoutOptional tests payload without optional fields.
+func TestCreateSubscriptionRequestPayloadWithoutOptional(t *testing.T) {
+	payload := types.CreateSubscriptionRequestPayload{
+		ProducerID: "company-456",
+		Tier:       "basic",
+	}
+
+	jsonBytes, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("failed to marshal payload: %v", err)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(jsonBytes, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	if parsed["producer_id"] != "company-456" {
+		t.Errorf("expected producer_id 'company-456', got '%v'", parsed["producer_id"])
+	}
+
+	if parsed["tier"] != "basic" {
+		t.Errorf("expected tier 'basic', got '%v'", parsed["tier"])
+	}
+
+	// Optional fields should be omitted when nil
+	if _, exists := parsed["dataset_id"]; exists {
+		t.Errorf("dataset_id should be omitted when nil")
+	}
+
+	if _, exists := parsed["message"]; exists {
+		t.Errorf("message should be omitted when nil")
+	}
+}
+
+// TestSubscriptionRequestUnmarshal tests unmarshaling a subscription request response.
+func TestSubscriptionRequestUnmarshal(t *testing.T) {
+	responseJSON := `{
+		"_id": "req-123",
+		"request_id": "req-123",
+		"consumer_id": "customer-111",
+		"consumer_name": "Test Consumer",
+		"consumer_email": "test@example.com",
+		"producer_id": "company-456",
+		"producer_name": "Test Producer",
+		"dataset_id": "dataset-789",
+		"tier": "premium",
+		"message": "Please grant access",
+		"status": "pending",
+		"created_at": "2024-01-01T00:00:00Z",
+		"updated_at": "2024-01-02T00:00:00Z"
+	}`
+
+	var request types.SubscriptionRequest
+	if err := json.Unmarshal([]byte(responseJSON), &request); err != nil {
+		t.Fatalf("failed to unmarshal subscription request: %v", err)
+	}
+
+	if request.ID != "req-123" {
+		t.Errorf("expected ID 'req-123', got '%s'", request.ID)
+	}
+
+	if request.RequestID != "req-123" {
+		t.Errorf("expected RequestID 'req-123', got '%s'", request.RequestID)
+	}
+
+	if request.ConsumerID != "customer-111" {
+		t.Errorf("expected ConsumerID 'customer-111', got '%s'", request.ConsumerID)
+	}
+
+	if request.ProducerID != "company-456" {
+		t.Errorf("expected ProducerID 'company-456', got '%s'", request.ProducerID)
+	}
+
+	if request.DatasetID == nil || *request.DatasetID != "dataset-789" {
+		t.Errorf("expected DatasetID 'dataset-789', got '%v'", request.DatasetID)
+	}
+
+	if request.Tier != "premium" {
+		t.Errorf("expected Tier 'premium', got '%s'", request.Tier)
+	}
+
+	if request.Message == nil || *request.Message != "Please grant access" {
+		t.Errorf("expected Message 'Please grant access', got '%v'", request.Message)
+	}
+
+	if request.Status != "pending" {
+		t.Errorf("expected Status 'pending', got '%s'", request.Status)
+	}
+}
+
+// TestSubscriptionRequestUnmarshalApproved tests unmarshaling an approved request.
+func TestSubscriptionRequestUnmarshalApproved(t *testing.T) {
+	responseJSON := `{
+		"_id": "req-123",
+		"request_id": "req-123",
+		"consumer_id": "customer-111",
+		"producer_id": "company-456",
+		"tier": "basic",
+		"status": "approved",
+		"approved_at": "2024-01-03T00:00:00Z",
+		"approved_by": "admin-user",
+		"subscription_id": "sub-456",
+		"notes": "Approved for Q1 trial",
+		"created_at": "2024-01-01T00:00:00Z",
+		"updated_at": "2024-01-03T00:00:00Z"
+	}`
+
+	var request types.SubscriptionRequest
+	if err := json.Unmarshal([]byte(responseJSON), &request); err != nil {
+		t.Fatalf("failed to unmarshal approved subscription request: %v", err)
+	}
+
+	if request.Status != "approved" {
+		t.Errorf("expected Status 'approved', got '%s'", request.Status)
+	}
+
+	if request.ApprovedAt == nil || *request.ApprovedAt != "2024-01-03T00:00:00Z" {
+		t.Errorf("expected ApprovedAt '2024-01-03T00:00:00Z', got '%v'", request.ApprovedAt)
+	}
+
+	if request.ApprovedBy == nil || *request.ApprovedBy != "admin-user" {
+		t.Errorf("expected ApprovedBy 'admin-user', got '%v'", request.ApprovedBy)
+	}
+
+	if request.SubscriptionID == nil || *request.SubscriptionID != "sub-456" {
+		t.Errorf("expected SubscriptionID 'sub-456', got '%v'", request.SubscriptionID)
+	}
+
+	if request.Notes == nil || *request.Notes != "Approved for Q1 trial" {
+		t.Errorf("expected Notes 'Approved for Q1 trial', got '%v'", request.Notes)
+	}
+}
+
+// TestSubscriptionRequestUnmarshalRejected tests unmarshaling a rejected request.
+func TestSubscriptionRequestUnmarshalRejected(t *testing.T) {
+	responseJSON := `{
+		"_id": "req-123",
+		"request_id": "req-123",
+		"consumer_id": "customer-111",
+		"producer_id": "company-456",
+		"tier": "enterprise",
+		"status": "rejected",
+		"rejected_at": "2024-01-03T00:00:00Z",
+		"rejection_reason": "Insufficient credentials",
+		"created_at": "2024-01-01T00:00:00Z",
+		"updated_at": "2024-01-03T00:00:00Z"
+	}`
+
+	var request types.SubscriptionRequest
+	if err := json.Unmarshal([]byte(responseJSON), &request); err != nil {
+		t.Fatalf("failed to unmarshal rejected subscription request: %v", err)
+	}
+
+	if request.Status != "rejected" {
+		t.Errorf("expected Status 'rejected', got '%s'", request.Status)
+	}
+
+	if request.RejectedAt == nil || *request.RejectedAt != "2024-01-03T00:00:00Z" {
+		t.Errorf("expected RejectedAt '2024-01-03T00:00:00Z', got '%v'", request.RejectedAt)
+	}
+
+	if request.RejectionReason == nil || *request.RejectionReason != "Insufficient credentials" {
+		t.Errorf("expected RejectionReason 'Insufficient credentials', got '%v'", request.RejectionReason)
+	}
+}
+
+// TestCreateSubscriptionRequestInputConversion tests converting input to payload.
+func TestCreateSubscriptionRequestInputConversion(t *testing.T) {
+	datasetID := "dataset-abc"
+	message := "Request access for analytics"
+
+	input := types.CreateSubscriptionRequestInput{
+		ProducerID: "company-789",
+		DatasetID:  &datasetID,
+		Tier:       "professional",
+		Message:    &message,
+	}
+
+	payload := types.CreateSubscriptionRequestPayload{
+		ProducerID: input.ProducerID,
+		DatasetID:  input.DatasetID,
+		Tier:       input.Tier,
+		Message:    input.Message,
+	}
+
+	if payload.ProducerID != "company-789" {
+		t.Errorf("expected ProducerID 'company-789', got '%s'", payload.ProducerID)
+	}
+
+	if payload.DatasetID == nil || *payload.DatasetID != "dataset-abc" {
+		t.Errorf("expected DatasetID 'dataset-abc', got '%v'", payload.DatasetID)
+	}
+
+	if payload.Tier != "professional" {
+		t.Errorf("expected Tier 'professional', got '%s'", payload.Tier)
+	}
+
+	if payload.Message == nil || *payload.Message != "Request access for analytics" {
+		t.Errorf("expected Message 'Request access for analytics', got '%v'", payload.Message)
 	}
 }

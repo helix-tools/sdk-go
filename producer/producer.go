@@ -759,3 +759,98 @@ func (p *Producer) RevokeSubscription(ctx context.Context, subscriptionID string
 
 	return nil
 }
+
+// ListSubscriptionRequests lists incoming subscription requests for this producer.
+// Returns requests that match the specified status filter.
+//
+// Parameters:
+//   - status: Filter by request status. Valid values: "pending", "approved", "rejected".
+//     If empty, defaults to "pending".
+//
+// Returns a slice of subscription requests matching the filter.
+func (p *Producer) ListSubscriptionRequests(ctx context.Context, status string) ([]types.SubscriptionRequest, error) {
+	// Default to pending if not specified
+	if status == "" {
+		status = "pending"
+	}
+
+	path := fmt.Sprintf("/v1/producers/subscription-requests?status=%s", url.QueryEscape(status))
+
+	var response types.SubscriptionRequestsResponse
+	if err := p.makeAPIRequest(ctx, http.MethodGet, path, nil, &response); err != nil {
+		return nil, err
+	}
+
+	return response.Requests, nil
+}
+
+// ApproveSubscriptionRequest approves a subscription request from a consumer.
+// This creates the necessary resources (SQS queue, SNS subscription, KMS grants)
+// for the consumer to access the producer's datasets.
+//
+// Parameters:
+//   - requestID: The subscription request ID to approve.
+//   - opts: Optional parameters for approval:
+//   - Notes: Optional internal notes about the approval.
+//   - DatasetID: Optional specific dataset ID to grant access to
+//     (if not provided, uses the dataset from the original request).
+//
+// Returns the updated subscription request with status "approved".
+func (p *Producer) ApproveSubscriptionRequest(ctx context.Context, requestID string, opts *types.ApproveSubscriptionRequestOptions) (*types.SubscriptionRequest, error) {
+	path := fmt.Sprintf("/v1/subscription-requests/%s", url.PathEscape(requestID))
+
+	payload := types.ApproveRejectPayload{
+		Action: "approve",
+	}
+
+	if opts != nil {
+		payload.Notes = opts.Notes
+		// Add dataset_id to payload if provided
+		// Note: The ApproveRejectPayload doesn't have DatasetID, so we need to use a map
+	}
+
+	// Use a map to include optional dataset_id field
+	payloadMap := map[string]any{
+		"action": "approve",
+	}
+	if opts != nil {
+		if opts.Notes != nil {
+			payloadMap["notes"] = *opts.Notes
+		}
+		if opts.DatasetID != nil {
+			payloadMap["dataset_id"] = *opts.DatasetID
+		}
+	}
+
+	var result types.SubscriptionRequest
+	if err := p.makeAPIRequest(ctx, http.MethodPost, path, payloadMap, &result); err != nil {
+		return nil, err
+	}
+
+	return &result, nil
+}
+
+// RejectSubscriptionRequest rejects a subscription request from a consumer.
+//
+// Parameters:
+//   - requestID: The subscription request ID to reject.
+//   - reason: Optional reason for rejection (will be visible to the consumer).
+//
+// Returns the updated subscription request with status "rejected".
+func (p *Producer) RejectSubscriptionRequest(ctx context.Context, requestID string, reason string) (*types.SubscriptionRequest, error) {
+	path := fmt.Sprintf("/v1/subscription-requests/%s", url.PathEscape(requestID))
+
+	payloadMap := map[string]any{
+		"action": "reject",
+	}
+	if reason != "" {
+		payloadMap["reason"] = reason
+	}
+
+	var result types.SubscriptionRequest
+	if err := p.makeAPIRequest(ctx, http.MethodPost, path, payloadMap, &result); err != nil {
+		return nil, err
+	}
+
+	return &result, nil
+}

@@ -49,3 +49,17 @@ type ApproveRequestResponse struct {
 	Request      SubscriptionRequest `json:"request"`
 	Subscription *Subscription       `json:"subscription,omitempty"`
 }
+
+// CreateSubscriptionRequestInput is the input for Consumer.CreateSubscriptionRequest.
+type CreateSubscriptionRequestInput struct {
+	ProducerID string  // Required: ID of the producer to request access from
+	DatasetID  *string // Optional: Specific dataset ID (nil for all-datasets access)
+	Tier       string  // Optional: Subscription tier (defaults to "basic")
+	Message    *string // Optional: Message to the producer
+}
+
+// ApproveSubscriptionRequestOptions contains options for approving a subscription request.
+type ApproveSubscriptionRequestOptions struct {
+	Notes     *string // Optional: Internal notes about the approval
+	DatasetID *string // Optional: Specific dataset ID to grant access to
+}

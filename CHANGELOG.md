@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-02-09
+
+### Added
+- **Consumer Subscription Request**: Added `CreateSubscriptionRequest(ctx, input CreateSubscriptionRequestInput) (*types.SubscriptionRequest, error)` method to Consumer. Allows consumers to request access to a producer's datasets. The producer must approve before access is granted.
+- **Producer Subscription Management**: Added three new methods to Producer for managing subscription requests:
+  - `ListSubscriptionRequests(ctx, status string) ([]types.SubscriptionRequest, error)` - List incoming subscription requests filtered by status (pending/approved/rejected)
+  - `ApproveSubscriptionRequest(ctx, requestID string, opts *ApproveSubscriptionRequestOptions) (*types.SubscriptionRequest, error)` - Approve a consumer's subscription request
+  - `RejectSubscriptionRequest(ctx, requestID string, reason string) (*types.SubscriptionRequest, error)` - Reject a consumer's subscription request
+- **New Types**: Added `CreateSubscriptionRequestInput` and `ApproveSubscriptionRequestOptions` to types package
+- **SDK Parity**: These methods achieve full parity with TypeScript SDK subscription request functionality
+
+### Fixed
+- **Consumer API Signing**: Fixed `makeAPIRequest` in consumer to properly compute SHA256 hash of request body for POST requests. Previously used empty payload hash for all requests, which would fail AWS SigV4 validation on POST/PUT requests with body.
+
+### Tests
+- Added unit tests for subscription request payload marshaling/unmarshaling in `consumer/consumer_test.go`
+- Added unit tests for producer subscription request methods in `producer/subscription_request_test.go`
+
 ## 2026-01-07
 
 ### Added

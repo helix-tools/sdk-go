@@ -13,6 +13,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -486,14 +487,50 @@ func (c *Consumer) ListSubscriptions(ctx context.Context) ([]Subscription, error
 	return response.Subscriptions, nil
 }
 
+// CreateSubscriptionRequest creates a subscription request to access a producer's datasets.
+// The producer must approve the request before the consumer gains access.
+//
+// Parameters:
+//   - input.ProducerID: Required. The ID of the producer to request access from.
+//   - input.DatasetID: Optional. Specific dataset ID (nil for all-datasets access).
+//   - input.Tier: Optional. Subscription tier (defaults to "basic").
+//   - input.Message: Optional. Message to the producer explaining the request.
+//
+// Returns the created subscription request with status "pending".
+func (c *Consumer) CreateSubscriptionRequest(ctx context.Context, input types.CreateSubscriptionRequestInput) (*types.SubscriptionRequest, error) {
+	// Build request payload
+	payload := types.CreateSubscriptionRequestPayload{
+		ProducerID: input.ProducerID,
+		DatasetID:  input.DatasetID,
+		Tier:       input.Tier,
+		Message:    input.Message,
+	}
+
+	// Default tier to "basic" if not specified
+	if payload.Tier == "" {
+		payload.Tier = "basic"
+	}
+
+	var result types.SubscriptionRequest
+	if err := c.makeAPIRequest(ctx, http.MethodPost, "/v1/subscription-requests", payload, &result); err != nil {
+		return nil, err
+	}
+
+	return &result, nil
+}
+
 // makeAPIRequest makes an authenticated API request.
 func (c *Consumer) makeAPIRequest(ctx context.Context, method, path string, body interface{}, result interface{}) error {
 	reqURL := c.APIEndpoint + path
 
-	var reqBody io.Reader
+	var (
+		reqBody  io.Reader
+		jsonData []byte
+	)
 
 	if body != nil {
-		jsonData, err := json.Marshal(body)
+		var err error
+		jsonData, err = json.Marshal(body)
 		if err != nil {
 			return err
 		}
@@ -514,8 +551,16 @@ func (c *Consumer) makeAPIRequest(ctx context.Context, method, path string, body
 		return err
 	}
 
+	// Calculate payload hash for SigV4
+	payloadHash := emptyPayloadHash
+	if body != nil {
+		// Hash the actual JSON body
+		h := sha256.New()
+		h.Write(jsonData)
+		payloadHash = fmt.Sprintf("%x", h.Sum(nil))
+	}
+
 	signer := v4.NewSigner()
-	payloadHash := emptyPayloadHash // empty body hash.
 	if err := signer.SignHTTP(ctx, creds, req, payloadHash, "execute-api", c.Region, time.Now()); err != nil {
 		return err
 	}
