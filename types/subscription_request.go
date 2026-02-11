@@ -10,7 +10,7 @@ type SubscriptionRequest struct {
 	ProducerID      string  `json:"producer_id"`
 	ProducerName    string  `json:"producer_name,omitempty"`
 	DatasetID       *string `json:"dataset_id,omitempty"` // Null for all-datasets access
-	Tier            string  `json:"tier"` // "free", "basic", "premium", "professional", "enterprise"
+	Tier            string  `json:"tier"` // "basic", "professional", "enterprise"
 	Message         *string `json:"message,omitempty"`
 	Status          string  `json:"status"` // "pending", "approved", "rejected", "cancelled"
 	CreatedAt       string  `json:"created_at"`
