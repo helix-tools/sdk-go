@@ -443,14 +443,30 @@ func (c *Consumer) decompressData(data []byte) ([]byte, error) {
 }
 
 // ListDatasets lists all available datasets.
-func (c *Consumer) ListDatasets(ctx context.Context) ([]Dataset, error) {
+//
+// Parameters:
+//   - producerID: Optional. Filter datasets by producer ID. If not provided, returns all accessible datasets.
+//
+// Example:
+//
+//	// List all datasets
+//	datasets, err := consumer.ListDatasets(ctx)
+//
+//	// List datasets from a specific producer
+//	datasets, err := consumer.ListDatasets(ctx, "company-123456")
+func (c *Consumer) ListDatasets(ctx context.Context, producerID ...string) ([]Dataset, error) {
 	type DatasetsResponse struct {
 		Datasets []Dataset `json:"datasets"`
 		Count    int       `json:"count"`
 	}
 
+	path := "/v1/datasets"
+	if len(producerID) > 0 && producerID[0] != "" {
+		path = fmt.Sprintf("/v1/datasets?producer_id=%s", url.QueryEscape(producerID[0]))
+	}
+
 	var response DatasetsResponse
-	if err := c.makeAPIRequest(ctx, http.MethodGet, "/v1/datasets", nil, &response); err != nil {
+	if err := c.makeAPIRequest(ctx, http.MethodGet, path, nil, &response); err != nil {
 		return nil, err
 	}
 
