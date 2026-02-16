@@ -765,6 +765,45 @@ func (c *Consumer) DeleteNotification(ctx context.Context, receiptHandle string)
 	return nil
 }
 
+// ListMySubscriptionRequests lists the consumer's own subscription requests.
+// Allows consumers to track the status of their pending, approved, or rejected requests.
+//
+// Parameters:
+//   - status: Filter by request status. Valid values: "pending", "approved", "rejected", "cancelled".
+//     If empty, returns all requests regardless of status.
+//
+// Returns a slice of subscription requests matching the filter.
+func (c *Consumer) ListMySubscriptionRequests(ctx context.Context, status string) ([]types.SubscriptionRequest, error) {
+	path := "/v1/subscription-requests"
+	if status != "" {
+		path = fmt.Sprintf("/v1/subscription-requests?status=%s", url.QueryEscape(status))
+	}
+
+	var response types.SubscriptionRequestsResponse
+	if err := c.makeAPIRequest(ctx, http.MethodGet, path, nil, &response); err != nil {
+		return nil, err
+	}
+
+	return response.Requests, nil
+}
+
+// GetSubscriptionRequest retrieves details of a specific subscription request by ID.
+//
+// Parameters:
+//   - requestID: The subscription request ID (e.g., "req-abc123-def456").
+//
+// Returns the subscription request with all details.
+func (c *Consumer) GetSubscriptionRequest(ctx context.Context, requestID string) (*types.SubscriptionRequest, error) {
+	path := fmt.Sprintf("/v1/subscription-requests/%s", url.PathEscape(requestID))
+
+	var result types.SubscriptionRequest
+	if err := c.makeAPIRequest(ctx, http.MethodGet, path, nil, &result); err != nil {
+		return nil, err
+	}
+
+	return &result, nil
+}
+
 // ClearQueue clears all messages from the consumer's notification queue.
 //
 // This permanently deletes all messages in the queue. Use with caution.

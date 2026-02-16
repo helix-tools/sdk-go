@@ -29,6 +29,23 @@ const (
 	DataFreshnessOnDemand        DataFreshness = "on-demand"
 )
 
+// DatasetUpdateInput contains fields for updating a dataset via PATCH.
+// All fields are optional (pointer types) - nil means "no change".
+type DatasetUpdateInput struct {
+	Name          *string        `json:"name,omitempty"`
+	Description   *string        `json:"description,omitempty"`
+	Category      *string        `json:"category,omitempty"`
+	DataFreshness *string        `json:"data_freshness,omitempty"`
+	Visibility    *string        `json:"visibility,omitempty"`
+	Status        *string        `json:"status,omitempty"`
+	AccessTier    *string        `json:"access_tier,omitempty"`
+	Version       *string        `json:"version,omitempty"`
+	VersionNotes  *string        `json:"version_notes,omitempty"`
+	Tags          []string       `json:"tags,omitempty"`
+	Schema        map[string]any `json:"schema,omitempty"`
+	Metadata      map[string]any `json:"metadata,omitempty"`
+}
+
 // Dataset represents a dataset in the catalog
 type Dataset struct {
 	ID              string         `json:"_id"`
