@@ -830,6 +830,38 @@ func (p *Producer) ApproveSubscriptionRequest(ctx context.Context, requestID str
 	return &result, nil
 }
 
+// UpdateDataset updates an existing dataset's metadata.
+// This is a public API for producers to update dataset information without re-uploading data.
+//
+// Parameters:
+//   - datasetID: The dataset ID to update.
+//   - input: DatasetUpdateInput containing fields to update (nil fields are ignored).
+//
+// Returns the updated dataset.
+func (p *Producer) UpdateDataset(ctx context.Context, datasetID string, input types.DatasetUpdateInput) (*types.Dataset, error) {
+	path := fmt.Sprintf("/v1/datasets/%s", url.PathEscape(datasetID))
+
+	var result types.Dataset
+	if err := p.makeAPIRequest(ctx, http.MethodPatch, path, input, &result); err != nil {
+		return nil, err
+	}
+
+	return &result, nil
+}
+
+// ListSubscribers lists all active subscribers across all of the producer's datasets.
+// Provides an aggregated view of who has access to the producer's data.
+//
+// Returns a SubscribersResponse containing all subscribers with their subscription details.
+func (p *Producer) ListSubscribers(ctx context.Context) (*types.SubscribersResponse, error) {
+	var response types.SubscribersResponse
+	if err := p.makeAPIRequest(ctx, http.MethodGet, "/v1/producers/subscribers", nil, &response); err != nil {
+		return nil, err
+	}
+
+	return &response, nil
+}
+
 // RejectSubscriptionRequest rejects a subscription request from a consumer.
 //
 // Parameters:

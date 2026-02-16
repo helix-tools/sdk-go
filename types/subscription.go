@@ -38,3 +38,30 @@ type RevokeSubscriptionResponse struct {
 	SubscriptionID string `json:"subscription_id"`
 	Status         string `json:"status"`
 }
+
+// SubscribersResponse is the response for GET /v1/producers/subscribers.
+type SubscribersResponse struct {
+	Subscribers []Subscriber `json:"subscribers"`
+	Count       int          `json:"count"`
+}
+
+// Subscriber represents a consumer who has subscribed to the producer's datasets.
+type Subscriber struct {
+	ConsumerID        string             `json:"consumer_id"`
+	ConsumerName      string             `json:"consumer_name"`
+	ConsumerEmail     string             `json:"consumer_email"`
+	SubscriptionCount int                `json:"subscription_count"`
+	Datasets          []SubscriberDataset `json:"datasets"`
+	FirstSubscribedAt string             `json:"first_subscribed_at"`
+	LastSubscribedAt  string             `json:"last_subscribed_at"`
+}
+
+// SubscriberDataset represents a dataset that a subscriber has access to.
+type SubscriberDataset struct {
+	SubscriptionID string `json:"subscription_id"`
+	DatasetID      string `json:"dataset_id"`
+	DatasetName    string `json:"dataset_name"`
+	Tier           string `json:"tier"`
+	Status         string `json:"status"`
+	CreatedAt      string `json:"created_at"`
+}
