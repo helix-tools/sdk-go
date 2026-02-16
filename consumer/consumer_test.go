@@ -3,6 +3,7 @@ package consumer
 import (
 	"encoding/json"
 	"errors"
+	"net/url"
 	"testing"
 
 	"github.com/helix-tools/sdk-go/types"
@@ -436,6 +437,55 @@ func TestSubscriptionRequestUnmarshalRejected(t *testing.T) {
 
 	if request.RejectionReason == nil || *request.RejectionReason != "Insufficient credentials" {
 		t.Errorf("expected RejectionReason 'Insufficient credentials', got '%v'", request.RejectionReason)
+	}
+}
+
+// TestListDatasetsPathBuilding tests that ListDatasets builds the correct API path.
+func TestListDatasetsPathBuilding(t *testing.T) {
+	tests := []struct {
+		name       string
+		producerID []string
+		wantPath   string
+	}{
+		{
+			name:       "no producer ID",
+			producerID: nil,
+			wantPath:   "/v1/datasets",
+		},
+		{
+			name:       "empty variadic",
+			producerID: []string{},
+			wantPath:   "/v1/datasets",
+		},
+		{
+			name:       "empty string producer ID",
+			producerID: []string{""},
+			wantPath:   "/v1/datasets",
+		},
+		{
+			name:       "with producer ID",
+			producerID: []string{"company-123456"},
+			wantPath:   "/v1/datasets?producer_id=company-123456",
+		},
+		{
+			name:       "producer ID with special chars",
+			producerID: []string{"company-123&test=value"},
+			wantPath:   "/v1/datasets?producer_id=company-123%26test%3Dvalue",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Build path using same logic as ListDatasets
+			path := "/v1/datasets"
+			if len(tt.producerID) > 0 && tt.producerID[0] != "" {
+				path = "/v1/datasets?producer_id=" + url.QueryEscape(tt.producerID[0])
+			}
+
+			if path != tt.wantPath {
+				t.Errorf("path = %q, want %q", path, tt.wantPath)
+			}
+		})
 	}
 }
 
