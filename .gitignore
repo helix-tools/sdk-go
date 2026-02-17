@@ -3,9 +3,9 @@ test/e2e-test
 test/*.exe
 test/*.test
 *.test
-test*
-test/*
-test
+
+# Allow e2e_main.go to be tracked
+!test/e2e_main.go
 
 # Environment files (credentials)
 .env
