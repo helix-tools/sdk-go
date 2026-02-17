@@ -265,6 +265,24 @@ Methods: `Get`, `Post`, `Patch`, `Put`, `Delete`, `Request`
 
 ---
 
+## E2E Tests
+
+**Important**: E2E tests (`test/e2e_main.go`) should run locally, NOT against the live API for routine testing. The tests use `api-go.helix.tools` by default (SDK default endpoint).
+
+To run E2E tests:
+```bash
+# Set credentials first
+export PRODUCER_AWS_ACCESS_KEY_ID=...
+export PRODUCER_AWS_SECRET_ACCESS_KEY=...
+export CONSUMER_AWS_ACCESS_KEY_ID=...
+export CONSUMER_AWS_SECRET_ACCESS_KEY=...
+
+# Run the E2E test
+cd test && go run e2e_main.go
+```
+
+---
+
 ## Known Issues & TODOs
 
 ### From Code Comments
