@@ -513,27 +513,7 @@ func (p *Producer) UploadDataset(ctx context.Context, filePath string, opts Uplo
 			// Update existing dataset instead of creating new
 			dataset, err = p.updateDataset(ctx, datasetID, datasetPayload)
 			if err != nil {
-				fmt.Printf("⚠️  Warning: File uploaded but catalog update failed: %v\n", err)
-
-				return &types.Dataset{
-					ID:            datasetID,
-					Name:          opts.DatasetName,
-					ProducerID:    p.CustomerID,
-					Category:      opts.Category,
-					DataFreshness: opts.DataFreshness,
-					Visibility:    "private",
-					Status:        "active",
-					AccessTier:    "free",
-					S3Key:         s3Key,
-					S3BucketName:  p.BucketName,
-					S3Bucket:      p.BucketName,
-					SizeBytes:     finalSize,
-					Metadata: map[string]any{
-						"status":  "uploaded_update_failed",
-						"error":   err.Error(),
-						"payload": datasetPayload,
-					},
-				}, nil
+				return nil, fmt.Errorf("file uploaded to S3 but catalog update failed: %w", err)
 			}
 
 			fmt.Printf("✅ Dataset updated: %s\n", datasetID)
@@ -541,26 +521,7 @@ func (p *Producer) UploadDataset(ctx context.Context, filePath string, opts Uplo
 		}
 
 		// Non-409 error: keep original behavior
-		fmt.Printf("⚠️  Warning: File uploaded but catalog registration failed: %v\n", err)
-
-		return &types.Dataset{
-			Name:          opts.DatasetName,
-			ProducerID:    p.CustomerID,
-			Category:      opts.Category,
-			DataFreshness: opts.DataFreshness,
-			Visibility:    "private",
-			Status:        "active",
-			AccessTier:    "free",
-			S3Key:         s3Key,
-			S3BucketName:  p.BucketName,
-			S3Bucket:      p.BucketName,
-			SizeBytes:     finalSize,
-			Metadata: map[string]any{
-				"status":  "uploaded_unregistered",
-				"error":   err.Error(),
-				"payload": datasetPayload,
-			},
-		}, nil
+		return nil, fmt.Errorf("file uploaded to S3 but catalog registration failed: %w", err)
 	}
 
 	return dataset, nil

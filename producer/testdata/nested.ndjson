@@ -1,0 +1,3 @@
+{"user": {"name": "Alice", "address": {"city": "NYC", "zip": "10001"}}}
+{"user": {"name": "Bob", "address": {"city": "", "zip": ""}}}
+{"user": {"name": "Charlie", "address": {"city": "LA", "zip": null}}}
