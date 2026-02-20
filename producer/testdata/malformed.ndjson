@@ -1,0 +1,5 @@
+{"valid": "record1", "count": 1}
+{invalid json here - missing quotes
+{"valid": "record2", "count": 2}
+not even close to json
+{"valid": "record3", "count": 3}
