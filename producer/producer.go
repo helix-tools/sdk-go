@@ -16,7 +16,6 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -326,11 +325,190 @@ func (p *Producer) encryptData(ctx context.Context, data []byte) ([]byte, error)
 	return result.Bytes(), nil
 }
 
+// CreateDatasetResponse represents the API response when creating a dataset record.
+type CreateDatasetResponse struct {
+	ID        string `json:"id"`
+	UploadURL string `json:"upload_url"`
+	S3Key     string `json:"s3_key"`
+}
+
+// ProcessedFileData contains the processed (encrypted/compressed) file data and metadata.
+type ProcessedFileData struct {
+	Data         []byte
+	OriginalSize int64
+	Sizes        map[string]any
+	Analysis     *AnalysisResult
+}
+
+// createDatasetRecord creates a dataset record in the catalog and retrieves presigned URL.
+// This is step 1 of the new POST-first upload flow.
+func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opts UploadOptions) (*CreateDatasetResponse, error) {
+	// Analyze data before compression/encryption (memory-efficient streaming).
+	var analysis *AnalysisResult
+	analysisResult, err := p.analyzeData(filePath, DefaultAnalysisOptions())
+	if err != nil {
+		fmt.Printf("⚠️  Warning: Data analysis failed, continuing without analysis: %v\n", err)
+	} else {
+		analysis = analysisResult
+	}
+
+	// Build initial metadata (sizes will be updated after processing)
+	metadata := make(map[string]any)
+	maps.Copy(metadata, opts.Metadata)
+	
+	// Add analysis results to metadata if available
+	if analysis != nil {
+		metadata["schema"] = analysis.Schema
+		metadata["field_emptiness"] = analysis.FieldEmptiness
+		metadata["record_count"] = analysis.RecordCount
+		if analysis.AnalysisErrors > 0 {
+			metadata["analysis_errors"] = analysis.AnalysisErrors
+		}
+	}
+
+	// Build dataset payload (without S3 key and size, which will be set after upload)
+	payload := map[string]any{
+		"name":           opts.DatasetName,
+		"description":    opts.Description,
+		"category":       opts.Category,
+		"data_freshness": string(opts.DataFreshness),
+		"producer_id":    p.CustomerID,
+		"metadata":       metadata,
+	}
+
+	// Merge dataset overrides
+	if opts.DatasetOverrides != nil {
+		maps.Copy(payload, opts.DatasetOverrides)
+	}
+
+	// POST to /v1/datasets to create record and get presigned URL
+	var response CreateDatasetResponse
+	err = p.makeAPIRequest(ctx, "POST", "/v1/datasets", payload, &response)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create dataset record: %w", err)
+	}
+
+	return &response, nil
+}
+
+// processFile reads, compresses, and encrypts the file data.
+// This is step 2 of the new POST-first upload flow.
+func (p *Producer) processFile(ctx context.Context, filePath string, opts UploadOptions) (*ProcessedFileData, error) {
+	// Validate encryption/compression requirements
+	if !opts.Encrypt {
+		return nil, fmt.Errorf("encryption is required for dataset uploads")
+	}
+
+	if !opts.Compress {
+		return nil, fmt.Errorf("compression is required for dataset uploads")
+	}
+
+	if opts.Encrypt && p.KMSKeyID == "" {
+		return nil, fmt.Errorf("encryption requested but KMS key not found")
+	}
+
+	// Read original file
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+
+	originalSize := int64(len(data))
+
+	// Validate file is not empty
+	if originalSize == 0 {
+		return nil, fmt.Errorf("file is empty: %s (no data to upload)", filePath)
+	}
+
+	// Track sizes for metadata
+	sizes := map[string]any{
+		"original_size_bytes":   originalSize,
+		"compressed_size_bytes": originalSize,
+		"encrypted_size_bytes":  originalSize,
+		"encryption_enabled":    opts.Encrypt,
+		"compression_enabled":   opts.Compress,
+	}
+
+	// Step 1: Compress FIRST
+	if opts.Compress {
+		fmt.Printf("📦 Compressing %d bytes with gzip (level %d)...\n", len(data), opts.CompressionLevel)
+
+		compressed, err := p.compressData(data, opts.CompressionLevel)
+		if err != nil {
+			return nil, fmt.Errorf("compression failed: %w", err)
+		}
+
+		data = compressed
+		sizes["compressed_size_bytes"] = int64(len(data))
+
+		compressionRatio := (1 - float64(len(data))/float64(originalSize)) * 100
+		fmt.Printf("Compressed: %d bytes (%.1f%% reduction)\n", len(data), compressionRatio)
+	}
+
+	// Step 2: Encrypt SECOND
+	if opts.Encrypt {
+		fmt.Printf("🔒 Encrypting %d bytes with KMS key...\n", len(data))
+
+		encrypted, err := p.encryptData(ctx, data)
+		if err != nil {
+			return nil, fmt.Errorf("encryption failed: %w", err)
+		}
+
+		data = encrypted
+		sizes["encrypted_size_bytes"] = int64(len(data))
+
+		fmt.Printf("Encrypted: %d bytes\n", len(data))
+	}
+
+	return &ProcessedFileData{
+		Data:         data,
+		OriginalSize: originalSize,
+		Sizes:        sizes,
+	}, nil
+}
+
+// uploadToPresignedURL uploads the processed data to the presigned URL.
+// This is step 3 of the new POST-first upload flow.
+func (p *Producer) uploadToPresignedURL(ctx context.Context, uploadURL string, data []byte) error {
+	fmt.Printf("📤 Uploading %d bytes to presigned URL...\n", len(data))
+
+	req, err := http.NewRequestWithContext(ctx, "PUT", uploadURL, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("failed to create upload request: %w", err)
+	}
+
+	// Set content type for binary data
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.ContentLength = int64(len(data))
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to upload to presigned URL: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return &APIError{
+			StatusCode: resp.StatusCode,
+			Body:       string(bodyBytes),
+		}
+	}
+
+	fmt.Printf("✅ Upload successful\n")
+	return nil
+}
+
 // UploadDataset uploads a dataset with optional encryption and compression.
+// NEW FLOW (POST-first to prevent race conditions):
+// 1. POST to /v1/datasets to create record and get presigned URL
+// 2. Process file (compress + encrypt)
+// 3. PUT to presigned URL
+// 4. Return dataset
 //
 // NOTE: Use NewUploadOptions() to get sane defaults.
 func (p *Producer) UploadDataset(ctx context.Context, filePath string, opts UploadOptions) (*types.Dataset, error) {
-	// Set defaults for fields not specified.
+	// Set defaults for fields not specified
 	if opts.Category == "" {
 		opts.Category = "general"
 	}
@@ -343,7 +521,7 @@ func (p *Producer) UploadDataset(ctx context.Context, filePath string, opts Uplo
 		opts.CompressionLevel = 6
 	}
 
-	// Validate encryption capability.
+	// Validate encryption capability
 	if !opts.Encrypt {
 		return nil, fmt.Errorf("encryption is required for dataset uploads")
 	}
@@ -354,174 +532,44 @@ func (p *Producer) UploadDataset(ctx context.Context, filePath string, opts Uplo
 
 	if opts.Encrypt && p.KMSKeyID == "" {
 		return nil, fmt.Errorf("encryption requested but KMS key not found")
-
 	}
 
-	// Analyze data before compression/encryption (memory-efficient streaming).
-	// This extracts JSON schema and field emptiness statistics.
-	var analysis *AnalysisResult
-	analysisResult, err := p.analyzeData(filePath, DefaultAnalysisOptions())
+	// Step 1: Create dataset record and get presigned URL
+	createResp, err := p.createDatasetRecord(ctx, filePath, opts)
 	if err != nil {
-		fmt.Printf("⚠️  Warning: Data analysis failed, continuing without analysis: %v\n", err)
-	} else {
-		analysis = analysisResult
+		return nil, err
 	}
 
-	// Read original file.
-	data, err := os.ReadFile(filePath)
+	fmt.Printf("✅ Dataset record created: %s\n", createResp.ID)
+
+	// Step 2: Process file (encrypt/compress)
+	processedData, err := p.processFile(ctx, filePath, opts)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read file: %w", err)
+		return nil, err
 	}
 
-	originalSize := int64(len(data))
-
-	// Validate file is not empty.
-	if originalSize == 0 {
-		return nil, fmt.Errorf("file is empty: %s (no data to upload)", filePath)
+	// Step 3: Upload to presigned URL
+	if err := p.uploadToPresignedURL(ctx, createResp.UploadURL, processedData.Data); err != nil {
+		return nil, fmt.Errorf("dataset record created but upload failed: %w", err)
 	}
 
-	// Track sizes for metadata.
-	sizes := map[string]any{
-		"original_size_bytes":   originalSize,
-		"compressed_size_bytes": originalSize,
-		"encrypted_size_bytes":  originalSize,
-		"encryption_enabled":    opts.Encrypt,
-		"compression_enabled":   opts.Compress,
-	}
-
-	// Step 1: Compress FIRST.
-	if opts.Compress {
-		fmt.Printf("📦 Compressing %d bytes with gzip (level %d)...\n", len(data), opts.CompressionLevel)
-
-		compressed, err := p.compressData(data, opts.CompressionLevel)
-		if err != nil {
-			return nil, fmt.Errorf("compression failed: %w", err)
-		}
-
-		data = compressed
-
-		sizes["compressed_size_bytes"] = int64(len(data))
-
-		compressionRatio := (1 - float64(len(data))/float64(originalSize)) * 100
-
-		fmt.Printf("Compressed: %d bytes (%.1f%% reduction)\n", len(data), compressionRatio)
-	}
-
-	// Step 2: Encrypt SECOND.
-	if opts.Encrypt {
-		fmt.Printf("🔒 Encrypting %d bytes with KMS key...\n", len(data))
-
-		encrypted, err := p.encryptData(ctx, data)
-		if err != nil {
-			return nil, fmt.Errorf("encryption failed: %w", err)
-		}
-
-		data = encrypted
-
-		sizes["encrypted_size_bytes"] = int64(len(data))
-
-		fmt.Printf("Encrypted: %d bytes\n", len(data))
-	}
-
-	// Generate S3 key with consistent filename. This enables in-place updates.
-	fileName := "data.ndjson"
-
-	if opts.Compress {
-		fileName += ".gz"
-	}
-
-	// TODO: Get this from AWS SSM.
-	s3Key := fmt.Sprintf("datasets/%s/%s", opts.DatasetName, fileName)
-
-	// Build S3 object tags for cost tracking.
-	//
-	// Format: CustomerID=value&Component=storage&Purpose=dataset-storage&DatasetName=value
-	tags := fmt.Sprintf("CustomerID=%s&Component=%s&Purpose=%s&DatasetName=%s",
-		url.QueryEscape(p.CustomerID),
-		url.QueryEscape("storage"),
-		url.QueryEscape("dataset-storage"),
-		url.QueryEscape(opts.DatasetName),
-	)
-
-	// Upload to S3.
-	fmt.Printf("📤 Uploading %d bytes to S3...\n", len(data))
-
-	if _, err = p.s3Client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:  aws.String(p.BucketName),
-		Key:     aws.String(s3Key),
-		Body:    bytes.NewReader(data),
-		Tagging: aws.String(tags),
-	}); err != nil {
-		return nil, fmt.Errorf("failed to upload to S3: %w", err)
-	}
-
-	fmt.Printf("✅ Uploaded to s3://%s/%s (tagged: CustomerID=%s)\n", p.BucketName, s3Key, p.CustomerID)
-
-	// Merge metadata.
-	finalMetadata := make(map[string]any)
-
-	// Copy user-provided metadata first.
-	maps.Copy(finalMetadata, opts.Metadata)
-
-	// Copy sizes next (overwrites any user-provided size fields).
-	maps.Copy(finalMetadata, sizes)
-
-	// Add analysis results to metadata.
-	if analysis != nil {
-		finalMetadata["schema"] = analysis.Schema
-		finalMetadata["field_emptiness"] = analysis.FieldEmptiness
-		finalMetadata["record_count"] = analysis.RecordCount
-		if analysis.AnalysisErrors > 0 {
-			finalMetadata["analysis_errors"] = analysis.AnalysisErrors
-		}
-	}
-
-	// Determine final size (what's actually stored in S3).
-	// If encrypted, use encrypted size; otherwise use compressed size.
-	var finalSize int64
-	if opts.Encrypt {
-		finalSize = sizes["encrypted_size_bytes"].(int64)
-	} else {
-		finalSize = sizes["compressed_size_bytes"].(int64)
-	}
-
-	datasetPayload := p.buildDatasetPayload(
-		opts.DatasetName,
-		opts.Description,
-		opts.Category,
-		opts.DataFreshness,
-		s3Key,
-		finalSize,
-		finalMetadata,
-		analysis,
-		opts.DatasetOverrides,
-	)
-
-	// Extract dataset ID from payload for potential update
-	datasetID, _ := datasetPayload["_id"].(string)
-
-	// Make API request to register dataset (upsert behavior).
-	// Try POST first, if 409 conflict then PATCH to update existing.
+	// Step 4: Return dataset (fetch updated record from API)
 	dataset := &types.Dataset{}
-	err = p.makeAPIRequest(ctx, "POST", "/v1/datasets", datasetPayload, dataset)
+	err = p.makeAPIRequest(ctx, "GET", fmt.Sprintf("/v1/datasets/%s", url.PathEscape(createResp.ID)), nil, dataset)
 	if err != nil {
-		// Check if this is a 409 Conflict (dataset already exists)
-		var apiErr *APIError
-		if errors.As(err, &apiErr) && apiErr.IsConflict() {
-			fmt.Printf("📝 Dataset already exists, updating metadata...\n")
-
-			// Update existing dataset instead of creating new
-			dataset, err = p.updateDataset(ctx, datasetID, datasetPayload)
-			if err != nil {
-				return nil, fmt.Errorf("file uploaded to S3 but catalog update failed: %w", err)
-			}
-
-			fmt.Printf("✅ Dataset updated: %s\n", datasetID)
-			return dataset, nil
-		}
-
-		// Non-409 error: keep original behavior
-		return nil, fmt.Errorf("file uploaded to S3 but catalog registration failed: %w", err)
+		// If GET fails, construct a basic dataset response
+		fmt.Printf("⚠️  Warning: Failed to fetch dataset details: %v\n", err)
+		return &types.Dataset{
+			ID:           createResp.ID,
+			IDAlias:      createResp.ID,
+			Name:         opts.DatasetName,
+			Description:  opts.Description,
+			ProducerID:   p.CustomerID,
+			Category:     opts.Category,
+			S3Key:        createResp.S3Key,
+			S3BucketName: p.BucketName,
+			S3Bucket:     p.BucketName,
+		}, nil
 	}
 
 	return dataset, nil
