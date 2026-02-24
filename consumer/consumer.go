@@ -99,6 +99,14 @@ type Notification struct {
 // Use types.Subscription directly for new code.
 type Subscription = types.Subscription
 
+// ListSubscriptionsOptions contains options for listing subscriptions.
+type ListSubscriptionsOptions struct {
+	// Role filters subscriptions by role for "both" customers.
+	// Valid values: "consumer", "producer"
+	// If omitted, API defaults to consumer for "both" customers.
+	Role string
+}
+
 // PollNotificationsOptions contains options for polling notifications from SQS.
 type PollNotificationsOptions struct {
 	AutoAcknowledge *bool    // Automatically acknowledge (delete) messages after receiving (default: true)
@@ -474,14 +482,21 @@ func (c *Consumer) ListDatasets(ctx context.Context, producerID ...string) ([]Da
 }
 
 // ListSubscriptions lists all active subscriptions for this consumer.
-func (c *Consumer) ListSubscriptions(ctx context.Context) ([]Subscription, error) {
+// For "both" customers (who are both producer and consumer), use opts.Role to filter by role.
+func (c *Consumer) ListSubscriptions(ctx context.Context, opts *ListSubscriptionsOptions) ([]Subscription, error) {
 	type SubscriptionsResponse struct {
 		Subscriptions []Subscription `json:"subscriptions"`
 		Count         int            `json:"count"`
 	}
 
+	path := "/v1/subscriptions"
+	
+	if opts != nil && opts.Role != "" {
+		path += "?role=" + url.QueryEscape(opts.Role)
+	}
+
 	var response SubscriptionsResponse
-	if err := c.makeAPIRequest(ctx, http.MethodGet, "/v1/subscriptions", nil, &response); err != nil {
+	if err := c.makeAPIRequest(ctx, http.MethodGet, path, nil, &response); err != nil {
 		return nil, err
 	}
 
@@ -622,9 +637,11 @@ func (c *Consumer) PollNotifications(ctx context.Context, opts PollNotifications
 		autoAcknowledge = *opts.AutoAcknowledge
 	}
 
-	// Get per-consumer queue URL from first active subscription.
+	// Get per-consumer queue URL from active subscriptions where this customer is the consumer.
 	if c.queueURL == nil {
-		subscriptions, err := c.ListSubscriptions(ctx)
+		// For "both" customers, explicitly request consumer subscriptions to disambiguate.
+		// This ensures we get the queue where WE are the consumer, not producer.
+		subscriptions, err := c.ListSubscriptions(ctx, &ListSubscriptionsOptions{Role: "consumer"})
 		if err != nil {
 			return nil, fmt.Errorf("failed to get subscriptions: %w", err)
 		}
@@ -633,13 +650,24 @@ func (c *Consumer) PollNotifications(ctx context.Context, opts PollNotifications
 			return nil, fmt.Errorf("no active subscriptions found. Create a subscription first using CreateSubscriptionRequest()")
 		}
 
-		// Get queue URL from first subscription (all subscriptions for same consumer share same queue).
-		var queueURL *string
-
+		// Filter to only subscriptions where WE are the consumer.
+		// This handles edge cases and ensures we get the correct queue.
+		var myConsumerSubs []Subscription
 		for _, sub := range subscriptions {
+			if sub.ConsumerID == c.CustomerID {
+				myConsumerSubs = append(myConsumerSubs, sub)
+			}
+		}
+
+		if len(myConsumerSubs) == 0 {
+			return nil, fmt.Errorf("no subscriptions found where you are the consumer")
+		}
+
+		// Get queue URL from our own subscription (all consumer subscriptions share same queue).
+		var queueURL *string
+		for _, sub := range myConsumerSubs {
 			if sub.SQSQueueURL != nil {
 				queueURL = sub.SQSQueueURL
-
 				break
 			}
 		}
@@ -829,7 +857,7 @@ func (c *Consumer) GetSubscriptionRequest(ctx context.Context, requestID string)
 func (c *Consumer) ClearQueue(ctx context.Context) error {
 	// Initialize queue URL if not already set.
 	if c.queueURL == nil {
-		subscriptions, err := c.ListSubscriptions(ctx)
+		subscriptions, err := c.ListSubscriptions(ctx, &ListSubscriptionsOptions{Role: "consumer"})
 		if err != nil {
 			return fmt.Errorf("failed to get subscriptions: %w", err)
 		}
@@ -838,13 +866,23 @@ func (c *Consumer) ClearQueue(ctx context.Context) error {
 			return fmt.Errorf("no active subscriptions found. Cannot determine queue URL")
 		}
 
-		// Get queue URL from first subscription with a queue.
-		var queueURL *string
-
+		// Filter to only subscriptions where WE are the consumer
+		var myConsumerSubs []Subscription
 		for _, sub := range subscriptions {
+			if sub.ConsumerID == c.CustomerID {
+				myConsumerSubs = append(myConsumerSubs, sub)
+			}
+		}
+
+		if len(myConsumerSubs) == 0 {
+			return fmt.Errorf("no subscriptions found where you are the consumer")
+		}
+
+		// Get queue URL from our own subscription
+		var queueURL *string
+		for _, sub := range myConsumerSubs {
 			if sub.SQSQueueURL != nil {
 				queueURL = sub.SQSQueueURL
-
 				break
 			}
 		}
