@@ -895,3 +895,13 @@ func (p *Producer) RejectSubscriptionRequest(ctx context.Context, requestID stri
 
 	return &result, nil
 }
+
+// DeleteDataset permanently removes a dataset.
+//
+// Parameters:
+//   - datasetID: The dataset ID to delete.
+//
+// Returns an error if the deletion fails.
+func (p *Producer) DeleteDataset(ctx context.Context, datasetID string) error {
+	return p.makeAPIRequest(ctx, "DELETE", fmt.Sprintf("/v1/datasets/%s", url.PathEscape(datasetID)), nil, nil)
+}

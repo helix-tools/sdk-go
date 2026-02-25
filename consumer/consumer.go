@@ -848,6 +848,30 @@ func (c *Consumer) GetSubscriptionRequest(ctx context.Context, requestID string)
 	return &result, nil
 }
 
+// CancelSubscription cancels an active subscription.
+//
+// Parameters:
+//   - subscriptionID: The subscription ID to cancel.
+//
+// Returns an error if the cancellation fails.
+func (c *Consumer) CancelSubscription(ctx context.Context, subscriptionID string) error {
+	return c.makeAPIRequest(ctx, "DELETE", fmt.Sprintf("/v1/subscriptions/%s", url.PathEscape(subscriptionID)), nil, nil)
+}
+
+// GetSubscription retrieves a specific subscription by ID.
+//
+// Parameters:
+//   - subscriptionID: The subscription ID to retrieve.
+//
+// Returns the subscription details or an error if not found.
+func (c *Consumer) GetSubscription(ctx context.Context, subscriptionID string) (*types.Subscription, error) {
+	var sub types.Subscription
+	if err := c.makeAPIRequest(ctx, "GET", fmt.Sprintf("/v1/subscriptions/%s", url.PathEscape(subscriptionID)), nil, &sub); err != nil {
+		return nil, err
+	}
+	return &sub, nil
+}
+
 // ClearQueue clears all messages from the consumer's notification queue.
 //
 // This permanently deletes all messages in the queue. Use with caution.
