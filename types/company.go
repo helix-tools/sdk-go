@@ -77,7 +77,7 @@ type CompanyUser struct {
 	Phone       string            `json:"phone,omitempty"`
 	CompanyID   string            `json:"company_id"`
 	CompanyName string            `json:"company_name,omitempty"`
-	Role        string            `json:"role"` // "superadmin", "admin", "member"
+	Role        string            `json:"role"` // "owner", "admin", "member"
 	Status      string            `json:"status"` // "active", "inactive", "suspended", "deleted"
 	Permissions *UserPermissions  `json:"permissions,omitempty"`
 	CreatedAt   string            `json:"created_at"`
@@ -133,7 +133,7 @@ type InviteUserRequest struct {
 	Email       string           `json:"email"`
 	FirstName   string           `json:"first_name,omitempty"`
 	LastName    string           `json:"last_name,omitempty"`
-	Role        string           `json:"role"` // "superadmin", "admin", "member"
+	Role        string           `json:"role"` // "owner", "admin", "member"
 	Phone       string           `json:"phone,omitempty"`
 	Permissions *UserPermissions `json:"permissions,omitempty"`
 	InvitedBy   string           `json:"invited_by,omitempty"`
