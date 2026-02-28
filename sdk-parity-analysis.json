@@ -184,7 +184,7 @@
         {"name": "Phone", "type": "string", "json_tag": "phone,omitempty", "required": false, "validation": null},
         {"name": "CompanyID", "type": "string", "json_tag": "company_id", "required": true, "validation": null},
         {"name": "CompanyName", "type": "string", "json_tag": "company_name,omitempty", "required": false, "validation": null},
-        {"name": "Role", "type": "string", "json_tag": "role", "required": true, "validation": "enum: superadmin|admin|member"},
+        {"name": "Role", "type": "string", "json_tag": "role", "required": true, "validation": "enum: owner|admin|member"},
         {"name": "Status", "type": "string", "json_tag": "status", "required": true, "validation": "enum: active|inactive|suspended|deleted"},
         {"name": "Permissions", "type": "*UserPermissions", "json_tag": "permissions,omitempty", "required": false, "validation": null},
         {"name": "CreatedAt", "type": "string", "json_tag": "created_at", "required": true, "validation": null},
