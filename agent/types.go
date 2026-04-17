@@ -29,33 +29,52 @@ package agent
 
 import "time"
 
+// RateLimitBucket is one of the three per-operation rate-limit buckets
+// (read / write / delete) attached to an agent. RPM is the sustained
+// requests-per-minute; Burst is the optional token-bucket burst size.
+type RateLimitBucket struct {
+	RPM   int `json:"rpm"`
+	Burst int `json:"burst,omitempty"`
+}
+
+// RateLimitConfig is the nested 3-bucket rate-limit object carried on
+// an AgentRecord. All buckets are optional — an absent bucket means
+// "use the global default for this operation class".
+type RateLimitConfig struct {
+	Read   RateLimitBucket `json:"read,omitempty"`
+	Write  RateLimitBucket `json:"write,omitempty"`
+	Delete RateLimitBucket `json:"delete,omitempty"`
+}
+
 // AgentRecord describes a single agent registered with Helix.
 //
 // The on-the-wire shape mirrors agent-admin.AgentRecord (the admin
-// surface) rather than agents-api.MeResponse (the pruned self-view).
-// An agent calling Me() sees its own record minus a few fields the
-// server considers policy-internal (rate limits, forbidden
-// operations); those fields arrive as their zero values in this
-// struct. List callers of the admin surface — if and when the Go SDK
+// surface). List callers of the admin surface — if and when the Go SDK
 // grows one — reuse the same type.
 //
 // ActorClass is one of: "human_admin", "internal_agent", "external_agent".
 // TrustTier is one of:  "T0", "T1", "T2".
 // Status is one of:     "active", "disabled", "review".
 type AgentRecord struct {
-	AgentID                string    `json:"agent_id"`
-	DisplayName            string    `json:"display_name"`
-	ActorClass             string    `json:"actor_class"`
-	OwnerOrgID             string    `json:"owner_org_id,omitempty"`
-	TrustTier              string    `json:"trust_tier"`
-	Status                 string    `json:"status"`
-	AllowedCustomers       []string  `json:"allowed_customers,omitempty"`
-	AllowedOperations      []string  `json:"allowed_operations,omitempty"`
-	ForbiddenOperations    []string  `json:"forbidden_operations,omitempty"`
-	DefaultTokenTTLSeconds int       `json:"default_token_ttl_seconds"`
-	WebhookURL             string    `json:"webhook_url,omitempty"`
-	CreatedAt              time.Time `json:"created_at"`
-	UpdatedAt              time.Time `json:"updated_at"`
+	AgentID                  string          `json:"agent_id"`
+	DisplayName              string          `json:"display_name"`
+	ActorClass               string          `json:"actor_class"`
+	OwnerOrgID               string          `json:"owner_org_id"`
+	TrustTier                string          `json:"trust_tier"`
+	Status                   string          `json:"status"`
+	AllowedCustomers         []string        `json:"allowed_customers,omitempty"`
+	AllowedOperations        []string        `json:"allowed_operations,omitempty"`
+	ForbiddenOperations      []string        `json:"forbidden_operations,omitempty"`
+	DefaultTokenTTLSeconds   int             `json:"default_token_ttl_seconds"`
+	WebhookURL               string          `json:"webhook_url,omitempty"`
+	MCPServers               []string        `json:"mcp_servers,omitempty"`
+	RequiresHumanApprovalFor []string        `json:"requires_human_approval_for,omitempty"`
+	RedactionProfile         string          `json:"redaction_profile,omitempty"`
+	AllowedIPRanges          []string        `json:"allowed_ip_ranges,omitempty"`
+	RateLimit                RateLimitConfig `json:"rate_limit,omitempty"`
+	Version                  int             `json:"version"`
+	CreatedAt                time.Time       `json:"created_at"`
+	UpdatedAt                time.Time       `json:"updated_at"`
 }
 
 // RegistryPeer is the minimal peer-discovery shape returned from
