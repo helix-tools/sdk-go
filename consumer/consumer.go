@@ -43,11 +43,19 @@ const emptyPayloadHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca49599
 // SDKVersion is the Go SDK version surfaced in download outcome callbacks.
 // Bumped in lockstep with the module version tag so the producer dashboard
 // can spot single-version regressions across the consumer fleet.
-const SDKVersion = "2.1.0"
+const SDKVersion = "2.1.1"
 
 // SDKLanguage identifies this SDK's language in download outcome callbacks
 // (matches the dataset_download_event JSON Schema's sdk_language field).
 const SDKLanguage = "go"
+
+// defaultHTTPClientTimeout bounds every Consumer HTTP call (getDataset,
+// getDownloadUrl, S3 download, outcome callback) so a stuck connection
+// cannot hang the caller indefinitely. It is intentionally longer than
+// the per-call ctx budget (5s for the outcome callback) so that the
+// per-call deadline still wins where one is supplied; this is purely
+// defense-in-depth against future code paths that omit it.
+const defaultHTTPClientTimeout = 10 * time.Second
 
 // ErrorCategory mirrors the dataset_download_event JSON Schema enum. Each
 // value tags one phase of the DownloadDataset pipeline so a failed download
@@ -237,7 +245,7 @@ func NewConsumer(cfg types.Config) (*Consumer, error) {
 		Region:      cfg.Region,
 
 		awsConfig:  awsCfg,
-		httpClient: &http.Client{},
+		httpClient: &http.Client{Timeout: defaultHTTPClientTimeout},
 		kmsClient:  kms.NewFromConfig(awsCfg),
 		sqsClient:  sqs.NewFromConfig(awsCfg),
 		ssmClient:  ssm.NewFromConfig(awsCfg),
