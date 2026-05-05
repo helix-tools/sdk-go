@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helix-tools/sdk-go/types"
+	"github.com/helix-tools/sdk-go/v2/types"
 )
 
 // TestDefaultHTTPClientTimeoutIsBounded locks in the defense-in-depth

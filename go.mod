@@ -1,4 +1,4 @@
-module github.com/helix-tools/sdk-go
+module github.com/helix-tools/sdk-go/v2
 
 go 1.25.1
 

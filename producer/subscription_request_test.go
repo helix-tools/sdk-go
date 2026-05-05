@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/helix-tools/sdk-go/types"
+	"github.com/helix-tools/sdk-go/v2/types"
 )
 
 // TestApproveRejectPayloadMarshal tests that approve/reject payload is correctly marshaled.

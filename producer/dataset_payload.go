@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/helix-tools/sdk-go/types"
+	"github.com/helix-tools/sdk-go/v2/types"
 )
 
 var slugRegex = regexp.MustCompile(`[^a-z0-9-]+`)

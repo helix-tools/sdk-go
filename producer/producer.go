@@ -25,7 +25,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/helix-tools/sdk-go/types"
+	"github.com/helix-tools/sdk-go/v2/types"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"

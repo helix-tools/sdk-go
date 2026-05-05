@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-05-05 (v2.2.0)
+
+### Fixed
+- **Module path declares `/v2` suffix**: go.mod's module path is now
+  `github.com/helix-tools/sdk-go/v2` to match the major version. Pre-existing
+  bug since v2.0.0 — every v2.x tag was unfetchable through proxy.golang.org
+  with `invalid version: go.mod has non-.../v2 module path`. No public API
+  surface changes; this is a module-declaration repair. Consumers using
+  `replace` directives or vendored copies must update their imports from
+  `github.com/helix-tools/sdk-go/...` to `github.com/helix-tools/sdk-go/v2/...`.
+- **`SDKVersion` constant**: synced from 2.1.4 → 2.2.0.
+
 ## 2026-05-05 (v2.1.4)
 
 ### Fixed
@@ -35,6 +47,24 @@
   it's present and equal to 0, matching the new wire-format invariant.
   Locks in that early-failure paths cannot regress to omitting the
   field.
+
+## 2026-05-04 (v2.1.3 — backfill for silently-rolled-in commit 45b765d)
+
+### Fixed
+- **`DurationMs` always serialized in outcome callback** (commit 45b765d,
+  untagged on its own — rolled into v2.1.3's tag). Dropped `,omitempty` from
+  the `duration_ms` JSON tag so fast-failing paths (network_fetch errors
+  completing in <1ms wall time where `Milliseconds()` returns 0) don't have
+  the field stripped from the wire. Eliminated 10-20% flake on
+  `TestDownloadOutcome_NetworkFetchError`. Mirrors the rationale of the
+  v2.1.4 BytesDownloaded fix.
+
+## 2026-05-04 (v2.1.2 — backfill for the silent ship)
+
+### Changed
+- **Default subscription tier**: `"basic"` → `"free"` (commit 5912509).
+  Aligns with helix-api's tier enum collapse to `{"free"}` per the
+  cross-stack tier-drift cleanup pass.
 
 ## 2026-05-04 (v2.1.3)
 
