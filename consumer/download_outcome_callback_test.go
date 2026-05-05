@@ -322,6 +322,52 @@ func TestDownloadOutcome_DatasetIDEncoded(t *testing.T) {
 	t.Fatal("no callback POST captured")
 }
 
+// TestDownloadOutcome_SuccessZeroBytes pins the bug being fixed by
+// dropping `omitempty` from BytesDownloaded: a legitimate 0-byte
+// successful download (empty dataset, empty NDJSON file, decompressed-
+// to-empty payload) must record bytes_downloaded=0 on the wire so the
+// producer dashboard can distinguish "0 bytes downloaded" from "no SDK
+// telemetry received yet". With omitempty in place, this test would
+// fail because the field would be stripped from the JSON payload.
+//
+// Mirrors the rationale of the parallel-session DurationMs flake fix
+// (commit 45b765d) for the bytes_downloaded field.
+func TestDownloadOutcome_SuccessZeroBytes(t *testing.T) {
+	f := newFakeAPI(t)
+	f.s3Body = []byte{} // legal empty dataset — 0 bytes transferred
+	c := newTestConsumer(f.server.URL)
+
+	out := filepath.Join(t.TempDir(), "out.bin")
+	if err := c.DownloadDataset(context.Background(), "ds-1", out); err != nil {
+		t.Fatalf("DownloadDataset failed on legal 0-byte payload: %v", err)
+	}
+
+	if !waitForCallback(f, 1, 2*time.Second) {
+		t.Fatal("outcome callback never fired")
+	}
+
+	p := callbackPayload(f)
+	if p["status"] != "success" {
+		t.Errorf("status = %v, want success", p["status"])
+	}
+	// THE assertion this test exists for: bytes_downloaded must be
+	// present in the payload as the literal number 0, not absent. Using
+	// the two-value type assertion lets us tell apart "missing key"
+	// (ok=false) from "key=0" (ok=true, got=0).
+	got, ok := p["bytes_downloaded"].(float64)
+	if !ok {
+		t.Fatalf("bytes_downloaded missing from payload — omitempty regression? payload=%v", p)
+	}
+	if got != 0 {
+		t.Errorf("bytes_downloaded = %v, want 0 (legal empty-payload success)", got)
+	}
+	// duration_ms must also be present (DurationMs flake fix is what
+	// inspired this one — keep both invariants locked in this test).
+	if _, ok := p["duration_ms"].(float64); !ok {
+		t.Errorf("duration_ms missing — DurationMs omitempty regression?")
+	}
+}
+
 // ============================================================
 // No event_id — callback skipped
 // ============================================================
@@ -383,8 +429,14 @@ func TestDownloadOutcome_NetworkFetchError(t *testing.T) {
 	if _, ok := p["duration_ms"].(float64); !ok {
 		t.Errorf("duration_ms missing")
 	}
-	if _, present := p["bytes_downloaded"]; present {
-		t.Errorf("bytes_downloaded should be omitted on network_fetch failure, got %v", p["bytes_downloaded"])
+	// bytes_downloaded is now serialized unconditionally — see
+	// RecordOutcomeRequest doc comment. On network_fetch failure the
+	// pipeline returns before any bytes are read, so the zero value
+	// reaches the wire as bytes_downloaded=0 (NOT absent). The schema's
+	// "persisted only when non-zero" rule applies server-side, not on
+	// the wire.
+	if got, ok := p["bytes_downloaded"].(float64); !ok || got != 0 {
+		t.Errorf("bytes_downloaded = %v, want 0 (omitempty was dropped to fix legal 0-byte success races)", p["bytes_downloaded"])
 	}
 }
 
