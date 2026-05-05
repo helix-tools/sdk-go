@@ -9,7 +9,7 @@ The Helix Connect Go SDK enables data producers and consumers to securely exchan
 ## Installation
 
 ```bash
-go get github.com/helix-tools/sdk-go
+go get github.com/helix-tools/sdk-go/v2
 ```
 
 ## Support

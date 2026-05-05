@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/helix-tools/sdk-go/types"
+	"github.com/helix-tools/sdk-go/v2/types"
 )
 
 // TestSubscriptionRequests runs integration tests for subscription request operations.

@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/helix-tools/sdk-go/consumer"
-	"github.com/helix-tools/sdk-go/producer"
-	"github.com/helix-tools/sdk-go/types"
+	"github.com/helix-tools/sdk-go/v2/consumer"
+	"github.com/helix-tools/sdk-go/v2/producer"
+	"github.com/helix-tools/sdk-go/v2/types"
 )
 
 var (

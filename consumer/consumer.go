@@ -25,7 +25,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/helix-tools/sdk-go/types"
+	"github.com/helix-tools/sdk-go/v2/types"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
@@ -43,7 +43,7 @@ const emptyPayloadHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca49599
 // SDKVersion is the Go SDK version surfaced in download outcome callbacks.
 // Bumped in lockstep with the module version tag so the producer dashboard
 // can spot single-version regressions across the consumer fleet.
-const SDKVersion = "2.1.4"
+const SDKVersion = "2.2.0"
 
 // SDKLanguage identifies this SDK's language in download outcome callbacks
 // (matches the dataset_download_event JSON Schema's sdk_language field).

@@ -3,7 +3,7 @@
 ## Component Identity
 - **Agent**: helix-sdk-go
 - **Workspace**: `dme/sdk/go`
-- **Module**: `github.com/helix-tools/sdk-go`
+- **Module**: `github.com/helix-tools/sdk-go/v2`
 - **Go Version**: 1.25.1
 
 ---
@@ -486,7 +486,7 @@ import (
     "context"
     "fmt"
 
-    "github.com/helix-tools/sdk-go/types"
+    "github.com/helix-tools/sdk-go/v2/types"
 
     "github.com/aws/aws-sdk-go-v2/aws"
     "github.com/aws/aws-sdk-go-v2/config"

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/helix-tools/sdk-go/types"
+	"github.com/helix-tools/sdk-go/v2/types"
 )
 
 // TestPrefix is used to identify test resources for cleanup.

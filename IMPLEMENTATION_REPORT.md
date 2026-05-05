@@ -44,9 +44,9 @@ Successfully implemented POST-first upload flow to fix race condition in DME SDK
 
 ```bash
 $ cd ~/Dev/thalesfsp/dme/sdk/go && go test ./...
-ok  	github.com/helix-tools/sdk-go/api	    (cached)
-ok  	github.com/helix-tools/sdk-go/consumer	(cached)
-ok  	github.com/helix-tools/sdk-go/producer	0.288s
+ok  	github.com/helix-tools/sdk-go/v2/api	    (cached)
+ok  	github.com/helix-tools/sdk-go/v2/consumer	(cached)
+ok  	github.com/helix-tools/sdk-go/v2/producer	0.288s
 ```
 
 **All tests pass** ✅  
