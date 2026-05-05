@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -352,8 +353,6 @@ func TestCreateSubscriptionRequest_DefaultTierIsFree(t *testing.T) {
 			t.Fatalf("decode body: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		// makeAPIRequest only treats 200 as success today (NB: API actually
-		// returns 201 — separate latent issue, not in scope for this fix).
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{
 			"_id": "req-x",
@@ -387,6 +386,193 @@ func TestCreateSubscriptionRequest_DefaultTierIsFree(t *testing.T) {
 	}
 	if tier != "free" {
 		t.Errorf("expected outgoing tier=\"free\", got %q (helix-api v1.8.2 rejects non-canonical tiers with 400)", tier)
+	}
+}
+
+// TestCreateSubscriptionRequest_Accepts201Created pins makeAPIRequest's
+// 2xx-success contract. The helix API returns 201 Created on a successful
+// POST /v1/subscription-requests; before v2.1.3, makeAPIRequest only
+// accepted 200, so every real production call surfaced a fake "API request
+// failed: 201" error to the caller. Any regression that narrows the success
+// range back to a single status code will fail this test.
+func TestCreateSubscriptionRequest_Accepts201Created(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{
+			"_id": "req-201",
+			"request_id": "req-201",
+			"consumer_id": "consumer-1",
+			"producer_id": "producer-1",
+			"tier": "free",
+			"status": "pending",
+			"created_at": "2026-01-01T00:00:00Z",
+			"updated_at": "2026-01-01T00:00:00Z"
+		}`))
+	}))
+	defer server.Close()
+
+	c := newTestConsumer(server.URL)
+
+	result, err := c.CreateSubscriptionRequest(context.Background(), types.CreateSubscriptionRequestInput{
+		ProducerID: "producer-1",
+	})
+	if err != nil {
+		t.Fatalf("CreateSubscriptionRequest returned error on 201 response: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected result, got nil")
+	}
+	if result.RequestID != "req-201" {
+		t.Errorf("expected RequestID \"req-201\", got %q", result.RequestID)
+	}
+	if result.Status != "pending" {
+		t.Errorf("expected Status \"pending\", got %q", result.Status)
+	}
+}
+
+// TestMakeAPIRequest_StatusCodeContract pins makeAPIRequest's "any 2xx is
+// success, everything else is an error" contract. The bug fixed in v2.1.3
+// was a `resp.StatusCode != 200` check that rejected 201 Created responses
+// from the helix API on POST /v1/subscription-requests. The fix widens the
+// success window to the full 2xx range, matching the HTTP RFC and the
+// pattern used in producer.go and api/client.go.
+//
+// Tests cover happy (200, 201, 204), bad (400, 401, 500), and edge (199,
+// 300) status codes. Each case drives CreateSubscriptionRequest end-to-end
+// against an httptest server that returns the desired status, asserting
+// that 2xx values reach the success path and non-2xx values surface as
+// "API request failed: %d - …" errors with the status code preserved.
+//
+// CreateSubscriptionRequest is the exported wrapper we use because
+// makeAPIRequest is package-private; its single makeAPIRequest call site
+// exercises the full request → status-code → decode pipeline.
+func TestMakeAPIRequest_StatusCodeContract(t *testing.T) {
+	// successBody is a minimally valid SubscriptionRequest payload — enough
+	// for json.Decoder to populate result without erroring. Used for every
+	// 2xx case so the success-path decode step also runs.
+	const successBody = `{
+		"_id": "req-x",
+		"request_id": "req-x",
+		"consumer_id": "consumer-1",
+		"producer_id": "producer-1",
+		"tier": "free",
+		"status": "pending",
+		"created_at": "2026-01-01T00:00:00Z",
+		"updated_at": "2026-01-01T00:00:00Z"
+	}`
+
+	cases := []struct {
+		name       string
+		status     int
+		body       string
+		wantErr    bool
+		wantInBody string // substring expected in error message (for !nil err only)
+	}{
+		// Happy: 2xx success path.
+		{name: "happy_200_OK", status: http.StatusOK, body: successBody, wantErr: false},
+		{name: "happy_201_Created", status: http.StatusCreated, body: successBody, wantErr: false},
+		// 204 No Content: no body. CreateSubscriptionRequest passes a non-nil
+		// result pointer, so an empty body returns io.EOF from json.Decode.
+		// In production 204 is used by DELETE-style endpoints (see
+		// CancelSubscription) where result is nil and the EOF path is
+		// skipped — that's the realistic shape, exercised by
+		// happy_204_NoContent_NoResult below.
+		{name: "happy_204_NoContent_NoResult", status: http.StatusNoContent, body: "", wantErr: false},
+		// Bad: 4xx/5xx error path.
+		{name: "bad_400_BadRequest", status: http.StatusBadRequest, body: `{"error":"validation failed"}`, wantErr: true, wantInBody: "400"},
+		{name: "bad_401_Unauthorized", status: http.StatusUnauthorized, body: `{"error":"unauthorized"}`, wantErr: true, wantInBody: "401"},
+		{name: "bad_500_InternalServerError", status: http.StatusInternalServerError, body: "internal error", wantErr: true, wantInBody: "500"},
+		// Edge: 1xx and 3xx are NOT success per the 2xx contract.
+		// - 199 is below the 2xx range. Go's net/http transport treats 1xx
+		//   responses as informational and waits for a final response,
+		//   producing a transport-level error (EOF) rather than reaching
+		//   our status-code check. Either way the call fails, so we only
+		//   assert wantErr=true without pinning the exact message — the
+		//   contract is "non-2xx must NOT reach the success path".
+		// - 300 is a redirect; the SDK does NOT follow because AWS SigV4
+		//   binds the signature to the original URL (silently following
+		//   would re-sign or fail). Reaches our status check normally.
+		{name: "edge_199_below_2xx", status: 199, body: "", wantErr: true},
+		{name: "edge_300_MultipleChoices", status: http.StatusMultipleChoices, body: "", wantErr: true, wantInBody: "300"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				if tc.body != "" {
+					_, _ = w.Write([]byte(tc.body))
+				}
+			}))
+			defer server.Close()
+
+			c := newTestConsumer(server.URL)
+
+			// happy_204_NoContent_NoResult uses CancelSubscription because
+			// it passes result=nil to makeAPIRequest, matching the realistic
+			// 204 use case (DELETE endpoints with empty body).
+			var err error
+			if tc.name == "happy_204_NoContent_NoResult" {
+				err = c.CancelSubscription(context.Background(), "sub-1")
+			} else {
+				_, err = c.CreateSubscriptionRequest(context.Background(), types.CreateSubscriptionRequestInput{
+					ProducerID: "producer-1",
+				})
+			}
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for status %d, got nil", tc.status)
+				}
+				// Confirm the original status code surfaces in the error
+				// message — callers rely on it to distinguish 400 vs 500.
+				if tc.wantInBody != "" && !strings.Contains(err.Error(), tc.wantInBody) {
+					t.Errorf("error message %q missing expected substring %q (status code should surface to callers)",
+						err.Error(), tc.wantInBody)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("expected success for status %d, got error: %v", tc.status, err)
+			}
+		})
+	}
+}
+
+// TestMakeAPIRequest_MalformedBodyOn201 verifies the body-parse contract
+// is independent of the status-code contract. A 201 Created response is
+// success per HTTP semantics — even if the body is unparseable JSON, the
+// request itself succeeded server-side (the resource was created in
+// Mongo). The SDK surfaces the parse error to the caller because
+// CreateSubscriptionRequest's API contract returns *SubscriptionRequest,
+// but the failure mode is "malformed response body" not "request failed".
+//
+// This test pins the boundary: status code 201 → past the status check
+// (no "API request failed" error), then json.Decode fails → that decode
+// error is what the caller sees. A regression that conflates the two
+// (e.g. swallowing parse errors on 2xx) would break this test.
+func TestMakeAPIRequest_MalformedBodyOn201(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		// Truncated/invalid JSON — opens an object but never closes it.
+		_, _ = w.Write([]byte(`{"request_id": "req-x"`))
+	}))
+	defer server.Close()
+
+	c := newTestConsumer(server.URL)
+	_, err := c.CreateSubscriptionRequest(context.Background(), types.CreateSubscriptionRequestInput{
+		ProducerID: "producer-1",
+	})
+	if err == nil {
+		t.Fatal("expected decode error on malformed 201 body, got nil")
+	}
+	// Must NOT be the status-code-rejection error — the request DID
+	// succeed; only the body parse failed.
+	if strings.Contains(err.Error(), "API request failed") {
+		t.Errorf("malformed 201 body should produce a decode error, not a status-code error: %v", err)
 	}
 }
 

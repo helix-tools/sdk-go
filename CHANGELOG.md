@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-05-04 (v2.1.3)
+
+### Fixed
+- **Consumer `makeAPIRequest` 2xx success range**: Widened the success check
+  from `resp.StatusCode != 200` to `resp.StatusCode < 200 || resp.StatusCode >= 300`,
+  matching the HTTP RFC and the pattern already used by `producer.go`,
+  `api/client.go`, and `agent/client.go`. The helix-api returns **201 Created**
+  on a successful `POST /v1/subscription-requests`, so before this fix every
+  real `Consumer.CreateSubscriptionRequest` call surfaced a fake
+  `"API request failed: 201"` error to the caller even though the request
+  WAS persisted in Mongo. The previous test suite mocked 200 from `httptest`,
+  masking the bug. Live-verified against `https://api-go.helix.tools` with
+  Phone.com (consumer) credentials — request created with status `pending`.
+
+### Tests
+- Added `TestCreateSubscriptionRequest_Accepts201Created` — pins the 201
+  success-path regression.
+- Added `TestMakeAPIRequest_StatusCodeContract` — table-driven coverage of
+  the full 2xx contract: 200 OK, 201 Created, 204 No Content (via
+  `CancelSubscription` / DELETE), 400 Bad Request, 401 Unauthorized,
+  500 Internal Server Error, 199 (below 2xx), 300 Multiple Choices.
+- Added `TestMakeAPIRequest_MalformedBodyOn201` — pins that a successful
+  status code with unparseable body surfaces a decode error (not a fake
+  "API request failed"), keeping the status-code contract orthogonal to
+  the body-parse contract.
+
 ## 2026-02-09
 
 ### Added
