@@ -3,11 +3,41 @@ package consumer
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/helix-tools/sdk-go/types"
 )
+
+// TestDefaultHTTPClientTimeoutIsBounded locks in the defense-in-depth
+// contract introduced in v2.1.1: the Consumer's httpClient must carry a
+// non-zero Timeout so any HTTP call (getDataset, getDownloadUrl, S3
+// download, outcome callback) has a client-level safety net even if a
+// future code path omits a per-call context deadline.
+//
+// We can't exercise NewConsumer directly here because it calls AWS STS,
+// but we can pin the constant the constructor uses and verify that an
+// http.Client built from it has the expected non-zero Timeout.
+func TestDefaultHTTPClientTimeoutIsBounded(t *testing.T) {
+	if defaultHTTPClientTimeout <= 0 {
+		t.Fatalf("defaultHTTPClientTimeout must be > 0, got %v", defaultHTTPClientTimeout)
+	}
+
+	// Pin the documented value: longer than the 5s per-call ctx budget
+	// for the outcome callback so per-call deadlines still win.
+	if defaultHTTPClientTimeout != 10*time.Second {
+		t.Fatalf("defaultHTTPClientTimeout drifted from 10s, got %v — "+
+			"update the comment in consumer.go if this is intentional",
+			defaultHTTPClientTimeout)
+	}
+
+	client := &http.Client{Timeout: defaultHTTPClientTimeout}
+	if client.Timeout == 0 {
+		t.Fatalf("http.Client built from defaultHTTPClientTimeout has zero Timeout")
+	}
+}
 
 // TestSubscriptionUnmarshalPreservesExtendedFields ensures Subscription captures metadata new consumers rely on.
 func TestSubscriptionUnmarshalPreservesExtendedFields(t *testing.T) {
