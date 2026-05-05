@@ -91,14 +91,16 @@ var userPathPattern = regexp.MustCompile(`/Users/[^/\s]+`)
 var homePathPattern = regexp.MustCompile(`/home/[^/\s]+`)
 
 // RecordOutcomeRequest is the body shape for POST /v1/datasets/:id/
-// download-events. Optional fields use omitempty so a success callback
-// doesn't carry stale error fields and vice versa.
+// download-events. Status-dependent fields (error_*, bytes_downloaded)
+// use omitempty so a success callback doesn't carry stale error fields
+// and vice versa. EventID, Status, and DurationMs are emitted
+// unconditionally — they're populated on every callback.
 type RecordOutcomeRequest struct {
 	EventID         string        `json:"event_id"`
 	Status          string        `json:"status"` // "success" | "error"
 	ErrorCategory   ErrorCategory `json:"error_category,omitempty"`
 	ErrorMessage    string        `json:"error_message,omitempty"`
-	DurationMs      int64         `json:"duration_ms,omitempty"`
+	DurationMs      int64         `json:"duration_ms"`
 	BytesDownloaded int64         `json:"bytes_downloaded,omitempty"`
 	SDKVersion      string        `json:"sdk_version,omitempty"`
 	SDKLanguage     string        `json:"sdk_language,omitempty"`
