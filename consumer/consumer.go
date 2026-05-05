@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -38,6 +39,62 @@ import (
 
 // emptyPayloadHash is the SHA256 hash of an empty payload.
 const emptyPayloadHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+// SDKVersion is the Go SDK version surfaced in download outcome callbacks.
+// Bumped in lockstep with the module version tag so the producer dashboard
+// can spot single-version regressions across the consumer fleet.
+const SDKVersion = "2.1.0"
+
+// SDKLanguage identifies this SDK's language in download outcome callbacks
+// (matches the dataset_download_event JSON Schema's sdk_language field).
+const SDKLanguage = "go"
+
+// ErrorCategory mirrors the dataset_download_event JSON Schema enum. Each
+// value tags one phase of the DownloadDataset pipeline so a failed download
+// surfaces a meaningful category in the producer dashboard. Keep in sync
+// with sdk-schemas/dataset_download_event.schema.json (properties.
+// error_category.enum).
+type ErrorCategory string
+
+// Valid ErrorCategory values — must match the JSON Schema enum exactly.
+const (
+	ErrorCategorySignedURLFetch ErrorCategory = "signed_url_fetch"
+	ErrorCategoryMetadataFetch  ErrorCategory = "metadata_fetch"
+	ErrorCategoryNetworkFetch   ErrorCategory = "network_fetch"
+	ErrorCategoryKMSDecrypt     ErrorCategory = "kms_decrypt"
+	ErrorCategoryDecompress     ErrorCategory = "decompress"
+	ErrorCategoryDiskWrite      ErrorCategory = "disk_write"
+	ErrorCategoryUnknown        ErrorCategory = "unknown"
+)
+
+// errorMessageMaxChars caps error_message before sending so a stack trace
+// can't blow the server-side 500-char limit.
+const errorMessageMaxChars = 500
+
+// outcomeCallbackTimeout is the tight HTTP timeout on the outcome POST so
+// a slow observability API can't hold up an otherwise successful download.
+const outcomeCallbackTimeout = 5 * time.Second
+
+// userPathPattern strips /Users/<name>/ paths from error_message before
+// sending so the producer dashboard never sees a consumer's home dir.
+var userPathPattern = regexp.MustCompile(`/Users/[^/\s]+`)
+
+// homePathPattern is the Linux equivalent of userPathPattern.
+var homePathPattern = regexp.MustCompile(`/home/[^/\s]+`)
+
+// RecordOutcomeRequest is the body shape for POST /v1/datasets/:id/
+// download-events. Optional fields use omitempty so a success callback
+// doesn't carry stale error fields and vice versa.
+type RecordOutcomeRequest struct {
+	EventID         string        `json:"event_id"`
+	Status          string        `json:"status"` // "success" | "error"
+	ErrorCategory   ErrorCategory `json:"error_category,omitempty"`
+	ErrorMessage    string        `json:"error_message,omitempty"`
+	DurationMs      int64         `json:"duration_ms,omitempty"`
+	BytesDownloaded int64         `json:"bytes_downloaded,omitempty"`
+	SDKVersion      string        `json:"sdk_version,omitempty"`
+	SDKLanguage     string        `json:"sdk_language,omitempty"`
+}
 
 // Consumer handles downloading and managing datasets from Helix Connect platform.
 type Consumer struct {
@@ -60,6 +117,13 @@ type DownloadURLInfo struct {
 	ExpiresAt   string `json:"expires_at"`
 	FileName    string `json:"file_name,omitempty"`
 	FileSize    int64  `json:"file_size,omitempty"`
+	// EventID is the server-side observability hook. The API records one
+	// `dataset_download_events` row at URL-issue time with status=success
+	// and returns its identifier here. The SDK uses it to call back with
+	// the actual download outcome via POST /v1/datasets/:id/download-events.
+	// Absent in environments where observability isn't wired (older API
+	// versions, dev) — the callback then no-ops.
+	EventID string `json:"event_id,omitempty"`
 	// Legacy nested dataset object (for backward compatibility).
 	Dataset *struct {
 		ID        string `json:"_id"`
@@ -205,18 +269,73 @@ func (c *Consumer) GetDownloadURL(ctx context.Context, datasetID string) (*Downl
 }
 
 // DownloadDataset downloads and processes a dataset to a local file.
-func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath string) error {
+//
+// Observability: after the URL is issued by the API a server-side
+// `dataset_download_events` row is created with status=success. This method
+// then tracks the actual download outcome and fires a fire-and-forget
+// callback to POST /v1/datasets/:id/download-events so the producer
+// dashboard reflects what really happened (status=error + category +
+// message on failure, or status=success + bytes_downloaded + duration_ms
+// on success). The callback is best-effort — its failure NEVER affects
+// the caller's experience.
+func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath string) (retErr error) {
 	fmt.Printf("Downloading dataset %s...\n", datasetID)
 
-	// Get download URL.
-	urlInfo, err := c.GetDownloadURL(ctx, datasetID)
-	if err != nil {
-		return fmt.Errorf("failed to get download URL: %w", err)
-	}
+	start := time.Now()
+	// `phase` tracks where we are in the pipeline so an exception at any
+	// failure point becomes a meaningful error_category in the outcome
+	// callback. Categories must match the schema's enum: signed_url_fetch
+	// / metadata_fetch / network_fetch / kms_decrypt / decompress /
+	// disk_write / unknown.
+	phase := ErrorCategoryUnknown
+	var (
+		eventID         string
+		bytesDownloaded int64
+		errorMessage    string
+	)
 
-	// Get dataset metadata to check encryption/compression settings.
+	// defer fires the outcome callback after the pipeline returns or
+	// panics. We capture variables by value into the deferred goroutine
+	// so a later mutation can't poison the payload, and use a fresh
+	// context.Background() rather than the caller's ctx — the caller's
+	// ctx may already be cancelled by the time defer runs.
+	defer func() {
+		if eventID == "" {
+			// Older API didn't surface event_id; nothing to update.
+			return
+		}
+		durationMs := time.Since(start).Milliseconds()
+		req := RecordOutcomeRequest{
+			EventID:     eventID,
+			DurationMs:  durationMs,
+			SDKVersion:  SDKVersion,
+			SDKLanguage: SDKLanguage,
+		}
+		if retErr == nil {
+			req.Status = "success"
+			req.BytesDownloaded = bytesDownloaded
+		} else {
+			req.Status = "error"
+			req.ErrorCategory = phase
+			req.ErrorMessage = sanitizeErrorMessage(errorMessage)
+		}
+		// Capture by value into the goroutine. Best-effort: errors are
+		// swallowed so the producer dashboard's URL-issued row remains
+		// the source of truth even if the callback API is down.
+		go func(payload RecordOutcomeRequest, dsID string) {
+			cbCtx, cancel := context.WithTimeout(context.Background(), outcomeCallbackTimeout)
+			defer cancel()
+			_ = c.recordOutcome(cbCtx, dsID, payload)
+		}(req, datasetID)
+	}()
+
+	// 1. Metadata fetch (BEFORE signed-url fetch — matches TS order so a
+	// metadata failure has no event_id captured yet and the callback
+	// becomes a no-op).
+	phase = ErrorCategoryMetadataFetch
 	dataset, err := c.GetDataset(ctx, datasetID)
 	if err != nil {
+		errorMessage = err.Error()
 		return fmt.Errorf("failed to get dataset metadata: %w", err)
 	}
 
@@ -235,142 +354,193 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 	fmt.Printf("   Compressed: %v\n", isCompressed)
 	fmt.Printf("   Encrypted: %v\n", isEncrypted)
 
-	// Download file.
-	resp, err := http.Get(urlInfo.DownloadURL)
+	// 2. Signed-URL fetch.
+	phase = ErrorCategorySignedURLFetch
+	urlInfo, err := c.GetDownloadURL(ctx, datasetID)
 	if err != nil {
+		errorMessage = err.Error()
+		return fmt.Errorf("failed to get download URL: %w", err)
+	}
+	// Capture event_id for the outcome callback. Absent against older
+	// API versions — the callback path becomes a no-op.
+	eventID = urlInfo.EventID
+
+	// 3. Network fetch.
+	phase = ErrorCategoryNetworkFetch
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlInfo.DownloadURL, nil)
+	if err != nil {
+		errorMessage = err.Error()
+		return fmt.Errorf("failed to build download request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		errorMessage = err.Error()
 		return fmt.Errorf("failed to download: %w", err)
 	}
-
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("download failed with status %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		errorMessage = fmt.Sprintf("download failed with status %d", resp.StatusCode)
+		return fmt.Errorf("%s", errorMessage)
 	}
 
-	// Get content length.
 	contentLength := resp.ContentLength
-
 	largeFileThreshold := int64(100 * 1024 * 1024) // 100MB
 
-	// For large files, always stream to temporary file first to avoid memory issues.
 	if contentLength > largeFileThreshold {
-		// Create temporary file
-		tempFile, err := os.CreateTemp("", "helix-dataset-*")
-		if err != nil {
-			return fmt.Errorf("failed to create temp file: %w", err)
+		// Large-file path: stream to temp, process, write final.
+		tempFile, terr := os.CreateTemp("", "helix-dataset-*")
+		if terr != nil {
+			errorMessage = terr.Error()
+			return fmt.Errorf("failed to create temp file: %w", terr)
 		}
-
-		defer os.Remove(tempFile.Name()) // Clean up temp file.
-
+		defer os.Remove(tempFile.Name())
 		defer tempFile.Close()
 
-		// Stream download to temp file.
 		sizeGB := float64(contentLength) / (1024 * 1024 * 1024)
-
 		fmt.Printf("Streaming %.2f GB to temporary file...\n", sizeGB)
 
-		written, err := io.Copy(tempFile, resp.Body)
-		if err != nil {
-			return fmt.Errorf("failed to stream to temp file: %w", err)
+		written, cerr := io.Copy(tempFile, resp.Body)
+		if cerr != nil {
+			errorMessage = cerr.Error()
+			return fmt.Errorf("failed to stream to temp file: %w", cerr)
 		}
-
-		tempFile.Close() // Close before reading.
-
+		tempFile.Close()
 		fmt.Printf("Downloaded %d bytes to temp file\n", written)
+		bytesDownloaded = written
 
-		// For processed files, read from temp file, process, and write to final location.
-		fmt.Printf("Processing temp file...\n")
-
-		data, err := os.ReadFile(tempFile.Name())
-		if err != nil {
-			return fmt.Errorf("failed to read temp file: %w", err)
+		data, rerr := os.ReadFile(tempFile.Name())
+		if rerr != nil {
+			errorMessage = rerr.Error()
+			return fmt.Errorf("failed to read temp file: %w", rerr)
 		}
 
-		// Step 1: Decrypt FIRST (if encrypted).
 		if isEncrypted {
+			phase = ErrorCategoryKMSDecrypt
 			fmt.Printf("Decrypting %d bytes with KMS...\n", len(data))
-
 			data, err = c.decryptData(ctx, data)
 			if err != nil {
+				errorMessage = err.Error()
 				return fmt.Errorf("decryption failed: %w", err)
 			}
-
 			fmt.Printf("Decrypted to %d bytes\n", len(data))
+			bytesDownloaded = int64(len(data))
 		}
 
-		// Step 2: Decompress SECOND (if compressed).
 		if isCompressed {
+			phase = ErrorCategoryDecompress
 			fmt.Printf("Decompressing %d bytes...\n", len(data))
-
 			data, err = c.decompressData(data)
 			if err != nil {
+				errorMessage = err.Error()
 				return fmt.Errorf("decompression failed: %w", err)
 			}
-
 			decompressedGB := float64(len(data)) / (1024 * 1024 * 1024)
 			if decompressedGB > 1 {
 				fmt.Printf("Decompressed to %.2f GB\n", decompressedGB)
 			} else {
 				fmt.Printf("Decompressed to %d bytes\n", len(data))
 			}
+			bytesDownloaded = int64(len(data))
 		}
 
-		// Write processed data to final file.
-		if err := os.WriteFile(outputPath, data, 0644); err != nil {
-			return fmt.Errorf("failed to write file: %w", err)
+		phase = ErrorCategoryDiskWrite
+		if werr := os.WriteFile(outputPath, data, 0644); werr != nil {
+			errorMessage = werr.Error()
+			return fmt.Errorf("failed to write file: %w", werr)
 		}
-
 		fmt.Printf("Saved to %s\n", outputPath)
-
 		return nil
 	}
 
-	// For smaller files, process in memory as before.
+	// Small-file path: process in memory.
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
+		errorMessage = err.Error()
 		return fmt.Errorf("failed to read response: %w", err)
 	}
 
 	fmt.Printf("Downloaded %d bytes\n", len(data))
+	bytesDownloaded = int64(len(data))
 
-	// Step 1: Decrypt FIRST (if encrypted).
 	if isEncrypted {
+		phase = ErrorCategoryKMSDecrypt
 		fmt.Printf("Decrypting %d bytes with KMS...\n", len(data))
-
 		data, err = c.decryptData(ctx, data)
 		if err != nil {
+			errorMessage = err.Error()
 			return fmt.Errorf("decryption failed: %w", err)
 		}
-
 		fmt.Printf("Decrypted to %d bytes\n", len(data))
+		bytesDownloaded = int64(len(data))
 	}
 
-	// Step 2: Decompress SECOND (if compressed).
 	if isCompressed {
+		phase = ErrorCategoryDecompress
 		fmt.Printf("Decompressing %d bytes...\n", len(data))
-
 		data, err = c.decompressData(data)
 		if err != nil {
+			errorMessage = err.Error()
 			return fmt.Errorf("decompression failed: %w", err)
 		}
-
 		decompressedGB := float64(len(data)) / (1024 * 1024 * 1024)
-
 		if decompressedGB > 1 {
 			fmt.Printf("Decompressed to %.2f GB\n", decompressedGB)
 		} else {
 			fmt.Printf("Decompressed to %d bytes\n", len(data))
 		}
+		bytesDownloaded = int64(len(data))
 	}
 
-	// Write to file.
+	phase = ErrorCategoryDiskWrite
 	if err := os.WriteFile(outputPath, data, 0644); err != nil {
+		errorMessage = err.Error()
 		return fmt.Errorf("failed to write file: %w", err)
 	}
-
 	fmt.Printf("Saved to %s\n", outputPath)
 
 	return nil
+}
+
+// recordOutcome posts the outcome of an actual download to the API so the
+// producer dashboard reflects what really happened. Best-effort — caller
+// should swallow errors. Uses outcomeCallbackTimeout (5s) on the request
+// context so a slow API can't hold up an otherwise successful download.
+//
+// dataset_id is encoded with encodeURIComponent semantics (matches the
+// TS SDK), which means slashes in IDs become %2F so the path matches
+// what /v1/datasets/:id routing expects on the server side.
+func (c *Consumer) recordOutcome(ctx context.Context, datasetID string, payload RecordOutcomeRequest) error {
+	path := fmt.Sprintf("/v1/datasets/%s/download-events", encodeURIComponent(datasetID))
+	return c.makeAPIRequest(ctx, http.MethodPost, path, payload, nil)
+}
+
+// encodeURIComponent mirrors JavaScript's encodeURIComponent: every char
+// that isn't an unreserved letter, digit, or one of "-_.!~*'()" is
+// percent-encoded — including "/", which Go's url.PathEscape preserves.
+// Used on the outcome-callback path so a dataset_id with a slash routes
+// to /v1/datasets/:id correctly server-side.
+func encodeURIComponent(s string) string {
+	// url.QueryEscape encodes spaces as "+"; convert back to "%20" so
+	// the result matches encodeURIComponent's output exactly.
+	escaped := url.QueryEscape(s)
+	return strings.ReplaceAll(escaped, "+", "%20")
+}
+
+// sanitizeErrorMessage strips filesystem paths from an error string and
+// caps the length before sending to the producer dashboard. The TS SDK
+// uses the same regex pair (/Users/<name>/ and /home/<name>/) — keep in
+// sync.
+func sanitizeErrorMessage(msg string) string {
+	if msg == "" {
+		return ""
+	}
+	scrubbed := userPathPattern.ReplaceAllString(msg, "/Users/<redacted>")
+	scrubbed = homePathPattern.ReplaceAllString(scrubbed, "/home/<redacted>")
+	if len(scrubbed) > errorMessageMaxChars {
+		scrubbed = scrubbed[:errorMessageMaxChars]
+	}
+	return scrubbed
 }
 
 // decryptData decrypts data using envelope decryption.
