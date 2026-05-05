@@ -689,7 +689,7 @@ func (c *Consumer) ListSubscriptions(ctx context.Context, opts *ListSubscription
 // Parameters:
 //   - input.ProducerID: Required. The ID of the producer to request access from.
 //   - input.DatasetID: Optional. Specific dataset ID (nil for all-datasets access).
-//   - input.Tier: Optional. Subscription tier (defaults to "basic").
+//   - input.Tier: Optional. Subscription tier (defaults to "free").
 //   - input.Message: Optional. Message to the producer explaining the request.
 //
 // Returns the created subscription request with status "pending".
@@ -702,9 +702,10 @@ func (c *Consumer) CreateSubscriptionRequest(ctx context.Context, input types.Cr
 		Message:    input.Message,
 	}
 
-	// Default tier to "basic" if not specified
+	// Default tier to "free" — the only canonical tier accepted by the API
+	// (sub-1 of Producer-Invite Epic 86e12p8ah collapsed all paid tiers).
 	if payload.Tier == "" {
-		payload.Tier = "basic"
+		payload.Tier = "free"
 	}
 
 	var result types.SubscriptionRequest

@@ -1,9 +1,11 @@
 package consumer
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"testing"
 	"time"
@@ -304,10 +306,11 @@ func TestCreateSubscriptionRequestPayloadMarshal(t *testing.T) {
 }
 
 // TestCreateSubscriptionRequestPayloadWithoutOptional tests payload without optional fields.
+// "free" is the canonical tier; the SDK defaults empty Tier to "free" before sending.
 func TestCreateSubscriptionRequestPayloadWithoutOptional(t *testing.T) {
 	payload := types.CreateSubscriptionRequestPayload{
 		ProducerID: "company-456",
-		Tier:       "basic",
+		Tier:       "free",
 	}
 
 	jsonBytes, err := json.Marshal(payload)
@@ -324,8 +327,8 @@ func TestCreateSubscriptionRequestPayloadWithoutOptional(t *testing.T) {
 		t.Errorf("expected producer_id 'company-456', got '%v'", parsed["producer_id"])
 	}
 
-	if parsed["tier"] != "basic" {
-		t.Errorf("expected tier 'basic', got '%v'", parsed["tier"])
+	if parsed["tier"] != "free" {
+		t.Errorf("expected tier 'free', got '%v'", parsed["tier"])
 	}
 
 	// Optional fields should be omitted when nil
@@ -335,6 +338,55 @@ func TestCreateSubscriptionRequestPayloadWithoutOptional(t *testing.T) {
 
 	if _, exists := parsed["message"]; exists {
 		t.Errorf("message should be omitted when nil")
+	}
+}
+
+// TestCreateSubscriptionRequest_DefaultTierIsFree exercises the default-tier
+// branch in Consumer.CreateSubscriptionRequest end-to-end against a stub HTTP
+// server. When the caller does NOT set Tier, the SDK must send tier="free"
+// (NOT "basic" — see helix-api v1.8.2 which now rejects "basic" with 400).
+func TestCreateSubscriptionRequest_DefaultTierIsFree(t *testing.T) {
+	var capturedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		// makeAPIRequest only treats 200 as success today (NB: API actually
+		// returns 201 — separate latent issue, not in scope for this fix).
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"_id": "req-x",
+			"request_id": "req-x",
+			"consumer_id": "consumer-1",
+			"producer_id": "producer-1",
+			"tier": "free",
+			"status": "pending",
+			"created_at": "2026-01-01T00:00:00Z",
+			"updated_at": "2026-01-01T00:00:00Z"
+		}`))
+	}))
+	defer server.Close()
+
+	c := newTestConsumer(server.URL)
+
+	// No Tier set → SDK should default it to "free".
+	result, err := c.CreateSubscriptionRequest(context.Background(), types.CreateSubscriptionRequestInput{
+		ProducerID: "producer-1",
+	})
+	if err != nil {
+		t.Fatalf("CreateSubscriptionRequest: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected result, got nil")
+	}
+
+	tier, ok := capturedBody["tier"].(string)
+	if !ok {
+		t.Fatalf("tier field missing or not string in payload: %#v", capturedBody)
+	}
+	if tier != "free" {
+		t.Errorf("expected outgoing tier=\"free\", got %q (helix-api v1.8.2 rejects non-canonical tiers with 400)", tier)
 	}
 }
 
