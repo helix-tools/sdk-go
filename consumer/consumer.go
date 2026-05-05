@@ -43,7 +43,7 @@ const emptyPayloadHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca49599
 // SDKVersion is the Go SDK version surfaced in download outcome callbacks.
 // Bumped in lockstep with the module version tag so the producer dashboard
 // can spot single-version regressions across the consumer fleet.
-const SDKVersion = "2.1.1"
+const SDKVersion = "2.1.4"
 
 // SDKLanguage identifies this SDK's language in download outcome callbacks
 // (matches the dataset_download_event JSON Schema's sdk_language field).
@@ -91,17 +91,24 @@ var userPathPattern = regexp.MustCompile(`/Users/[^/\s]+`)
 var homePathPattern = regexp.MustCompile(`/home/[^/\s]+`)
 
 // RecordOutcomeRequest is the body shape for POST /v1/datasets/:id/
-// download-events. Status-dependent fields (error_*, bytes_downloaded)
-// use omitempty so a success callback doesn't carry stale error fields
-// and vice versa. EventID, Status, and DurationMs are emitted
-// unconditionally — they're populated on every callback.
+// download-events. Status-dependent fields (error_*) use omitempty so
+// a success callback doesn't carry stale error fields and vice versa.
+// EventID, Status, DurationMs, and BytesDownloaded are emitted
+// unconditionally — they're populated on every callback (success or
+// error). BytesDownloaded specifically: a legitimate 0-byte success
+// (empty dataset, empty NDJSON file, decompressed-to-empty payload)
+// must distinguish from "no telemetry sent" on the dashboard, so we
+// always serialize the int even when it's zero. Schema-side, the
+// server's persistence layer drops zero values per
+// dataset_download_event.schema.json's "persisted only when non-zero"
+// guidance — that's a server concern, not a wire-format one.
 type RecordOutcomeRequest struct {
 	EventID         string        `json:"event_id"`
 	Status          string        `json:"status"` // "success" | "error"
 	ErrorCategory   ErrorCategory `json:"error_category,omitempty"`
 	ErrorMessage    string        `json:"error_message,omitempty"`
 	DurationMs      int64         `json:"duration_ms"`
-	BytesDownloaded int64         `json:"bytes_downloaded,omitempty"`
+	BytesDownloaded int64         `json:"bytes_downloaded"`
 	SDKVersion      string        `json:"sdk_version,omitempty"`
 	SDKLanguage     string        `json:"sdk_language,omitempty"`
 }

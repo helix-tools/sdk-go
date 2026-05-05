@@ -1,5 +1,41 @@
 # Changelog
 
+## 2026-05-05 (v2.1.4)
+
+### Fixed
+- **`RecordOutcomeRequest.BytesDownloaded` always serialized**: Dropped
+  `,omitempty` from the `bytes_downloaded` JSON tag. With omitempty in
+  place, a legitimate 0-byte successful download (empty dataset, empty
+  NDJSON file, decompressed-to-empty payload) had `bytes_downloaded`
+  stripped from the wire, leaving the producer dashboard unable to tell
+  "0 bytes downloaded" apart from "no SDK telemetry received yet". This
+  mirrors the parallel-session `DurationMs` flake fix (commit `45b765d`)
+  for the bytes field. No prod behavior change for non-zero downloads;
+  receivers see `bytes_downloaded=0` instead of absent on legal 0-byte
+  successes and on early-failure error paths. The schema's "persisted
+  only when non-zero" rule continues to apply server-side at the Mongo
+  upsert layer (see `dataset_download_event.schema.json`), so zero-value
+  records do not pollute the dashboard's persisted history.
+- **`SDKVersion` constant synced to module tag**: The constant had
+  drifted at "2.1.1" through commits v2.1.2 and v2.1.3 (neither bumped
+  it). Re-synced to "2.1.4" to honor the doc comment's "in lockstep with
+  the module version tag" guarantee — this matters because the producer
+  dashboard's incident-triage view groups events by `sdk_version`, and
+  a stuck constant masks single-version regressions across the consumer
+  fleet.
+
+### Tests
+- Added `TestDownloadOutcome_SuccessZeroBytes` — pins the legal 0-byte
+  success case: `bytes_downloaded` must appear in the payload as the
+  literal number 0, not be absent. Uses two-value type assertion to
+  distinguish `(ok=false)` "missing key" from `(ok=true, got=0)` "key
+  set to zero".
+- Updated `TestDownloadOutcome_NetworkFetchError` — flipped from
+  asserting `bytes_downloaded` is absent on network failure to asserting
+  it's present and equal to 0, matching the new wire-format invariant.
+  Locks in that early-failure paths cannot regress to omitting the
+  field.
+
 ## 2026-05-04 (v2.1.3)
 
 ### Fixed
