@@ -769,7 +769,7 @@ func (c *Consumer) makeAPIRequest(ctx context.Context, method, path string, body
 
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 
 		return fmt.Errorf("API request failed: %d - %s", resp.StatusCode, string(bodyBytes))
