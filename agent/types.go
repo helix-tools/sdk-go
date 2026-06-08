@@ -38,12 +38,19 @@ type RateLimitBucket struct {
 }
 
 // RateLimitConfig is the nested 3-bucket rate-limit object carried on
-// an AgentRecord. All buckets are optional — an absent bucket means
-// "use the global default for this operation class".
+// an AgentRecord. The buckets are POINTERS so the wire distinction the
+// server relies on is preserved (mirrors agents.RateLimitConfig):
+//
+//   - nil bucket            → unlimited; the field is omitted entirely
+//     (omitempty only fires for nil on a pointer — a value struct would
+//     always serialize as {"rpm":0}, silently collapsing the states
+//     below into one).
+//   - present {"rpm":0}      → blocked (HTTP 429 class_blocked_by_registry).
+//   - present {"rpm":>0}     → limited to that sustained rate.
 type RateLimitConfig struct {
-	Read   RateLimitBucket `json:"read,omitempty"`
-	Write  RateLimitBucket `json:"write,omitempty"`
-	Delete RateLimitBucket `json:"delete,omitempty"`
+	Read   *RateLimitBucket `json:"read,omitempty"`
+	Write  *RateLimitBucket `json:"write,omitempty"`
+	Delete *RateLimitBucket `json:"delete,omitempty"`
 }
 
 // AgentRecord describes a single agent registered with Helix.
