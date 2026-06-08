@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **`RateLimitConfig` buckets are now `*RateLimitBucket` pointers**
+  (DRIFT-GOSDK-RATELIMIT-1). The `Read`/`Write`/`Delete` fields were value
+  `RateLimitBucket` structs, but the authoritative Go API
+  (`internal/pkg/agents` `RateLimitConfig`) uses `*RateLimitBucket` where the
+  pointer carries the contract: nil bucket = unlimited (key omitted),
+  present `{"rpm":0}` = blocked (HTTP 429 `class_blocked_by_registry`),
+  present `{"rpm":>0}` = limited. With value structs `omitempty` is a no-op,
+  so a zero-value bucket always serialized as `{"rpm":0}` and the SDK could
+  not represent — nor round-trip — the unlimited-vs-blocked distinction; it
+  silently collapsed both into "blocked". Wire keys are unchanged
+  (`read`/`write`/`delete`, `rpm`/`burst`), so this is source-compatible at
+  the JSON level; Go callers constructing a `RateLimitConfig` must now take
+  the address of their buckets (`&RateLimitBucket{...}`) and may leave a
+  class `nil` to mean unlimited.
+
+### Tests
+- Added `TestRateLimitConfig_PointerBucketStatesRoundTrip` and
+  `TestRateLimitConfig_AbsentFieldsDecodeToNil` (`agent/types_test.go`) —
+  pin all three states across a full marshal/unmarshal cycle: a nil bucket
+  must be absent on the wire and decode back to nil; a present `{"rpm":0}`
+  must round-trip as a non-nil bucket with RPM 0 (distinct from nil); a
+  present `{"rpm":>0}` must round-trip its rate and burst. The nil-vs-zero
+  assertions are structurally impossible to satisfy under value semantics.
+
 ## 2026-05-05 (v2.2.0)
 
 ### Fixed
