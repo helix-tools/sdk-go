@@ -1,5 +1,23 @@
 package types
 
+// CompanyStatus is the canonical lifecycle state of a company/customer.
+// Canonical contract values (8, matching the Go API source of truth):
+// provisioning, active, inactive, suspended, provisioning_failed,
+// onboarding_failed, deprovisioning, decommission_failed.
+type CompanyStatus = string
+
+// Canonical CompanyStatus values.
+const (
+	CompanyStatusProvisioning       CompanyStatus = "provisioning"
+	CompanyStatusActive             CompanyStatus = "active"
+	CompanyStatusInactive           CompanyStatus = "inactive"
+	CompanyStatusSuspended          CompanyStatus = "suspended"
+	CompanyStatusProvisioningFailed CompanyStatus = "provisioning_failed"
+	CompanyStatusOnboardingFailed   CompanyStatus = "onboarding_failed"
+	CompanyStatusDeprovisioning     CompanyStatus = "deprovisioning"
+	CompanyStatusDecommissionFailed CompanyStatus = "decommission_failed"
+)
+
 // Company represents a company/customer in the system.
 type Company struct {
 	ID               string              `json:"_id"`
@@ -16,8 +34,8 @@ type Company struct {
 	S3Bucket         string              `json:"s3_bucket,omitempty"`
 	KMSKeyID         string              `json:"kms_key_id,omitempty"`
 	SNSTopicARN      string              `json:"sns_topic_arn,omitempty"`
-	Status           string              `json:"status"` // "provisioning", "active", "inactive", "provisioning_failed"
-	Tier             string              `json:"tier,omitempty"` // "basic", "professional", "enterprise"
+	Status           string              `json:"status"` // CompanyStatus: provisioning, active, inactive, suspended, provisioning_failed, onboarding_failed, deprovisioning, decommission_failed
+	Tier             string              `json:"tier,omitempty"` // SubscriptionTier — canonical write value is "free"
 	Settings         *CompanySettings    `json:"settings,omitempty"`
 	Onboarding       *OnboardingInfo     `json:"onboarding,omitempty"`
 	Infrastructure   *InfrastructureInfo `json:"infrastructure,omitempty"`

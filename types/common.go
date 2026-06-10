@@ -29,6 +29,17 @@ const (
 	DataFreshnessOnDemand        DataFreshness = "on-demand"
 )
 
+// DatasetStatus is the canonical lifecycle state of a dataset.
+// Canonical contract values: active, inactive, archived.
+type DatasetStatus = string
+
+// Canonical DatasetStatus values.
+const (
+	DatasetStatusActive   DatasetStatus = "active"
+	DatasetStatusInactive DatasetStatus = "inactive"
+	DatasetStatusArchived DatasetStatus = "archived"
+)
+
 // DatasetUpdateInput contains fields for updating a dataset via PATCH.
 // All fields are optional (pointer types) - nil means "no change".
 type DatasetUpdateInput struct {
