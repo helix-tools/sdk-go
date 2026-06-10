@@ -1,5 +1,36 @@
 package types
 
+// SubscriptionStatus is the canonical lifecycle state of a subscription.
+// Canonical contract values: active, paused, cancelled, expired.
+type SubscriptionStatus = string
+
+// Canonical SubscriptionStatus values. These mirror the company.schema.json /
+// Go API source of truth exactly — there is no "suspended" or "inactive"
+// subscription status (those were stale comment artifacts).
+const (
+	SubscriptionStatusActive    SubscriptionStatus = "active"
+	SubscriptionStatusPaused    SubscriptionStatus = "paused"
+	SubscriptionStatusCancelled SubscriptionStatus = "cancelled"
+	SubscriptionStatusExpired   SubscriptionStatus = "expired"
+)
+
+// SubscriptionTier is the canonical access tier on a subscription.
+// Reads are tolerant of the legacy/paid tier vocabulary; the only canonical
+// write value accepted by the API is "free" (paid tiers were collapsed in
+// the Producer-Invite epic).
+type SubscriptionTier = string
+
+// Canonical and read-tolerant SubscriptionTier values. TierFree is the only
+// canonical write value; the rest are accepted on read for backward compat.
+const (
+	TierFree         SubscriptionTier = "free"
+	TierStarter      SubscriptionTier = "starter"
+	TierBasic        SubscriptionTier = "basic"
+	TierPremium      SubscriptionTier = "premium"
+	TierProfessional SubscriptionTier = "professional"
+	TierEnterprise   SubscriptionTier = "enterprise"
+)
+
 // Subscription represents an active subscription to a dataset or producer.
 type Subscription struct {
 	ID               string  `json:"_id"`
@@ -9,8 +40,8 @@ type Subscription struct {
 	DatasetName      string  `json:"dataset_name,omitempty"`
 	ProducerID       string  `json:"producer_id"`
 	RequestID        string  `json:"request_id,omitempty"`
-	Tier             string  `json:"tier"` // "basic", "professional", "enterprise"
-	Status           string  `json:"status"` // "active", "suspended", "cancelled", "expired"
+	Tier             string  `json:"tier"` // SubscriptionTier — canonical write value is "free"
+	Status           string  `json:"status"` // SubscriptionStatus: "active", "paused", "cancelled", "expired"
 	KMSGrantID       *string `json:"kms_grant_id,omitempty"`
 	SNSSubscriptionARN *string `json:"sns_subscription_arn,omitempty"`
 	SQSQueueARN      *string `json:"sqs_queue_arn,omitempty"`
@@ -29,7 +60,7 @@ type SubscriptionsResponse struct {
 // Note: Subscriptions are typically created through subscription request approval.
 type CreateSubscriptionRequest struct {
 	DatasetID string `json:"dataset_id"`
-	Tier      string `json:"tier,omitempty"` // Defaults to "basic"
+	Tier      string `json:"tier,omitempty"` // SubscriptionTier — defaults to "free" (canonical write value)
 }
 
 // RevokeSubscriptionResponse is the response for PUT /v1/subscriptions/{id}/revoke.

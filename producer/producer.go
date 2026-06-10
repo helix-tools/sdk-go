@@ -575,76 +575,6 @@ func (p *Producer) UploadDataset(ctx context.Context, filePath string, opts Uplo
 	return dataset, nil
 }
 
-// updateDataset updates an existing dataset via PATCH /v1/datasets/:id.
-// This is used internally when UploadDataset encounters a 409 conflict.
-func (p *Producer) updateDataset(ctx context.Context, datasetID string, payload map[string]any) (*types.Dataset, error) {
-	// Build update request with only the fields that can be updated
-	updatePayload := map[string]any{}
-
-	// Copy allowed update fields from the full payload
-	updateableFields := []string{
-		"name", "description", "schema", "metadata", "status",
-		"visibility", "category", "access_tier", "tags",
-		"size_bytes", "record_count", "s3_key", "s3_bucket_name",
-		"data_freshness", "version", "version_notes", "last_updated",
-		"updated_at", "updated_by",
-	}
-
-	for _, field := range updateableFields {
-		if val, ok := payload[field]; ok {
-			updatePayload[field] = val
-		}
-	}
-
-	// Make PATCH request (ignore response body - API returns different field names)
-	path := fmt.Sprintf("/v1/datasets/%s", url.PathEscape(datasetID))
-
-	if err := p.makeAPIRequest(ctx, "PATCH", path, updatePayload, nil); err != nil {
-		return nil, fmt.Errorf("failed to update dataset: %w", err)
-	}
-
-	// Construct return value from the payload since PATCH succeeded
-	// (API response has different field names like 'id' vs '_id', 'total_size_bytes' vs 'size_bytes')
-	sizeBytes, _ := payload["size_bytes"].(int64)
-	recordCount, _ := payload["record_count"].(int)
-	metadata, _ := payload["metadata"].(map[string]any)
-	schema, _ := payload["schema"].(map[string]any)
-	tags, _ := payload["tags"].([]string)
-
-	return &types.Dataset{
-		ID:            datasetID,
-		IDAlias:       datasetID,
-		Name:          getStringField(payload, "name"),
-		Description:   getStringField(payload, "description"),
-		ProducerID:    p.CustomerID,
-		Category:      getStringField(payload, "category"),
-		DataFreshness: types.DataFreshness(getStringField(payload, "data_freshness")),
-		Visibility:    getStringField(payload, "visibility"),
-		Status:        getStringField(payload, "status"),
-		AccessTier:    getStringField(payload, "access_tier"),
-		S3Key:         getStringField(payload, "s3_key"),
-		S3BucketName:  p.BucketName,
-		S3Bucket:      p.BucketName,
-		SizeBytes:     sizeBytes,
-		RecordCount:   recordCount,
-		Version:       getStringField(payload, "version"),
-		Metadata:      metadata,
-		Schema:        schema,
-		Tags:          tags,
-		LastUpdated:   getStringField(payload, "last_updated"),
-		UpdatedAt:     getStringField(payload, "updated_at"),
-		UpdatedBy:     getStringField(payload, "updated_by"),
-	}, nil
-}
-
-// getStringField safely extracts a string field from a map
-func getStringField(m map[string]any, key string) string {
-	if v, ok := m[key].(string); ok {
-		return v
-	}
-	return ""
-}
-
 // makeAPIRequest makes an authenticated API request.
 func (p *Producer) makeAPIRequest(ctx context.Context, method, path string, body, response any) error {
 	apiURL, err := url.Parse(p.APIEndpoint + path)
@@ -808,17 +738,8 @@ func (p *Producer) ListSubscriptionRequests(ctx context.Context, status string) 
 func (p *Producer) ApproveSubscriptionRequest(ctx context.Context, requestID string, opts *types.ApproveSubscriptionRequestOptions) (*types.SubscriptionRequest, error) {
 	path := fmt.Sprintf("/v1/subscription-requests/%s", url.PathEscape(requestID))
 
-	payload := types.ApproveRejectPayload{
-		Action: "approve",
-	}
-
-	if opts != nil {
-		payload.Notes = opts.Notes
-		// Add dataset_id to payload if provided
-		// Note: The ApproveRejectPayload doesn't have DatasetID, so we need to use a map
-	}
-
-	// Use a map to include optional dataset_id field
+	// Use a map to include the optional dataset_id field, which is not part
+	// of ApproveRejectPayload.
 	payloadMap := map[string]any{
 		"action": "approve",
 	}
