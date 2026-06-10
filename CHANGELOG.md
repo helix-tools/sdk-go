@@ -26,6 +26,56 @@
   must round-trip as a non-nil bucket with RPM 0 (distinct from nil); a
   present `{"rpm":>0}` must round-trip its rate and burst. The nil-vs-zero
   assertions are structurally impossible to satisfy under value semantics.
+## 2026-06-09 (v2.3.0 — SDK parity + enum alignment, intended tag, not yet released)
+
+### Added
+- **Typed status/tier constants in `types/`** matching the canonical contract
+  exactly (security-audit R3.2), replacing comment-documented-only values:
+  - `SubscriptionStatus` = `active, paused, cancelled, expired` (the stale
+    comment previously claimed `suspended` — there is no suspended/inactive
+    subscription status).
+  - `DatasetStatus` = `active, inactive, archived`.
+  - `SubscriptionRequestStatus` = `pending, approved, rejected`.
+  - `CompanyStatus` = the 8 canonical values (`provisioning, active, inactive,
+    suspended, provisioning_failed, onboarding_failed, deprovisioning,
+    decommission_failed`); the field comment previously listed only 4.
+  - `SubscriptionTier` read-tolerant set (`free, starter, basic, premium,
+    professional, enterprise`); the only canonical write value is `free`.
+  All are `= string` type aliases, so existing `string` fields and callers
+  compile unchanged.
+- **Consumer `ListSubscriptionRequests(ctx, status)`** is now the canonical
+  public parity method (matches `SDK-PARITY-METHODS-SPEC.md`). The old
+  `ListMySubscriptionRequests` is retained as a thin deprecated alias that
+  delegates to it — no break for existing callers.
+
+### Changed
+- Stale `CreateSubscriptionRequestInput.Tier` doc comment ("defaults to
+  basic") corrected to "free" to match the runtime default and canonical
+  write value.
+
+### Removed
+- Dead private `Producer.updateDataset` (no callers; the public
+  `UpdateDataset` is the canonical surface) and its sole helper
+  `getStringField`.
+- Dead unused `payload` variable in `Producer.ApproveSubscriptionRequest`
+  (the request was already sent via `payloadMap`).
+
+### Security
+- `govulncheck` (rebuilt with go1.26.3) reports 2 reachable Go standard-library
+  vulnerabilities — `GO-2026-5039` (`net/textproto`) and `GO-2026-5037`
+  (`crypto/x509`) — both fixed in go1.26.4. No third-party-dependency
+  vulnerabilities. Remediate by building/releasing with go1.26.4+.
+
+### Tests
+- `types/enums_test.go` — pins every status/tier constant to its canonical
+  value, with a negative control asserting `suspended`/`inactive` are NOT
+  canonical subscription statuses.
+- `consumer/subscription_requests_parity_test.go` — end-to-end httptest
+  coverage of `ListSubscriptionRequests` (no-filter + status filter), the
+  `ListMySubscriptionRequests` backward-compat alias, and
+  `GetSubscriptionRequest`.
+- `producer/update_dataset_parity_test.go` — end-to-end httptest coverage of
+  the public `UpdateDataset` (PATCH path, omitempty body, happy + 403 paths).
 
 ## 2026-05-05 (v2.2.0)
 

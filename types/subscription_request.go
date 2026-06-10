@@ -1,5 +1,17 @@
 package types
 
+// SubscriptionRequestStatus is the canonical lifecycle state of a
+// subscription request. Canonical contract values: pending, approved,
+// rejected.
+type SubscriptionRequestStatus = string
+
+// Canonical SubscriptionRequestStatus values.
+const (
+	SubscriptionRequestStatusPending  SubscriptionRequestStatus = "pending"
+	SubscriptionRequestStatusApproved SubscriptionRequestStatus = "approved"
+	SubscriptionRequestStatusRejected SubscriptionRequestStatus = "rejected"
+)
+
 // SubscriptionRequest represents a request from a consumer to access a producer's datasets.
 type SubscriptionRequest struct {
 	ID              string  `json:"_id"`
@@ -10,9 +22,9 @@ type SubscriptionRequest struct {
 	ProducerID      string  `json:"producer_id"`
 	ProducerName    string  `json:"producer_name,omitempty"`
 	DatasetID       *string `json:"dataset_id,omitempty"` // Null for all-datasets access
-	Tier            string  `json:"tier"` // "basic", "professional", "enterprise"
+	Tier            string  `json:"tier"` // SubscriptionTier — canonical write value is "free"
 	Message         *string `json:"message,omitempty"`
-	Status          string  `json:"status"` // "pending", "approved", "rejected", "cancelled"
+	Status          string  `json:"status"` // SubscriptionRequestStatus: "pending", "approved", "rejected"
 	CreatedAt       string  `json:"created_at"`
 	UpdatedAt       string  `json:"updated_at"`
 	ApprovedAt      *string `json:"approved_at,omitempty"`
@@ -54,7 +66,7 @@ type ApproveRequestResponse struct {
 type CreateSubscriptionRequestInput struct {
 	ProducerID string  // Required: ID of the producer to request access from
 	DatasetID  *string // Optional: Specific dataset ID (nil for all-datasets access)
-	Tier       string  // Optional: Subscription tier (defaults to "basic")
+	Tier       string  // Optional: SubscriptionTier (defaults to "free", the canonical write value)
 	Message    *string // Optional: Message to the producer
 }
 

@@ -43,7 +43,7 @@ const emptyPayloadHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca49599
 // SDKVersion is the Go SDK version surfaced in download outcome callbacks.
 // Bumped in lockstep with the module version tag so the producer dashboard
 // can spot single-version regressions across the consumer fleet.
-const SDKVersion = "2.2.0"
+const SDKVersion = "2.3.0"
 
 // SDKLanguage identifies this SDK's language in download outcome callbacks
 // (matches the dataset_download_event JSON Schema's sdk_language field).
@@ -997,15 +997,19 @@ func (c *Consumer) DeleteNotification(ctx context.Context, receiptHandle string)
 	return nil
 }
 
-// ListMySubscriptionRequests lists the consumer's own subscription requests.
+// ListSubscriptionRequests lists the consumer's own subscription requests.
 // Allows consumers to track the status of their pending, approved, or rejected requests.
 //
+// This is the canonical parity method (see SDK-PARITY-METHODS-SPEC.md). It
+// maps to GET /v1/subscription-requests[?status={status}].
+//
 // Parameters:
-//   - status: Filter by request status. Valid values: "pending", "approved", "rejected", "cancelled".
-//     If empty, returns all requests regardless of status.
+//   - status: Filter by request status. Canonical values: "pending",
+//     "approved", "rejected". If empty, returns all requests regardless of
+//     status.
 //
 // Returns a slice of subscription requests matching the filter.
-func (c *Consumer) ListMySubscriptionRequests(ctx context.Context, status string) ([]types.SubscriptionRequest, error) {
+func (c *Consumer) ListSubscriptionRequests(ctx context.Context, status string) ([]types.SubscriptionRequest, error) {
 	path := "/v1/subscription-requests"
 	if status != "" {
 		path = fmt.Sprintf("/v1/subscription-requests?status=%s", url.QueryEscape(status))
@@ -1017,6 +1021,15 @@ func (c *Consumer) ListMySubscriptionRequests(ctx context.Context, status string
 	}
 
 	return response.Requests, nil
+}
+
+// ListMySubscriptionRequests is a backward-compatibility alias for
+// ListSubscriptionRequests. Prefer ListSubscriptionRequests (the canonical
+// parity name) in new code.
+//
+// Deprecated: use ListSubscriptionRequests.
+func (c *Consumer) ListMySubscriptionRequests(ctx context.Context, status string) ([]types.SubscriptionRequest, error) {
+	return c.ListSubscriptionRequests(ctx, status)
 }
 
 // GetSubscriptionRequest retrieves details of a specific subscription request by ID.
