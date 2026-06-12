@@ -36,6 +36,7 @@ type Company struct {
 	SNSTopicARN      string              `json:"sns_topic_arn,omitempty"`
 	Status           string              `json:"status"` // CompanyStatus: provisioning, active, inactive, suspended, provisioning_failed, onboarding_failed, deprovisioning, decommission_failed
 	Tier             string              `json:"tier,omitempty"` // SubscriptionTier — canonical write value is "free"
+	FeatureFlags     FeatureFlags        `json:"feature_flags,omitempty"`
 	Settings         *CompanySettings    `json:"settings,omitempty"`
 	Onboarding       *OnboardingInfo     `json:"onboarding,omitempty"`
 	Infrastructure   *InfrastructureInfo `json:"infrastructure,omitempty"`
@@ -48,6 +49,25 @@ type Company struct {
 	UserCount        int                 `json:"user_count,omitempty"`
 	Users            []CompanyUser       `json:"users,omitempty"`
 }
+
+// FeatureFlag is a single feature flag entry with audit metadata, mirroring
+// feature_flag.schema.json (sdk-schemas v1.0.0). It is the value type of the
+// company/customer feature_flags map. Enabled is the only required field;
+// missing flags (or a nil map) mean the feature is disabled (default deny).
+type FeatureFlag struct {
+	Enabled    bool   `json:"enabled"`
+	Since      string `json:"since,omitempty"`
+	EnabledBy  string `json:"enabled_by,omitempty"`
+	DisabledBy string `json:"disabled_by,omitempty"`
+	DisabledAt string `json:"disabled_at,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	ExpiresAt  string `json:"expires_at,omitempty"`
+}
+
+// FeatureFlags maps a feature name to its FeatureFlag entry. Mirrors the
+// company/customer feature_flags object in the schemas (default deny when nil
+// or a flag is absent).
+type FeatureFlags map[string]FeatureFlag
 
 // Address represents a physical address.
 type Address struct {
