@@ -57,7 +57,7 @@ func TestSubscriptions(t *testing.T) {
 		message := "Subscription test - " + testID
 		createReq := types.CreateSubscriptionRequestPayload{
 			ProducerID: cfg.ProducerCredentials.CustomerID,
-			Tier:       "basic",
+			Tier:       "free",
 			Message:    &message,
 		}
 
@@ -205,7 +205,7 @@ func TestSubscriptionWithDataset(t *testing.T) {
 		req := types.CreateSubscriptionRequestPayload{
 			ProducerID: cfg.ProducerCredentials.CustomerID,
 			DatasetID:  &datasetID,
-			Tier:       "premium",
+			Tier:       "free",
 			Message:    &message,
 		}
 
