@@ -70,7 +70,7 @@ func NewTestSubscriptionRequest(producerID string, datasetID *string) types.Crea
 	return types.CreateSubscriptionRequestPayload{
 		ProducerID: producerID,
 		DatasetID:  datasetID,
-		Tier:       "basic",
+		Tier:       "free",
 		Message:    &message,
 	}
 }
