@@ -59,19 +59,23 @@ type DatasetUpdateInput struct {
 
 // Dataset represents a dataset in the catalog
 type Dataset struct {
-	ID              string         `json:"_id"`
-	IDAlias         string         `json:"id,omitempty"`
-	Name            string         `json:"name"`
-	Description     string         `json:"description"`
-	ProducerID      string         `json:"producer_id"`
-	Category        string         `json:"category"`
-	DataFreshness   DataFreshness  `json:"data_freshness"`
-	Visibility      string         `json:"visibility"`
-	Status          string         `json:"status"`
-	AccessTier      string         `json:"access_tier,omitempty"`
-	S3Key           string         `json:"s3_key"`
-	S3BucketName    string         `json:"s3_bucket_name,omitempty"`
-	S3Bucket        string         `json:"s3_bucket"`
+	ID            string        `json:"_id"`
+	IDAlias       string        `json:"id,omitempty"`
+	Name          string        `json:"name"`
+	Description   string        `json:"description"`
+	ProducerID    string        `json:"producer_id"`
+	Category      string        `json:"category"`
+	DataFreshness DataFreshness `json:"data_freshness"`
+	Visibility    string        `json:"visibility"`
+	Status        string        `json:"status"`
+	AccessTier    string        `json:"access_tier,omitempty"`
+	S3Key         string        `json:"s3_key"`
+	S3BucketName  string        `json:"s3_bucket_name,omitempty"`
+	S3Bucket      string        `json:"s3_bucket"`
+	// Encryption is the API's top-level encryption flag. The create endpoint
+	// PROMOTES metadata.encryption_enabled to this field and drops it from
+	// metadata, so download must fall back here (mirrors the Python SDK).
+	Encryption      bool           `json:"encryption,omitempty"`
 	SizeBytes       int64          `json:"size_bytes"`
 	RecordCount     int            `json:"record_count"`
 	Version         string         `json:"version"`
