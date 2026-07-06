@@ -68,3 +68,20 @@ jobs:
         draft: false
         prerelease: false
         token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Triggers the production E2E suite in helix-tools/e2e on merge to main. Requires the org/repo secret GH_PAT (a PAT allowed to dispatch to helix-tools/e2e).
+  notify-e2e:
+    name: Notify E2E Suite
+    needs: [ build ]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Trigger E2E suite
+        run: |
+          curl -sSf -X POST \
+            -H "Authorization: Bearer ${{ secrets.GH_PAT }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/helix-tools/e2e/dispatches \
+            -d '{"event_type":"e2e-trigger","client_payload":{"source":"sdk-go","sha":"${{ github.sha }}"}}'
