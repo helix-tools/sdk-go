@@ -91,8 +91,18 @@ func (p *Producer) InviteConsumer(ctx context.Context, input types.InviteConsume
 		return nil, err
 	}
 
+	// Send CANONICAL (trimmed) dataset ids — validation trims for its checks,
+	// so the wire payload must trim too or `[" ds-1 "]` reaches the server with
+	// spaces and diverges from the canonical grant (matches Python/TS + the
+	// server's own trim in ValidateInviteConsumerRequest).
+	canonical := input
+	canonical.Datasets = make([]string, len(input.Datasets))
+	for i, d := range input.Datasets {
+		canonical.Datasets[i] = strings.TrimSpace(d)
+	}
+
 	var result types.InviteConsumerResponse
-	if err := p.makeAPIRequest(ctx, http.MethodPost, "/v1/self/invite-consumer", input, &result); err != nil {
+	if err := p.makeAPIRequest(ctx, http.MethodPost, "/v1/self/invite-consumer", canonical, &result); err != nil {
 		return nil, err
 	}
 
@@ -121,10 +131,13 @@ func (p *Producer) ListConsumers(ctx context.Context) ([]types.ProducerConsumerR
 // flag is not enabled for the producer, the server responds 403 and the
 // error surfaces as an *APIError with StatusCode 403.
 func (p *Producer) DeactivateConsumer(ctx context.Context, consumerID string) (*types.DeactivateConsumerResponse, error) {
-	if strings.TrimSpace(consumerID) == "" {
+	consumerID = strings.TrimSpace(consumerID)
+	if consumerID == "" {
 		return nil, &ValidationError{Field: "consumer_id", Message: "consumer id is required"}
 	}
 
+	// Escape the TRIMMED id — escaping the raw arg would turn "  id  " into a
+	// %20-padded path segment that never matches the intended consumer.
 	path := fmt.Sprintf("/v1/self/consumers/%s/deactivate", url.PathEscape(consumerID))
 
 	var result types.DeactivateConsumerResponse

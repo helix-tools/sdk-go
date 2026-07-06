@@ -591,3 +591,59 @@ func TestDeactivateConsumer_FeatureFlagForbidden(t *testing.T) {
 		t.Errorf("expected status 403, got %d", apiErr.StatusCode)
 	}
 }
+
+// TestInviteConsumer_TrimsDatasetsOnWire pins that dataset ids are CANONICALIZED
+// (trimmed) in the POST body, not just for validation. codex 2026-07-06 caught
+// that validation trimmed but the raw slice was sent, so `[" ds-1 "]` reached
+// the server with spaces and risked a failed grant.
+func TestInviteConsumer_TrimsDatasetsOnWire(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"consumer_id":"c-1","status":"provisioning","invited_by":"p","company_name":"X","message":"ok","email_sent":true}`))
+	}))
+	defer server.Close()
+
+	p := newTestProducer(server.URL)
+	_, err := p.InviteConsumer(context.Background(), types.InviteConsumerInput{
+		CompanyName:   "Acme Partner Co",
+		BusinessEmail: "partners@acme.example.com",
+		Datasets:      []string{"  ds-1  ", "\tds-2\n"},
+		Tier:          "free",
+	})
+	if err != nil {
+		t.Fatalf("InviteConsumer returned error: %v", err)
+	}
+	datasets, ok := gotBody["datasets"].([]any)
+	if !ok || len(datasets) != 2 {
+		t.Fatalf("expected 2 datasets on the wire, got %v", gotBody["datasets"])
+	}
+	if datasets[0] != "ds-1" || datasets[1] != "ds-2" {
+		t.Fatalf("dataset ids not trimmed on the wire: got %v (want [ds-1 ds-2])", datasets)
+	}
+}
+
+// TestDeactivateConsumer_TrimsIDInPath pins that the TRIMMED consumer id is
+// path-escaped, not the raw arg (codex 2026-07-06: raw escape turned a padded
+// id into a %20-laden path that never matches).
+func TestDeactivateConsumer_TrimsIDInPath(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"consumer_id":"customer-abc123","status":"inactive"}`))
+	}))
+	defer server.Close()
+
+	p := newTestProducer(server.URL)
+	_, err := p.DeactivateConsumer(context.Background(), "  customer-abc123  ")
+	if err != nil {
+		t.Fatalf("DeactivateConsumer returned error: %v", err)
+	}
+	want := "/v1/self/consumers/customer-abc123/deactivate"
+	if gotPath != want {
+		t.Fatalf("expected trimmed path %q, got %q", want, gotPath)
+	}
+}
