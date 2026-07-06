@@ -285,6 +285,35 @@ func (c *Consumer) GetDownloadURL(ctx context.Context, datasetID string) (*Downl
 	return &urlInfo, nil
 }
 
+// resolveEncryptCompress decides whether a downloaded object must be decrypted
+// and/or decompressed, from the dataset record.
+//
+// isEncrypted defaults to the top-level dataset.Encryption field and is only
+// overridden when metadata.encryption_enabled is explicitly present. The create
+// endpoint PROMOTES metadata.encryption_enabled to the top-level `encryption`
+// field and drops it from metadata, so a metadata-only read wrongly sees false
+// and skips decrypt (then gunzips still-encrypted bytes -> "gzip: invalid
+// header"). Mirrors the Python SDK's
+// metadata.get("encryption_enabled", dataset.get("encryption", False)).
+//
+// isCompressed is metadata-only (default false): the API keeps
+// compression_enabled in metadata and has no promoted top-level equivalent.
+func resolveEncryptCompress(dataset *types.Dataset) (isEncrypted, isCompressed bool) {
+	if dataset == nil {
+		return false, false
+	}
+	isEncrypted = dataset.Encryption
+	if dataset.Metadata != nil {
+		if enc, ok := dataset.Metadata["encryption_enabled"].(bool); ok {
+			isEncrypted = enc
+		}
+		if comp, ok := dataset.Metadata["compression_enabled"].(bool); ok {
+			isCompressed = comp
+		}
+	}
+	return isEncrypted, isCompressed
+}
+
 // DownloadDataset downloads and processes a dataset to a local file.
 //
 // Observability: after the URL is issued by the API a server-side
@@ -356,17 +385,8 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 		return fmt.Errorf("failed to get dataset metadata: %w", err)
 	}
 
-	// Safely extract encryption/compression settings with defaults.
-	isEncrypted := false
-	isCompressed := false
-	if dataset.Metadata != nil {
-		if enc, ok := dataset.Metadata["encryption_enabled"].(bool); ok {
-			isEncrypted = enc
-		}
-		if comp, ok := dataset.Metadata["compression_enabled"].(bool); ok {
-			isCompressed = comp
-		}
-	}
+	// Decide whether to decrypt/decompress (see resolveEncryptCompress).
+	isEncrypted, isCompressed := resolveEncryptCompress(dataset)
 
 	fmt.Printf("   Compressed: %v\n", isCompressed)
 	fmt.Printf("   Encrypted: %v\n", isEncrypted)
@@ -677,7 +697,7 @@ func (c *Consumer) ListSubscriptions(ctx context.Context, opts *ListSubscription
 	}
 
 	path := "/v1/subscriptions"
-	
+
 	if opts != nil && opts.Role != "" {
 		path += "?role=" + url.QueryEscape(opts.Role)
 	}

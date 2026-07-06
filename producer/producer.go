@@ -355,7 +355,16 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 	// Build initial metadata (sizes will be updated after processing)
 	metadata := make(map[string]any)
 	maps.Copy(metadata, opts.Metadata)
-	
+
+	// Record encryption/compression so the CONSUMER download knows to reverse
+	// them: Consumer.DownloadDataset reads dataset.Metadata["encryption_enabled"]
+	// and ["compression_enabled"] to decide whether to decrypt/decompress. Without
+	// these, download returns the raw encrypted+compressed bytes and the round-trip
+	// sha256 mismatches. (Found 2026-07-06 by the SDK-only E2E suite — go round-trip
+	// corruption once notifications started arriving.) Upload mandates both.
+	metadata["encryption_enabled"] = opts.Encrypt
+	metadata["compression_enabled"] = opts.Compress
+
 	// Add analysis results to metadata if available
 	if analysis != nil {
 		metadata["schema"] = analysis.Schema
@@ -366,13 +375,37 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 		}
 	}
 
-	// Build dataset payload (without S3 key and size, which will be set after upload)
+	// s3_key MUST be sent, dataset-NAME-keyed, matching Python/TS
+	// (`datasets/{name}/data.ndjson[.gz]`). The API honors a client s3_key and
+	// otherwise defaults to `datasets/{producer_id}/{dataset_id}/data`
+	// (service.go CreateDataset). That default breaks the whole notify pipeline:
+	// the s3-event-processor derives dataset_name from the key's FIRST segment,
+	// so a producer-id-keyed object yields dataset_name=<producer_id>, the
+	// findOneAndUpdate never matches, and subscribers are notified with the
+	// wrong name (or not at all). Go always compresses, so the file is
+	// `data.ndjson.gz`. (Found 2026-07-06 by the SDK-only E2E suite: go uploads
+	// landed under datasets/<customer_id>/ while py/ts used datasets/<name>/.)
+	fileName := "data.ndjson"
+	if opts.Compress {
+		fileName += ".gz"
+	}
+	s3Key := fmt.Sprintf("datasets/%s/%s", opts.DatasetName, fileName)
+
+	// Build dataset payload (without size, which is set after upload).
+	// s3_bucket_name and access_tier are also REQUIRED by the create validator
+	// (ValidateCreateDatasetRequest rejects an empty s3_bucket_name and an
+	// access_tier not in {free,premium,enterprise}); the Python/TS SDKs send them
+	// too. access_tier defaults to "free" (the only live tier) and stays
+	// overridable via DatasetOverrides below.
 	payload := map[string]any{
 		"name":           opts.DatasetName,
 		"description":    opts.Description,
 		"category":       opts.Category,
 		"data_freshness": string(opts.DataFreshness),
 		"producer_id":    p.CustomerID,
+		"s3_bucket_name": p.BucketName,
+		"s3_key":         s3Key,
+		"access_tier":    "free",
 		"metadata":       metadata,
 	}
 

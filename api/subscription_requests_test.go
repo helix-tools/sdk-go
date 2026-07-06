@@ -57,7 +57,7 @@ func TestSubscriptionRequests(t *testing.T) {
 		message := "Integration test request - " + testID
 		req := types.CreateSubscriptionRequestPayload{
 			ProducerID: cfg.ProducerCredentials.CustomerID,
-			Tier:       "basic",
+			Tier:       "free",
 			Message:    &message,
 		}
 
@@ -157,7 +157,7 @@ func TestSubscriptionRequests(t *testing.T) {
 		message := "Request to be rejected - " + testID
 		createReq := types.CreateSubscriptionRequestPayload{
 			ProducerID: cfg.ProducerCredentials.CustomerID,
-			Tier:       "basic",
+			Tier:       "free",
 			Message:    &message,
 		}
 
@@ -224,7 +224,7 @@ func TestSubscriptionRequestValidation(t *testing.T) {
 
 	t.Run("Create_Request_MissingProducerID", func(t *testing.T) {
 		req := types.CreateSubscriptionRequestPayload{
-			Tier: "basic",
+			Tier: "free",
 		}
 
 		var request types.SubscriptionRequest
@@ -242,7 +242,7 @@ func TestSubscriptionRequestValidation(t *testing.T) {
 	t.Run("Create_Request_InvalidProducerID", func(t *testing.T) {
 		req := types.CreateSubscriptionRequestPayload{
 			ProducerID: "nonexistent-producer-id",
-			Tier:       "basic",
+			Tier:       "free",
 		}
 
 		var request types.SubscriptionRequest
