@@ -4,6 +4,32 @@ package types
 // EmptyPayloadHash is the SHA256 hash of an empty payload.
 const EmptyPayloadHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
+// CredentialMode selects how Consumer/Producer obtain the AWS credentials
+// used to sign API requests (SigV4) and construct AWS service clients (KMS,
+// SQS, SSM, S3).
+type CredentialMode string
+
+const (
+	// CredentialModeStatic uses the long-lived AWSAccessKeyID/
+	// AWSSecretAccessKey pair directly, byte-identical to the SDK's
+	// pre-STS behavior (github.com/aws/aws-sdk-go-v2/credentials.
+	// NewStaticCredentialsProvider). This is the default: an empty
+	// CredentialMode with static keys set behaves exactly as before this
+	// field existed — no existing caller's behavior changes.
+	CredentialModeStatic CredentialMode = "static"
+
+	// CredentialModeSTS auto-refreshes short-lived AWS STS session
+	// credentials minted from the Helix Connect credential broker (POST
+	// /v1/credentials/session — see credential_session.schema.json,
+	// sdk-schemas #17). The mint request itself is bootstrap-authenticated
+	// with AWSAccessKeyID/AWSSecretAccessKey (STS-PLAN.md §9 decision #1:
+	// the broker's B0/B1 bootstrap is the existing SigV4 static key, not a
+	// new API key — verified against the real broker implementation,
+	// helix-tools/api PR #129, which accepts only SigV4). APIKey-based
+	// bootstrap is reserved for a later phase (P5) and is not yet wired.
+	CredentialModeSTS CredentialMode = "sts"
+)
+
 // Config contains configuration for the Consumer.
 type Config struct {
 	APIEndpoint        string
@@ -11,6 +37,25 @@ type Config struct {
 	AWSSecretAccessKey string
 	CustomerID         string
 	Region             string
+
+	// APIKey is reserved for the platform-scoped Helix API key bootstrap
+	// (hlx_-prefixed, STS-PLAN.md P5). It is currently NOT wired to any
+	// authentication path — the credential broker accepts only SigV4 today
+	// (see CredentialModeSTS) — so setting APIKey without
+	// AWSAccessKeyID/AWSSecretAccessKey produces a clear construction-time
+	// error rather than silently sending an unauthenticated request.
+	// Additive field: the zero value is a complete no-op for every existing
+	// caller.
+	APIKey string
+
+	// CredentialMode selects "static" (default; existing AKIA behavior,
+	// byte-identical) or "sts" (auto-refreshing broker-issued session
+	// credentials, opt-in). Left empty, the mode is inferred: static keys
+	// present -> "static" (preserves today's behavior exactly); nothing
+	// present -> construction error. "sts" is never inferred — it must be
+	// requested explicitly, so no existing caller can silently start
+	// minting STS sessions.
+	CredentialMode CredentialMode
 }
 
 // DataFreshness enumerates allowed dataset update cadences.
