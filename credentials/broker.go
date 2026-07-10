@@ -38,6 +38,7 @@ import (
 	"math/rand"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/helix-tools/sdk-go/v2/types"
@@ -238,10 +239,22 @@ type BrokerConfig struct {
 // single-flight coalescing courtesy of aws-sdk-go-v2's own
 // aws.CredentialsCache), or call Retrieve directly in tests that need to
 // disable auto-refresh.
+//
+// Provider also implements aws.HandleFailRefreshCredentialsCacheStrategy and
+// aws.AdjustExpiresByCredentialsCacheStrategy (see HandleFailToRefresh and
+// AdjustExpiresBy below) so that, when wrapped in NewCredentialsCache, a
+// broker blip during a due refresh rides through on the last-known-good
+// session until its TRUE hard expiry rather than failing the caller
+// immediately — "serve-last-good creds until hard expiry (a broker blip is
+// invisible)", STS-PLAN.md/C-sdk.md C.1 bullet 3 / R7.
 type Provider struct {
 	cfg        BrokerConfig
 	httpClient *http.Client
 	now        func() time.Time
+
+	mu             sync.Mutex
+	lastHardExpiry time.Time
+	haveHardExpiry bool
 }
 
 // NewProvider validates cfg and returns a Provider. It performs no network
@@ -298,6 +311,15 @@ func (p *Provider) Retrieve(ctx context.Context) (aws.Credentials, error) {
 		expires = serverExpiry
 	}
 
+	// Record the TRUE (unadjusted) hard expiry of this mint, independent of
+	// whatever aws.CredentialsCache's own ExpiryWindow adjustment later
+	// does to the Expires it stores. HandleFailToRefresh/AdjustExpiresBy
+	// below use this to bound a ride-through precisely at real expiry.
+	p.mu.Lock()
+	p.lastHardExpiry = expires
+	p.haveHardExpiry = true
+	p.mu.Unlock()
+
 	return aws.Credentials{
 		AccessKeyID:     resp.AccessKeyID,
 		SecretAccessKey: resp.SecretAccessKey,
@@ -306,6 +328,71 @@ func (p *Provider) Retrieve(ctx context.Context) (aws.Credentials, error) {
 		Expires:         expires,
 		Source:          "HelixCredentialBroker",
 	}, nil
+}
+
+// HandleFailToRefresh implements aws.HandleFailRefreshCredentialsCacheStrategy.
+// aws.CredentialsCache calls this when a due refresh's Retrieve fails; old is
+// the previously cached (window-adjusted) credential. Rather than failing
+// the caller immediately, ride through on old's key material as long as the
+// TRUE hard expiry from the last successful mint (tracked in
+// p.lastHardExpiry, independent of old.Expires' own adjustment) has not
+// actually passed yet — a broker blip during the ~5-minute pre-expiry
+// refresh window becomes invisible to callers, matching "serve-last-good
+// creds until hard expiry" (STS-PLAN.md/C-sdk.md C.1 bullet 3 / R7).
+//
+// The returned Expires is deliberately set to lastHardExpiry+
+// proactiveExpiryWindow, NOT lastHardExpiry itself: aws.CredentialsCache
+// unconditionally re-applies its own -(ExpiryWindow-jitter) adjustment
+// (via AdjustExpiresBy below) to whatever this method returns before
+// storing it, so this pre-compensates for that upcoming subtraction.
+// AdjustExpiresBy then clamps the final result to never exceed
+// lastHardExpiry regardless of the per-call random jitter draw — the two
+// methods work together; neither is safe/precise alone. Net effect: after
+// one ride-through, the cache serves the SAME stale-but-still-valid
+// credential (no further mint attempts, no request storm) until real-world
+// time reaches lastHardExpiry, at which point Expired() correctly flips
+// true and the next Retrieve tries the broker again (recovered or not).
+//
+// If there is no prior successful mint to ride through on (haveHardExpiry
+// false), old carries no usable key material, or the true hard expiry has
+// already passed, the original refresh error is returned unchanged — fail
+// closed, never fabricate or indefinitely reuse a truly expired credential.
+func (p *Provider) HandleFailToRefresh(_ context.Context, old aws.Credentials, err error) (aws.Credentials, error) {
+	p.mu.Lock()
+	hardExpiry, have := p.lastHardExpiry, p.haveHardExpiry
+	p.mu.Unlock()
+
+	if !have || !old.HasKeys() || !p.now().Before(hardExpiry) {
+		return aws.Credentials{}, err
+	}
+
+	old.CanExpire = true
+	old.Expires = hardExpiry.Add(proactiveExpiryWindow)
+	return old, nil
+}
+
+// AdjustExpiresBy implements aws.AdjustExpiresByCredentialsCacheStrategy,
+// overriding aws.CredentialsCache's default window-subtraction with the
+// same computation PLUS a clamp: the result never exceeds the true hard
+// expiry from the last successful mint (see HandleFailToRefresh's doc
+// comment for why this pairing is required for a precise, non-overshooting
+// ride-through). For a normal fresh mint this clamp is always a no-op — a
+// freshly minted credential's window-adjusted Expires is always safely
+// below its own hard expiry — so this only changes behavior during a
+// ride-through.
+func (p *Provider) AdjustExpiresBy(creds aws.Credentials, dur time.Duration) (aws.Credentials, error) {
+	if !creds.CanExpire {
+		return creds, nil
+	}
+	creds.Expires = creds.Expires.Add(dur)
+
+	p.mu.Lock()
+	hardExpiry, have := p.lastHardExpiry, p.haveHardExpiry
+	p.mu.Unlock()
+	if have && creds.Expires.After(hardExpiry) {
+		creds.Expires = hardExpiry
+	}
+	return creds, nil
 }
 
 // mintWithRetry performs up to mintMaxAttempts mint round-trips, applying

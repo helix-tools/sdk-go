@@ -9,9 +9,16 @@
   session credentials from the Helix Connect credential broker (`POST
   /v1/credentials/session`, contract frozen in sdk-schemas #17), wrapped in
   `aws.CredentialsCache` for auto-refresh (proactive refresh at ~2/3 of the
-  900s TTL, i.e. remaining <=5min, with jitter; single-flight coalescing and
-  the cache's own fail-closed behavior on refresh failure all courtesy of
-  `aws.CredentialsCache` — no reimplementation). `types.Config` gains two
+  900s TTL, i.e. remaining <=5min, with jitter; single-flight coalescing
+  courtesy of `aws.CredentialsCache` itself — no reimplementation). A broker
+  blip while a refresh is due rides through on the last-known-good session
+  until its TRUE hard expiry ("serve-last-good creds until hard expiry" —
+  `Provider` implements `aws.HandleFailRefreshCredentialsCacheStrategy` +
+  `aws.AdjustExpiresByCredentialsCacheStrategy` to do this precisely,
+  without ever letting the cache believe a truly-expired credential is
+  still fresh); once genuinely past hard expiry with no successful refresh,
+  it fails closed with a clear error — never fabricates or indefinitely
+  reuses an expired credential. `types.Config` gains two
   additive fields: `APIKey` (reserved for a later phase's platform-scoped
   bootstrap — not yet wired, see below) and `CredentialMode` (`"static"` |
   `"sts"`, **default `"static"`**). `NewConsumer`/`NewProducer` select the
@@ -56,7 +63,10 @@
   hardening in both directions; the real `aws.CredentialsCache` refresh
   engine exercised end-to-end via compressed real-time windows (fresh /
   within-window / refresh-storm / single-flight under `-race` / optFn
-  override / fail-closed-on-broker-down); `SelectProvider`'s full
+  override); a broker outage riding through on the last-known-good
+  credential until true hard expiry without re-attempting a mint on every
+  call, and failing closed only once genuinely past that hard expiry (two
+  tests, each pinning one side of that boundary); `SelectProvider`'s full
   mode-inference matrix; the static-path byte-identical regression pin.
   Every load-bearing assertion above was watched to fail for the right
   reason with a temporary reverted fix, then restored (default-static

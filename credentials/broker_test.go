@@ -1029,39 +1029,107 @@ func TestCredentialsCache_OptFnsOverrideDefaults(t *testing.T) {
 	}
 }
 
-// TestCredentialsCache_FailClosedExpiry proves the required "fail-closed
-// expiry" behavior: when the underlying mint fails and the cached
-// credential has genuinely run out (past its real hard expiry), Retrieve
-// must return a clear error — never silently fabricate, zero-out, or
-// indefinitely reuse an expired credential. Provider deliberately does NOT
-// implement aws.HandleFailRefreshCredentialsCacheStrategy (see broker.go
-// doc comment), so this exercises aws.CredentialsCache's own default
-// fail-closed behavior (propagate the error) — the safe, simple choice over
-// a more complex stale-serve "ride-through" optimization.
-func TestCredentialsCache_FailClosedExpiry(t *testing.T) {
-	// First mint succeeds (moderate TTL so there is a measurable fresh
-	// window); every mint attempt after that fails persistently, simulating
-	// a broker outage right as a refresh becomes due.
-	broker, cache := compressedCache(t, 6*time.Second, func(n int) (int, string) {
+// TestCredentialsCache_RideThroughBrokerBlipUntilHardExpiry proves the
+// required "serve-last-good creds until hard expiry" behavior
+// (STS-PLAN.md/C-sdk.md C.1 bullet 3 / R7: "a broker blip is invisible"):
+// when a refresh becomes due (past the proactive window) but the true hard
+// expiry from the last successful mint has NOT yet passed, a broker outage
+// must NOT fail the caller — Retrieve rides through on the last-known-good
+// credential. A second call immediately after must be served from that
+// same ride-through cache entry without re-attempting a mint (no request
+// storm during an outage). codex-REFUTE finding: an earlier revision of
+// this provider failed closed as soon as the proactive window was crossed,
+// not at true hard expiry — this test and
+// TestCredentialsCache_FailClosedExpiry together pin the corrected,
+// two-phase behavior end to end via the real aws.CredentialsCache (using
+// Provider's HandleFailToRefresh/AdjustExpiresBy overrides — no
+// reimplementation of the cache itself).
+func TestCredentialsCache_RideThroughBrokerBlipUntilHardExpiry(t *testing.T) {
+	const ttl = 6 * time.Second
+	broker, cache := compressedCache(t, 4*time.Second, func(n int) (int, string) {
 		if n == 1 {
-			return http.StatusOK, successBody(time.Now().Add(8*time.Second), 8)
+			return http.StatusOK, successBody(time.Now().Add(ttl), int64(ttl.Seconds()))
 		}
 		return http.StatusInternalServerError, "broker down"
 	})
 	ctx := context.Background()
+	mintStart := time.Now()
 
 	remaining := mintFreshAndMeasureRemaining(t, ctx, broker, cache)
+	if remaining >= ttl/2 {
+		t.Fatalf("observed fresh window remaining = %v, too close to the %v hard TTL for this test's phases to be well separated", remaining, ttl)
+	}
 
-	// Sleep past the observed fresh window so the NEXT Retrieve needs to
-	// refresh. That single call internally retries mintMaxAttempts times
-	// (with backoff — see Provider.mintWithRetry) against the now-broken
-	// broker before giving up and returning an error; no further sleep is
-	// needed, the failure surfaces from this one call.
+	// Cross the proactive window boundary (broker down) — must ride
+	// through, not error, since we are still well before the ttl hard
+	// expiry.
 	time.Sleep(remaining + 500*time.Millisecond)
+	rideThroughCreds, err := cache.Retrieve(ctx)
+	if err != nil {
+		t.Fatalf("expected a ride-through (no error) while still before hard expiry, got: %v", err)
+	}
+	if rideThroughCreds.AccessKeyID != testAccessKeyID {
+		t.Errorf("ride-through AccessKeyID = %q, want the last-known-good %q", rideThroughCreds.AccessKeyID, testAccessKeyID)
+	}
+	callsAfterRideThrough := broker.calls()
+	if callsAfterRideThrough < 2 {
+		t.Fatalf("broker calls after the ride-through = %d, want >= 2 (the due refresh must have actually been attempted and failed before riding through)", callsAfterRideThrough)
+	}
+
+	// Immediately call again: must be served from the ride-through cache
+	// entry (clamped to true hard expiry by AdjustExpiresBy), not
+	// re-attempt a mint on every call during the outage.
+	if _, err := cache.Retrieve(ctx); err != nil {
+		t.Fatalf("Retrieve immediately after ride-through: %v", err)
+	}
+	if broker.calls() != callsAfterRideThrough {
+		t.Errorf("broker calls after an immediate follow-up = %d, want unchanged at %d (ride-through must be cached until hard expiry, not re-attempted every call)", broker.calls(), callsAfterRideThrough)
+	}
+
+	// Now wait past the TRUE hard expiry (mintStart+ttl), broker still
+	// down — see TestCredentialsCache_FailClosedExpiry for the
+	// fail-closed assertion at that point.
+	time.Sleep(time.Until(mintStart.Add(ttl)) + 700*time.Millisecond)
+	if _, err := cache.Retrieve(ctx); err == nil {
+		t.Error("expected an error once truly past hard expiry with the broker still down — ride-through must not extend forever")
+	}
+}
+
+// TestCredentialsCache_FailClosedExpiry proves the required "fail-closed
+// expiry" behavior at the OTHER boundary: once a credential's TRUE hard
+// expiry has genuinely passed (not merely the proactive refresh window —
+// see TestCredentialsCache_RideThroughBrokerBlipUntilHardExpiry for that
+// distinction) and a refresh is still failing, Retrieve must return a clear
+// error — never silently fabricate, zero-out, or indefinitely reuse an
+// expired credential.
+func TestCredentialsCache_FailClosedExpiry(t *testing.T) {
+	const ttl = 2 * time.Second
+	broker, cache := compressedCache(t, 1500*time.Millisecond, func(n int) (int, string) {
+		if n == 1 {
+			return http.StatusOK, successBody(time.Now().Add(ttl), int64(ttl.Seconds()))
+		}
+		// Every mint attempt after the first fails persistently — the
+		// broker never recovers in this test, so ride-through (proven
+		// separately above) must eventually exhaust into a hard failure.
+		return http.StatusInternalServerError, "broker down"
+	})
+	ctx := context.Background()
+	mintStart := time.Now()
+
+	if _, err := cache.Retrieve(ctx); err != nil {
+		t.Fatalf("initial Retrieve: %v", err)
+	}
+	if broker.calls() != 1 {
+		t.Fatalf("broker calls after first mint = %d, want 1", broker.calls())
+	}
+
+	// Sleep past the TRUE hard expiry (not just the proactive window) with
+	// the broker down throughout — ride-through has nothing left to extend.
+	time.Sleep(time.Until(mintStart.Add(ttl)) + 700*time.Millisecond)
 
 	creds, err := cache.Retrieve(ctx)
 	if err == nil {
-		t.Fatalf("expected an error once a refresh is due and the broker is down, got credentials: %+v", creds)
+		t.Fatalf("expected an error once truly past hard expiry and the broker is still down, got credentials: %+v", creds)
 	}
 	if !strings.Contains(err.Error(), "failed to refresh cached credentials") && !strings.Contains(err.Error(), "mint failed") {
 		t.Errorf("error = %q, want it to clearly indicate a refresh/mint failure (fail-closed, not a silent empty credential)", err.Error())
