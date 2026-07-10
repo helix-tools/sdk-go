@@ -10,6 +10,8 @@ import (
 	"os"
 	"testing"
 
+	stscreds "github.com/helix-tools/sdk-go/v2/credentials"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -187,6 +189,35 @@ func NewAWSConfig(ctx context.Context, creds Credentials, region string) (aws.Co
 			creds.AWSSecretAccessKey,
 			"",
 		)),
+	)
+}
+
+// NewAWSConfigSTS creates an AWS config using the STS credential-broker
+// auto-refresh provider (stscreds.NewCredentialsCache) instead of a static
+// key. It bootstrap-authenticates mint requests with the given static creds
+// (STS-PLAN.md §9 decision #1: the B0/B1 bootstrap is the existing SigV4
+// static key, not a new API key — verified against the real broker,
+// helix-tools/api PR #129, which accepts only SigV4).
+//
+// Test/e2e utility only, mirroring NewAWSConfig's signature — production SDK
+// callers get this wiring automatically via types.Config.CredentialMode
+// "sts" in consumer.NewConsumer/producer.NewProducer. NewAWSConfig and
+// LoadCredentialsFromSSM are untouched.
+func NewAWSConfigSTS(ctx context.Context, apiEndpoint string, creds Credentials, region string) (aws.Config, error) {
+	provider, err := stscreds.NewProvider(stscreds.BrokerConfig{
+		APIEndpoint:        apiEndpoint,
+		CustomerID:         creds.CustomerID,
+		Region:             region,
+		AWSAccessKeyID:     creds.AWSAccessKeyID,
+		AWSSecretAccessKey: creds.AWSSecretAccessKey,
+	})
+	if err != nil {
+		return aws.Config{}, fmt.Errorf("failed to create STS credentials provider: %w", err)
+	}
+
+	return config.LoadDefaultConfig(ctx,
+		config.WithRegion(region),
+		config.WithCredentialsProvider(stscreds.NewCredentialsCache(provider)),
 	)
 }
 
