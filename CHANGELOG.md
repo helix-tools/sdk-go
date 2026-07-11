@@ -2,6 +2,82 @@
 
 ## Unreleased
 
+### Added
+- **STS session credentials (opt-in)** — STS-PLAN.md §P3 (B1). New
+  `credentials` package (`github.com/helix-tools/sdk-go/v2/credentials`)
+  implements an `aws.CredentialsProvider` that mints short-lived AWS STS
+  session credentials from the Helix Connect credential broker (`POST
+  /v1/credentials/session`, contract frozen in sdk-schemas #17), wrapped in
+  `aws.CredentialsCache` for auto-refresh (proactive refresh at ~2/3 of the
+  900s TTL, i.e. remaining <=5min, with jitter; single-flight coalescing
+  courtesy of `aws.CredentialsCache` itself — no reimplementation). A broker
+  blip while a refresh is due rides through on the last-known-good session
+  until its TRUE hard expiry ("serve-last-good creds until hard expiry" —
+  `Provider` implements `aws.HandleFailRefreshCredentialsCacheStrategy` +
+  `aws.AdjustExpiresByCredentialsCacheStrategy` to do this precisely,
+  without ever letting the cache believe a truly-expired credential is
+  still fresh); once genuinely past hard expiry with no successful refresh,
+  it fails closed with a clear error — never fabricates or indefinitely
+  reuses an expired credential. `types.Config` gains two
+  additive fields: `APIKey` (reserved for a later phase's platform-scoped
+  bootstrap — not yet wired, see below) and `CredentialMode` (`"static"` |
+  `"sts"`, **default `"static"`**). `NewConsumer`/`NewProducer` select the
+  provider via `credentials.SelectProvider`; every other AWS client (KMS,
+  SQS, SSM, S3) and the hand-rolled API SigV4 signer inherit whichever
+  provider was selected automatically — **zero signing-path changes** (the
+  session token is emitted in `X-Amz-Security-Token` and included in
+  SigV4 `SignedHeaders` automatically by the existing signer whenever the
+  retrieved credential carries one). `api/config.go` gains a sibling
+  `NewAWSConfigSTS` test-utility variant (`NewAWSConfig`/
+  `LoadCredentialsFromSSM` untouched). Zero new runtime dependencies —
+  built entirely on `aws-sdk-go-v2`'s already-vendored `aws.Credentials{}`/
+  `aws.CredentialsProvider`/`aws.CredentialsCache` primitives.
+  - **Static remains the default and is byte-identical.** `CredentialMode`
+    is *never* inferred as `"sts"` — only an explicit opt-in enables it.
+    Every existing caller (Ringboost's live static-key path included) is
+    unaffected: same construction call, same signed-request shape, no
+    `X-Amz-Security-Token` header, pinned by
+    `TestSelectProvider_StaticPath_ByteIdenticalToDirectConstruction` and
+    `TestMakeAPIRequest_StaticMode_NoSecurityTokenHeader` (consumer +
+    producer).
+  - **Mint-request bootstrap is the existing static AWS key (SigV4), not a
+    bearer API key** — STS-PLAN.md §9 decision #1, verified directly
+    against the real broker implementation (`helix-tools/api` PR #129:
+    `RequireMachineAuth(AuthMethodSigV4)` accepts only SigV4). `APIKey` is
+    additive/reserved for a later phase; setting it without static keys
+    returns a clear "not yet supported" construction error rather than
+    silently sending an unauthenticated request.
+  - Publish gate unchanged from every other SDK release: this PR **merges
+    inert** (default static). Tags are pushed only after the broker is
+    live-dark, session-token-aware `UnifiedAuth` is verified, and local-first
+    live validation passes across a real 15-minute expiry boundary — **not
+    part of this PR**. Target release: **v2.6.0**.
+  - See `STS_C0_INVENTORY.md` at the repo root for the full grep-based
+    bind-site inventory this change was derived from (codex gate finding
+    #6).
+
+### Tests
+- `credentials/broker_test.go` (new): mint client happy/bad/edge paths
+  (401/403/429/5xx/malformed-JSON/missing-fields, each with the correct
+  retry-vs-fail-fast classification and call-count assertions); clock-skew
+  hardening in both directions; the real `aws.CredentialsCache` refresh
+  engine exercised end-to-end via compressed real-time windows (fresh /
+  within-window / refresh-storm / single-flight under `-race` / optFn
+  override); a broker outage riding through on the last-known-good
+  credential until true hard expiry without re-attempting a mint on every
+  call, and failing closed only once genuinely past that hard expiry (two
+  tests, each pinning one side of that boundary); `SelectProvider`'s full
+  mode-inference matrix; the static-path byte-identical regression pin.
+  Every load-bearing assertion above was watched to fail for the right
+  reason with a temporary reverted fix, then restored (default-static
+  inference, session-token propagation into the signed request, fail-closed
+  behavior, 403 non-retryability).
+- `consumer/consumer_sts_test.go`, `producer/producer_sts_test.go` (new):
+  wire-level pins that static-mode signing never emits
+  `X-Amz-Security-Token` and sts-mode signing emits it **and** includes it
+  in SigV4 `SignedHeaders` (an attached-but-unsigned token is rejected
+  server-side per `credential_session.schema.json`).
+
 ### Fixed
 - **`RateLimitConfig` buckets are now `*RateLimitBucket` pointers**
   (DRIFT-GOSDK-RATELIMIT-1). The `Read`/`Write`/`Delete` fields were value
