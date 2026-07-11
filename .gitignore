@@ -54,8 +54,24 @@ go.work.sum
 coverage.txt
 coverage.html
 
-# Credentials and secrets (extra safety)
-*credentials*
+# Credentials and secrets (extra safety). Scoped to actual secret-bearing
+# file shapes, NOT to Go source packages — the unscoped `*credentials*` this
+# replaced also matched the legitimate `credentials/` STS provider package
+# directory (github.com/helix-tools/sdk-go/v2/credentials, STS-PLAN.md §P3),
+# which is source code containing no real secrets, and made it impossible to
+# ever commit a package with that name.
+*credentials*.json
+*credentials*.yaml
+*credentials*.yml
+*credentials*.env
+.credentials
+# Catches a literal `credentials` file/dir copied in at any depth (codex
+# REFUTE finding: the patterns above all require an extension, so a
+# no-extension file like a copied-in `.aws/credentials` slipped through).
+# The negation below restores specifically the root-level `credentials/` Go
+# package so this stays scoped to accidental secret-file copies elsewhere.
+**/credentials
+!/credentials/
 *secrets*
 *keys.json
 *key.json

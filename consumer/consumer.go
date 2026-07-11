@@ -25,12 +25,12 @@ import (
 	"strings"
 	"time"
 
+	stscreds "github.com/helix-tools/sdk-go/v2/credentials"
 	"github.com/helix-tools/sdk-go/v2/types"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
@@ -225,14 +225,20 @@ func NewConsumer(cfg types.Config) (*Consumer, error) {
 		Timeout: 25 * time.Second,
 	}
 
+	// Select the AWS credentials provider: "static" (default, byte-identical
+	// to the pre-STS behavior) or "sts" (auto-refreshing broker-issued
+	// session credentials, opt-in via cfg.CredentialMode). See
+	// credentials.SelectProvider and STS_C0_INVENTORY.md for the full
+	// mode-inference matrix.
+	credProvider, err := stscreds.SelectProvider(cfg.APIEndpoint, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to select AWS credentials provider: %w", err)
+	}
+
 	// Load AWS config.
 	awsCfg, err := config.LoadDefaultConfig(context.Background(),
 		config.WithRegion(cfg.Region),
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
-			cfg.AWSAccessKeyID,
-			cfg.AWSSecretAccessKey,
-			"",
-		)),
+		config.WithCredentialsProvider(credProvider),
 		config.WithHTTPClient(awsHTTPClient),
 	)
 	if err != nil {
