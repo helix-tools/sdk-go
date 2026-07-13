@@ -33,21 +33,25 @@ const (
 
 // Subscription represents an active subscription to a dataset or producer.
 type Subscription struct {
-	ID               string  `json:"_id"`
-	ConsumerID       string  `json:"consumer_id"`
-	CustomerID       string  `json:"customer_id,omitempty"` // Legacy field
-	DatasetID        *string `json:"dataset_id"` // Required field, null for all-datasets subscription
-	DatasetName      string  `json:"dataset_name,omitempty"`
-	ProducerID       string  `json:"producer_id"`
-	RequestID        string  `json:"request_id,omitempty"`
-	Tier             string  `json:"tier"` // SubscriptionTier — canonical write value is "free"
-	Status           string  `json:"status"` // SubscriptionStatus: "active", "paused", "cancelled", "expired"
-	KMSGrantID       *string `json:"kms_grant_id,omitempty"`
+	ID                 string  `json:"_id"`
+	ConsumerID         string  `json:"consumer_id"`
+	CustomerID         string  `json:"customer_id,omitempty"` // Legacy field
+	DatasetID          *string `json:"dataset_id"`            // Required field, null for all-datasets subscription
+	DatasetName        string  `json:"dataset_name,omitempty"`
+	ProducerID         string  `json:"producer_id"`
+	RequestID          string  `json:"request_id,omitempty"`
+	Tier               string  `json:"tier"`   // SubscriptionTier — canonical write value is "free"
+	Status             string  `json:"status"` // SubscriptionStatus: "active", "paused", "cancelled", "expired"
+	KMSGrantID         *string `json:"kms_grant_id,omitempty"`
 	SNSSubscriptionARN *string `json:"sns_subscription_arn,omitempty"`
-	SQSQueueARN      *string `json:"sqs_queue_arn,omitempty"`
-	SQSQueueURL      *string `json:"sqs_queue_url,omitempty"`
-	CreatedAt        string  `json:"created_at"`
-	UpdatedAt        string  `json:"updated_at"`
+	SQSQueueARN        *string `json:"sqs_queue_arn,omitempty"`
+	SQSQueueURL        *string `json:"sqs_queue_url,omitempty"`
+	CreatedAt          string  `json:"created_at"`
+	UpdatedAt          string  `json:"updated_at"`
+	// Billing is the marketplace billing (payment) state (schema PR #18).
+	// Optional: free/legacy subscriptions omit it or carry billing_status
+	// "free". Distinct from Status (the ACCESS state). Tolerate absence (nil).
+	Billing *SubscriptionBilling `json:"billing,omitempty"`
 }
 
 // SubscriptionsResponse is the response for GET /v1/subscriptions.
@@ -78,13 +82,13 @@ type SubscribersResponse struct {
 
 // Subscriber represents a consumer who has subscribed to the producer's datasets.
 type Subscriber struct {
-	ConsumerID        string             `json:"consumer_id"`
-	ConsumerName      string             `json:"consumer_name"`
-	ConsumerEmail     string             `json:"consumer_email"`
-	SubscriptionCount int                `json:"subscription_count"`
+	ConsumerID        string              `json:"consumer_id"`
+	ConsumerName      string              `json:"consumer_name"`
+	ConsumerEmail     string              `json:"consumer_email"`
+	SubscriptionCount int                 `json:"subscription_count"`
 	Datasets          []SubscriberDataset `json:"datasets"`
-	FirstSubscribedAt string             `json:"first_subscribed_at"`
-	LastSubscribedAt  string             `json:"last_subscribed_at"`
+	FirstSubscribedAt string              `json:"first_subscribed_at"`
+	LastSubscribedAt  string              `json:"last_subscribed_at"`
 }
 
 // SubscriberDataset represents a dataset that a subscriber has access to.
