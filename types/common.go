@@ -140,4 +140,7 @@ type Dataset struct {
 	UpdatedBy       string         `json:"updated_by"`
 	DeletedAt       *string        `json:"deleted_at,omitempty"`
 	DeletedBy       *string        `json:"deleted_by,omitempty"`
+	// Marketplace pricing (schema PR #18). Optional and server-managed: nil
+	// while the marketplace_payments feature flag is off — tolerate absence.
+	Marketplace *DatasetMarketplace `json:"marketplace,omitempty"`
 }
