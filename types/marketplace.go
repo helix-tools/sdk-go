@@ -100,15 +100,39 @@ type SubscriptionCheckoutInput struct {
 	RequestID string
 }
 
+// ConnectOnboardResponse is returned by ConnectOnboard
+// (POST /v1/self/connect/onboard). Mirrors the Go API's connect.OnboardResponse
+// field-for-field. URL is the Stripe Account Link the producer must open to
+// complete Express onboarding — the SDK NEVER opens or redirects to it itself.
+type ConnectOnboardResponse struct {
+	URL       string `json:"url"`
+	AccountID string `json:"account_id"`
+}
+
 // ConnectStatus is the producer's Stripe Connect (Express) payout account status
-// (GET /v1/self/connect/status). Mirrors the company connect_* fields; a producer
-// who has never onboarded gets an empty/false-y status.
+// (GET /v1/self/connect/status). Mirrors the Go API's connect.StatusResponse
+// field-for-field (NOT the company connect_* fields, which are prefixed
+// differently) — a producer who has never onboarded gets an empty/false-y
+// status. Use PayoutsEnabled (or the derived CanPriceDatasets) to know whether
+// a dataset can be priced > 0. RequirementsDue is a bool flag (true when Stripe
+// has outstanding requirements for the account), not a list of requirement keys.
 type ConnectStatus struct {
-	ConnectAccountID        *string `json:"connect_account_id,omitempty"`
-	ConnectChargesEnabled   bool    `json:"connect_charges_enabled,omitempty"`
-	ConnectPayoutsEnabled   bool    `json:"connect_payouts_enabled,omitempty"`
-	ConnectDetailsSubmitted bool    `json:"connect_details_submitted,omitempty"`
-	ConnectOnboardedAt      *string `json:"connect_onboarded_at,omitempty"`
+	ConnectAccountID   string `json:"connect_account_id"`
+	ChargesEnabled     bool   `json:"charges_enabled"`
+	PayoutsEnabled     bool   `json:"payouts_enabled"`
+	DetailsSubmitted   bool   `json:"details_submitted"`
+	OnboardingComplete bool   `json:"onboarding_complete"`
+	CanPriceDatasets   bool   `json:"can_price_datasets"`
+	RequirementsDue    bool   `json:"requirements_due"`
+	DisabledReason     string `json:"disabled_reason,omitempty"`
+}
+
+// ConnectLoginLinkResponse is returned by CreateConnectLoginLink
+// (POST /v1/self/connect/login-link). Mirrors the Go API's
+// connect.LoginLinkResponse. URL is a single-use Stripe Express-dashboard
+// link — the SDK NEVER opens or redirects to it itself.
+type ConnectLoginLinkResponse struct {
+	URL string `json:"url"`
 }
 
 // SetDatasetMarketplaceInput is the input for SetDatasetMarketplace
