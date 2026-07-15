@@ -3,6 +3,52 @@
 ## Unreleased
 
 ### Added
+- **Producer Stripe Connect payout surface — Python SDK parity (PR #11
+  equivalent)**. `producer.ConnectOnboard(ctx)` replaces the earlier
+  `GetConnectOnboardingLink` (never in a tagged release, so no
+  compatibility concern): `POST /v1/self/connect/onboard`, no request
+  body, now returns BOTH `URL` and `AccountID` instead of silently
+  dropping the account id. New `producer.CreateConnectLoginLink(ctx)`:
+  `POST /v1/self/connect/login-link`, no request body, returns the hosted
+  Stripe Express dashboard URL; a 403 (no Connect account yet, or
+  onboarding incomplete) surfaces as `*producer.APIError` with
+  `StatusCode` 403. Both new types (`types.ConnectOnboardResponse`,
+  `types.ConnectLoginLinkResponse`) and the existing
+  `producer.GetConnectStatus(ctx)` verified field-for-field against the
+  Go API's `internal/resources/connect/types.go` (`OnboardResponse`,
+  `StatusResponse`, `LoginLinkResponse`) and cross-checked against the
+  Python SDK's `helix_connect/producer.py` (PR #11).
+
+### Fixed
+- **`types.ConnectStatus` was stale/wrong-shaped and drifted from the Go
+  API contract.** The struct mirrored the `company.schema.json`
+  `connect_*`-prefixed persisted fields instead of the actual
+  `GET /v1/self/connect/status` response, so field names (and thus JSON
+  decoding) never matched what the server sends:
+  `connect_charges_enabled`/`connect_payouts_enabled`/
+  `connect_details_submitted`/`connect_onboarded_at` are renamed to the
+  unprefixed `charges_enabled`/`payouts_enabled`/`details_submitted`
+  (`connect_onboarded_at` dropped — the API never returns it), and three
+  fields the API returns but the SDK never exposed are added:
+  `onboarding_complete`, `can_price_datasets`, `requirements_due` (a
+  **bool** flag — Stripe has outstanding requirements for the account —
+  never a list of requirement keys), and `disabled_reason`.
+  `ConnectAccountID` changes from `*string` to `string` to match the API's
+  own (non-pointer) `StatusResponse.ConnectAccountID`.
+
+### Tests
+- `producer/marketplace_test.go`: rewrote the Connect suite to drive the
+  real `ConnectOnboard`/`GetConnectStatus`/`CreateConnectLoginLink`
+  methods against an `httptest` server — request shape (path/method/no
+  body), full response decode, the 403/500 bad paths, the
+  never-onboarded edge case (fields absent → zero value), and a
+  dedicated negative control (`TestGetConnectStatus_RequirementsDueIsBool`)
+  proving `requirements_due` really is typed `bool` end-to-end. Every
+  assertion was watched to fail for the right reason with the
+  corresponding fix reverted (wrong path, wrong field type/tag, missing
+  method), then restored.
+
+### Added
 - **STS session credentials (opt-in)** — STS-PLAN.md §P3 (B1). New
   `credentials` package (`github.com/helix-tools/sdk-go/v2/credentials`)
   implements an `aws.CredentialsProvider` that mints short-lived AWS STS
