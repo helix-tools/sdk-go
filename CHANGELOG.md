@@ -3,6 +3,22 @@
 ## Unreleased
 
 ### Added
+- **Producer self-serve AI-agent surface (Wave-2 Model-2)**. Three
+  methods on `*producer.Producer` mirroring `/v1/self/ai-agent`
+  (producer JWT v1 / SigV4): `ProvisionAIAgent(ctx)` (`POST`, idempotent,
+  no request body) and `DeprovisionAIAgent(ctx)` (`DELETE`, idempotent
+  no-op when absent), both returning `*types.AIAgentProvisionResult`
+  (`{status, message}`); and `GetAIAgentStatus(ctx)` (`GET`) returning
+  `*types.AIAgentStatus` — the masked status carrying ONLY the lifecycle
+  `Status`, an optional USD `Cost` (read via `CostUSD()`), `CreatedAt`,
+  and a curated `Message` on error (never any infra internals). Status
+  values are the `types.AIAgentState*` constants
+  (`not_provisioned`/`provisioning`/`active`/`error`/`deprovisioning`).
+  Types verified field-for-field against the Go API's
+  `internal/resources/aiagent/types.go`. NOTE: server-side this surface
+  is dark behind `HELIX_MODEL2_ENABLED`; while off, all three endpoints
+  respond 404 (surfaced as `*producer.APIError` with `StatusCode` 404),
+  so live e2e is deferred until the flag is flipped.
 - **Producer Stripe Connect payout surface — Python SDK parity (PR #11
   equivalent)**. `producer.ConnectOnboard(ctx)` replaces the earlier
   `GetConnectOnboardingLink` (never in a tagged release, so no
