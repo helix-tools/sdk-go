@@ -49,7 +49,7 @@ const emptyPayloadHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca49599
 // best-effort default for those dev-build cases; the wire-sent
 // sdk_version value for a normally-built consumer binary instead
 // reflects the actual resolved module version, which cannot drift.
-const SDKVersion = "2.8.0"
+const SDKVersion = "2.8.1"
 
 // SDKLanguage identifies this SDK's language in download outcome callbacks
 // (matches the dataset_download_event JSON Schema's sdk_language field).
