@@ -281,8 +281,17 @@ func TestDownloadOutcome_SuccessCallback(t *testing.T) {
 	if p["sdk_language"] != "go" {
 		t.Errorf("sdk_language = %v, want go", p["sdk_language"])
 	}
-	if v, _ := p["sdk_version"].(string); v == "" {
-		t.Error("sdk_version is empty")
+	// sdk_version must be the RESOLVED build version (effectiveSDKVersion),
+	// not merely non-empty — a bare "non-empty" check would have passed
+	// just as well on the stale hardcoded "2.5.0" this replaced. Note:
+	// inside this SDK's own test binary effectiveSDKVersion() always
+	// equals the SDKVersion fallback constant (this module is the
+	// "(devel)" main module under test), so this assertion alone can't
+	// distinguish a regression back to the bare constant — see
+	// TestDownloadDataset_CallsEffectiveSDKVersion in sdk_version_test.go
+	// for the static check that catches that specific regression.
+	if got, want := p["sdk_version"], effectiveSDKVersion(); got != want {
+		t.Errorf("sdk_version = %v, want %v", got, want)
 	}
 	if _, ok := p["duration_ms"].(float64); !ok {
 		t.Errorf("duration_ms = %v, want number", p["duration_ms"])

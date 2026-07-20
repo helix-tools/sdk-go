@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2026-07-20 (v2.8.0)
+
 ### Added
 - **Producer self-serve AI-agent surface (Wave-2 Model-2)**. Three
   methods on `*producer.Producer` mirroring `/v1/self/ai-agent`
@@ -19,6 +21,77 @@
   is dark behind `HELIX_MODEL2_ENABLED`; while off, all three endpoints
   respond 404 (surfaced as `*producer.APIError` with `StatusCode` 404),
   so live e2e is deferred until the flag is flipped.
+
+### Fixed
+- **`consumer.SDKVersion` no longer drifts from the real released
+  version.** The `sdk_version` field sent in the download-outcome
+  telemetry callback (`consumer/consumer.go`'s `DownloadDataset`) now
+  resolves the SDK's actual build version via
+  `runtime/debug.ReadBuildInfo()` — the real module version a consumer's
+  `go.mod`/`go.sum` pins, which the Go toolchain itself stamps into
+  every binary — falling back to the `SDKVersion` constant only when
+  build info is unavailable or unresolved (a `"(devel)"` build: running
+  this SDK's own test suite, or a consumer depending on this module via
+  a `replace` directive to a local checkout). Previously `SDKVersion` was
+  a hand-bumped constant that had silently drifted to `"2.5.0"` across
+  two subsequent releases (v2.6.0, v2.7.0) despite its own doc comment's promise
+  to stay "in lockstep with the module version tag" — nothing enforced
+  that promise, undermining the producer dashboard's per-version
+  incident-triage grouping (see the v2.1.4 and v2.2.0 entries below,
+  where this exact class of drift was "fixed" by hand twice before and
+  drifted again anyway). The constant remains exported
+  (source-compatible with any existing caller reading it directly) and
+  is bumped to `"2.8.0"` as the fallback value.
+
+### Tests
+- `consumer/sdk_version.go` + `consumer/sdk_version_test.go` (new):
+  table-driven coverage of `resolveSDKVersion` against synthetic
+  `debug.BuildInfo` values — build info unavailable, this module as the
+  `"(devel)"` main module (running this SDK's own tests), this module as
+  a real-tagged or pseudo-versioned dependency (`v` prefix stripped),
+  this module missing from `Deps` entirely, and a `"(devel)"`-pinned
+  dependency (local `replace` directive) — all correctly falling back to
+  the constant where expected. `TestSDKVersionConst_MajorMatchesModulePath`
+  guards the fallback constant's major version against `go.mod`'s
+  `/v2` module-path suffix so the two can never silently disagree.
+  `TestDownloadDataset_CallsEffectiveSDKVersion` is a static (source-shape)
+  regression guard on the `DownloadDataset` call site itself: dynamic/
+  black-box testing structurally cannot catch a regression back to the
+  bare `SDKVersion` constant here, because inside this SDK's own test
+  binary `effectiveSDKVersion()` always resolves to the very same
+  fallback value — negative-control verified (reverted the call site,
+  watched this test fail for the right reason while every dynamic test
+  in `download_outcome_callback_test.go` stayed green, then restored).
+  `TestDownloadOutcome_SuccessCallback`'s `sdk_version` assertion was
+  also strengthened from "non-empty" (which the stale `"2.5.0"` constant
+  would have satisfied just as well) to an exact match against
+  `effectiveSDKVersion()`.
+
+## 2026-07-14 (v2.7.0)
+
+### Added
+- **Marketplace — consumer + producer methods.** Consumer:
+  `BrowseMarketplace(ctx, params)` (`GET /v1/datasets/marketplace`, a
+  public endpoint — optional filters: search/category/sort/page),
+  `GetDatasetDetails(ctx, datasetID)` (`GET /v1/datasets/:id/details`, a
+  public composite of dataset + reviews + related datasets + the
+  caller's subscription info), and `CreateSubscriptionCheckout(ctx,
+  input)` (`POST /v1/subscriptions/checkout` with exactly one of
+  `input.DatasetID`/`input.RequestID`; returns the hosted Stripe
+  Checkout URL only — the SDK never opens or redirects to it). Producer:
+  `GetEarnings(ctx, period)` (`GET /v1/self/marketplace/earnings`, a
+  tolerant pass-through map — the contract isn't frozen server-side yet)
+  and `SetDatasetMarketplace(ctx, datasetID, input)` (`PATCH
+  /v1/datasets/:id/marketplace`, PATCH semantics — only non-nil
+  `PriceMonthlyCents`/`Listed` fields are sent). New
+  `types/marketplace.go` mirrors sdk-schemas PR #18
+  (`DatasetMarketplace`, `SubscriptionBilling`, pagination/response
+  types); `types.Dataset` gains an optional `Marketplace` field and
+  `types.Subscription` gains `Billing` — both pointer-typed and
+  absent-tolerant, since every marketplace field is omitted server-side
+  while the `marketplace_payments` feature flag is off (never
+  defaulted). Browse/details shapes anchored directly to the helix-api
+  handlers. Closes ClickUp 86e01nb3t (#8).
 - **Producer Stripe Connect payout surface — Python SDK parity (PR #11
   equivalent)**. `producer.ConnectOnboard(ctx)` replaces the earlier
   `GetConnectOnboardingLink` (never in a tagged release, so no
@@ -33,7 +106,7 @@
   `producer.GetConnectStatus(ctx)` verified field-for-field against the
   Go API's `internal/resources/connect/types.go` (`OnboardResponse`,
   `StatusResponse`, `LoginLinkResponse`) and cross-checked against the
-  Python SDK's `helix_connect/producer.py` (PR #11).
+  Python SDK's `helix_connect/producer.py` (PR #11) (#9).
 
 ### Fixed
 - **`types.ConnectStatus` was stale/wrong-shaped and drifted from the Go
@@ -53,16 +126,24 @@
   own (non-pointer) `StatusResponse.ConnectAccountID`.
 
 ### Tests
-- `producer/marketplace_test.go`: rewrote the Connect suite to drive the
-  real `ConnectOnboard`/`GetConnectStatus`/`CreateConnectLoginLink`
-  methods against an `httptest` server — request shape (path/method/no
-  body), full response decode, the 403/500 bad paths, the
-  never-onboarded edge case (fields absent → zero value), and a
-  dedicated negative control (`TestGetConnectStatus_RequirementsDueIsBool`)
-  proving `requirements_due` really is typed `bool` end-to-end. Every
-  assertion was watched to fail for the right reason with the
-  corresponding fix reverted (wrong path, wrong field type/tag, missing
-  method), then restored.
+- `consumer/marketplace_test.go`, `producer/marketplace_test.go`: drive
+  the real `BrowseMarketplace`/`GetDatasetDetails`/
+  `CreateSubscriptionCheckout`/`GetEarnings`/`SetDatasetMarketplace`
+  methods end-to-end against an `httptest` server — real SigV4 signing
+  and error mapping; happy + error(404) + edge (absent fields, 0/false
+  sent, the exactly-one `DatasetID`/`RequestID` guard) paths.
+- `producer/marketplace_test.go` also rewrote the Connect suite to drive
+  the real `ConnectOnboard`/`GetConnectStatus`/`CreateConnectLoginLink`
+  methods — request shape (path/method/no body), full response decode,
+  the 403/500 bad paths, the never-onboarded edge case (fields absent ->
+  zero value), and a dedicated negative control
+  (`TestGetConnectStatus_RequirementsDueIsBool`) proving
+  `requirements_due` really is typed `bool` end-to-end. Every assertion
+  was watched to fail for the right reason with the corresponding fix
+  reverted (wrong path, wrong field type/tag, missing method), then
+  restored.
+
+## 2026-07-11 (v2.6.0)
 
 ### Added
 - **STS session credentials (opt-in)** — STS-PLAN.md §P3 (B1). New
@@ -109,11 +190,10 @@
     additive/reserved for a later phase; setting it without static keys
     returns a clear "not yet supported" construction error rather than
     silently sending an unauthenticated request.
-  - Publish gate unchanged from every other SDK release: this PR **merges
-    inert** (default static). Tags are pushed only after the broker is
-    live-dark, session-token-aware `UnifiedAuth` is verified, and local-first
-    live validation passes across a real 15-minute expiry boundary — **not
-    part of this PR**. Target release: **v2.6.0**.
+  - Merged inert (default static), same publish gate as every other SDK
+    release: tagged as v2.6.0 only after the broker went live-dark,
+    session-token-aware `UnifiedAuth` was verified, and local-first live
+    validation passed across a real 15-minute expiry boundary.
   - See `STS_C0_INVENTORY.md` at the repo root for the full grep-based
     bind-site inventory this change was derived from (codex gate finding
     #6).
@@ -140,31 +220,81 @@
   in SigV4 `SignedHeaders` (an attached-but-unsigned token is rejected
   server-side per `credential_session.schema.json`).
 
+## 2026-07-06 (v2.5.0)
+
+### Added
+- **Producer partner-invite methods**: `InviteConsumer(ctx, input)`
+  (`POST /v1/self/invite-consumer` — invites a consumer partner company,
+  auto-granting access to the given datasets at invite time; validates
+  client-side first: company name 2-200 chars, valid business email
+  (max 254 chars), 1-50 unique non-blank dataset ids), `ListConsumers(ctx)`
+  (`GET /v1/self/consumers` — includes deactivated relations), and
+  `DeactivateConsumer(ctx, consumerID)` (`PATCH
+  /v1/self/consumers/:id/deactivate`). All three are gated behind the
+  `partner_invite` feature flag; a producer without it enabled gets a
+  403 `*producer.APIError`. The server provisions the consumer account
+  asynchronously and sends a welcome email —
+  `InviteConsumerResponse.EmailSent`/`EmailError` surface whether that
+  dispatch succeeded; provisioning is not rolled back on email failure.
+  New types `types.InviteConsumerInput`/`InviteConsumerResponse`/
+  `ProducerConsumerRelation`/`ListConsumersResponse`/
+  `DeactivateConsumerResponse` match the corresponding sdk-schemas
+  contracts and the Go API's `self` package source of truth.
+
 ### Fixed
-- **`RateLimitConfig` buckets are now `*RateLimitBucket` pointers**
-  (DRIFT-GOSDK-RATELIMIT-1). The `Read`/`Write`/`Delete` fields were value
-  `RateLimitBucket` structs, but the authoritative Go API
-  (`internal/pkg/agents` `RateLimitConfig`) uses `*RateLimitBucket` where the
-  pointer carries the contract: nil bucket = unlimited (key omitted),
-  present `{"rpm":0}` = blocked (HTTP 429 `class_blocked_by_registry`),
-  present `{"rpm":>0}` = limited. With value structs `omitempty` is a no-op,
-  so a zero-value bucket always serialized as `{"rpm":0}` and the SDK could
-  not represent — nor round-trip — the unlimited-vs-blocked distinction; it
-  silently collapsed both into "blocked". Wire keys are unchanged
-  (`read`/`write`/`delete`, `rpm`/`burst`), so this is source-compatible at
-  the JSON level; Go callers constructing a `RateLimitConfig` must now take
-  the address of their buckets (`&RateLimitBucket{...}`) and may leave a
-  class `nil` to mean unlimited.
+- **`UploadDataset` create-payload gaps that broke prod end-to-end.**
+  `createDatasetRecord` (the path `UploadDataset` uses) omitted fields
+  the deployed API and consumer download need — no mocked unit test
+  caught it, only the SDK-only prod E2E suite:
+  - `s3_bucket_name` + `access_tier`: required by
+    `ValidateCreateDatasetRequest`; previously a 400.
+  - `s3_key`: an absent key defaulted to
+    `datasets/{producer_id}/{dataset_id}`, but the s3-event-processor
+    derives `dataset_name` from the key's first segment — now
+    dataset-NAME-keyed (`datasets/{name}/data.ndjson.gz`), matching the
+    Python/TS SDKs.
+  - `metadata.encryption_enabled`/`compression_enabled`: absent meant
+    `Consumer.DownloadDataset` skipped decrypt/decompress, corrupting the
+    round trip (sha256 mismatch).
+- **`Consumer.DownloadDataset` fell back to the top-level `encryption`
+  flag.** The create endpoint promotes `metadata.encryption_enabled` to a
+  top-level `encryption` field and drops it from metadata, so a
+  metadata-only read saw `isEncrypted=false`, skipped decrypt, and
+  gunzipped still-encrypted bytes (`gzip: invalid header`). `isEncrypted`
+  now falls back to `types.Dataset.Encryption` when the metadata key is
+  absent, mirroring the Python SDK.
+- **`InviteConsumer`/`DeactivateConsumer` sent untrimmed values on the
+  wire** (codex REFUTE catch): `InviteConsumer` trimmed dataset ids for
+  validation but POSTed the raw slice, and `DeactivateConsumer`
+  path-escaped the raw arg — whitespace-padded input diverged from the
+  canonical server-side value. Both now send/escape the trimmed value.
 
 ### Tests
-- Added `TestRateLimitConfig_PointerBucketStatesRoundTrip` and
-  `TestRateLimitConfig_AbsentFieldsDecodeToNil` (`agent/types_test.go`) —
-  pin all three states across a full marshal/unmarshal cycle: a nil bucket
-  must be absent on the wire and decode back to nil; a present `{"rpm":0}`
-  must round-trip as a non-nil bucket with RPM 0 (distinct from nil); a
-  present `{"rpm":>0}` must round-trip its rate and burst. The nil-vs-zero
-  assertions are structurally impossible to satisfy under value semantics.
-## 2026-06-09 (v2.3.0 — SDK parity + enum alignment, intended tag, not yet released)
+- Regression test drives the real `createDatasetRecord`, asserting every
+  field the deployed API requires is present on the wire
+  (`producer/upload_post_first_test.go`).
+- `consumer/resolve_encrypt_compress_test.go`: pins the encryption-flag
+  fallback (top-level `Encryption` used only when
+  `metadata.encryption_enabled` is absent).
+- Wire-payload tests for `InviteConsumer`/`DeactivateConsumer`
+  (`producer/partner_invite_test.go`) pin the trimmed values,
+  negative-controlled.
+
+## 2026-06-11 (v2.4.0)
+
+### Added
+- **`types.FeatureFlag` / `types.FeatureFlags`** mirroring
+  `feature_flag.schema.json` (sdk-schemas v1.0.0): the `FeatureFlag`
+  struct plus a `FeatureFlags` map type, and a new `feature_flags` field
+  on `Company` (`omitempty` — an absent flag means default-deny, matching
+  the schema) (#4).
+
+### Tests
+- `types/feature_flag_test.go`: contract tests pin the snake_case JSON
+  tags and the `Company` round-trip; negative-control verified (breaking
+  the `feature_flags` tag fails the test for the right reason).
+
+## 2026-06-10 (v2.3.0 — SDK parity + enum alignment)
 
 ### Added
 - **Typed status/tier constants in `types/`** matching the canonical contract
@@ -214,6 +344,33 @@
   `GetSubscriptionRequest`.
 - `producer/update_dataset_parity_test.go` — end-to-end httptest coverage of
   the public `UpdateDataset` (PATCH path, omitempty body, happy + 403 paths).
+
+## 2026-06-08 (v2.2.1)
+
+### Fixed
+- **`RateLimitConfig` buckets are now `*RateLimitBucket` pointers**
+  (DRIFT-GOSDK-RATELIMIT-1). The `Read`/`Write`/`Delete` fields were value
+  `RateLimitBucket` structs, but the authoritative Go API
+  (`internal/pkg/agents` `RateLimitConfig`) uses `*RateLimitBucket` where the
+  pointer carries the contract: nil bucket = unlimited (key omitted),
+  present `{"rpm":0}` = blocked (HTTP 429 `class_blocked_by_registry`),
+  present `{"rpm":>0}` = limited. With value structs `omitempty` is a no-op,
+  so a zero-value bucket always serialized as `{"rpm":0}` and the SDK could
+  not represent — nor round-trip — the unlimited-vs-blocked distinction; it
+  silently collapsed both into "blocked". Wire keys are unchanged
+  (`read`/`write`/`delete`, `rpm`/`burst`), so this is source-compatible at
+  the JSON level; Go callers constructing a `RateLimitConfig` must now take
+  the address of their buckets (`&RateLimitBucket{...}`) and may leave a
+  class `nil` to mean unlimited.
+
+### Tests
+- Added `TestRateLimitConfig_PointerBucketStatesRoundTrip` and
+  `TestRateLimitConfig_AbsentFieldsDecodeToNil` (`agent/types_test.go`) —
+  pin all three states across a full marshal/unmarshal cycle: a nil bucket
+  must be absent on the wire and decode back to nil; a present `{"rpm":0}`
+  must round-trip as a non-nil bucket with RPM 0 (distinct from nil); a
+  present `{"rpm":>0}` must round-trip its rate and burst. The nil-vs-zero
+  assertions are structurally impossible to satisfy under value semantics.
 
 ## 2026-05-05 (v2.2.0)
 
