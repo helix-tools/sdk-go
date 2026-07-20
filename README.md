@@ -62,9 +62,9 @@ func main() {
 }
 ```
 
-`NewProducer` resolves the producer's S3 bucket and KMS key from AWS
-SSM using `CustomerID`, then validates the AWS credentials against STS
-— so it requires real, reachable AWS credentials to construct. See
+`NewProducer` authenticates and configures the upload destination
+automatically using `CustomerID`, then validates the AWS credentials against
+STS — so it requires real, reachable AWS credentials to construct. See
 [Credentials](#credentials) below for the two supported credential
 modes.
 
@@ -213,8 +213,9 @@ cfg := types.Config{
 consumer, err := consumer.NewConsumer(cfg)
 ```
 
-Everything else — dataset downloads, SQS polling, KMS decrypt — works
-identically in both modes; the SDK refreshes and re-signs automatically. See
+Everything else — downloads, notification polling, decryption — handled
+automatically, identically in both modes; the SDK refreshes and re-signs
+credentials as needed. See
 `CHANGELOG.md` for details and `credentials/broker.go`'s package doc for the
 lower-level `Provider`/`NewCredentialsCache` API.
 
