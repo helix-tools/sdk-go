@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 2026-07-20 (v2.8.1)
+
+### Documentation
+- docs: content-policy scrub -- removed AWS-internals language (S3 bucket / KMS key / SSM resolution, KMS decrypt) from the README's Producer quickstart note and Credentials section, replacing it with capability-level language (authentication and destination configuration, decryption, handled automatically). No behavior change.
+
 ## 2026-07-20 (v2.8.0)
 
 ### Added
