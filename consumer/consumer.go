@@ -40,10 +40,16 @@ import (
 // emptyPayloadHash is the SHA256 hash of an empty payload.
 const emptyPayloadHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
-// SDKVersion is the Go SDK version surfaced in download outcome callbacks.
-// Bumped in lockstep with the module version tag so the producer dashboard
-// can spot single-version regressions across the consumer fleet.
-const SDKVersion = "2.5.0"
+// SDKVersion is the FALLBACK Go SDK version surfaced in download outcome
+// callbacks, used only when the real build version can't be resolved at
+// runtime (see effectiveSDKVersion / resolveSDKVersion in
+// sdk_version.go) — an unavailable build info, running this SDK's own
+// test suite, or a consumer using a `replace` directive to a local
+// checkout. Kept in lockstep with the latest module version tag as a
+// best-effort default for those dev-build cases; the wire-sent
+// sdk_version value for a normally-built consumer binary instead
+// reflects the actual resolved module version, which cannot drift.
+const SDKVersion = "2.8.0"
 
 // SDKLanguage identifies this SDK's language in download outcome callbacks
 // (matches the dataset_download_event JSON Schema's sdk_language field).
@@ -360,7 +366,7 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 		req := RecordOutcomeRequest{
 			EventID:     eventID,
 			DurationMs:  durationMs,
-			SDKVersion:  SDKVersion,
+			SDKVersion:  effectiveSDKVersion(),
 			SDKLanguage: SDKLanguage,
 		}
 		if retErr == nil {
