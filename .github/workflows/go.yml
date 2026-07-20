@@ -63,7 +63,7 @@ jobs:
 
           ### Installation
           ```bash
-          go get github.com/helix-tools/sdk-go
+          go get github.com/helix-tools/sdk-go/v2
           ```
         draft: false
         prerelease: false
