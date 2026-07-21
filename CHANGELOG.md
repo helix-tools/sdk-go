@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Documentation
+- docs: unify README to the canonical cross-SDK template -- restructured README.md into the 12 section names/order shared with the TypeScript and Go SDK READMEs (Overview, Installation, Authentication & Credentials incl. an STS subsection, Quickstart -- Producer, Quickstart -- Consumer, Marketplace, Partner Invites, Payouts (Stripe Connect), Versioning & Changelog, Support, License). Split the previous combined Marketplace section's payout-onboarding snippet into a dedicated Payouts (Stripe Connect) section; added an `UpdateDataset` snippet to the Producer quickstart. Moved the `/v2` module-path caveat out of Installation and into Versioning & Changelog. `producer/example_test.go` updated in lockstep (added `Example_payouts`, split from `Example_marketplace`; added the `UpdateDataset` call to `Example_quickstart`) so `go vet`/`go test` continue to compile every README snippet against the real API. No behavior change; corrected the Support section's documentation link to https://dev.helix.tools (was the wrong https://docs.helix.tools domain).
+
 ## 2026-07-20 (v2.8.1)
 
 ### Documentation
