@@ -1,10 +1,10 @@
 package producer_test
 
 // These Example functions back the README's producer quickstart,
-// Marketplace, and Partner Invite snippets. They are compiled by `go
-// test` (proving the snippets match the real, current API — constructor
-// names, method signatures, field names) but deliberately have no
-// "Output:" comment, so the Go testing package compiles them without
+// Marketplace, Partner Invite, and Payouts snippets. They are compiled by
+// `go test` (proving the snippets match the real, current API —
+// constructor names, method signatures, field names) but deliberately have
+// no "Output:" comment, so the Go testing package compiles them without
 // ever calling them. NewProducer validates AWS credentials against STS
 // at construction time, which none of these examples can do in CI.
 
@@ -48,13 +48,60 @@ func Example_quickstart() {
 		panic(err)
 	}
 	fmt.Printf("producer has %d dataset(s)\n", len(datasets))
+
+	// Update metadata without re-uploading the underlying data.
+	description := "Updated description with more details"
+	if _, err := p.UpdateDataset(ctx, dataset.ID, types.DatasetUpdateInput{
+		Description: &description,
+	}); err != nil {
+		panic(err)
+	}
 }
 
-// Example_marketplace onboards for payouts, prices a dataset, and reads
-// the earnings rollup. ConnectOnboard/SetDatasetMarketplace/GetEarnings
-// shipped in v2.7.0; a 404 means the marketplace_payments feature flag
-// isn't enabled yet for this producer.
+// Example_marketplace prices a dataset and reads the earnings rollup.
+// SetDatasetMarketplace/GetEarnings shipped in v2.7.0; a 404 means the
+// marketplace_payments feature flag isn't enabled yet for this producer.
 func Example_marketplace() {
+	ctx := context.Background()
+
+	p, err := producer.NewProducer(types.Config{
+		APIEndpoint:        "https://api-go.helix.tools",
+		AWSAccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
+		AWSSecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
+		CustomerID:         os.Getenv("HELIX_CUSTOMER_ID"),
+		Region:             "us-east-1",
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	status, err := p.GetConnectStatus(ctx)
+	if err != nil {
+		panic(err)
+	}
+
+	if status.CanPriceDatasets {
+		price := 4900 // $49.00/mo, in USD cents; 0 = free
+		listed := true
+		if _, err := p.SetDatasetMarketplace(ctx, "dataset-id", types.SetDatasetMarketplaceInput{
+			PriceMonthlyCents: &price,
+			Listed:            &listed,
+		}); err != nil {
+			panic(err)
+		}
+	}
+
+	earnings, err := p.GetEarnings(ctx, "")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(earnings)
+}
+
+// Example_payouts onboards a producer for Stripe Connect Express payouts
+// and fetches a one-time dashboard login link. ConnectOnboard/
+// GetConnectStatus/CreateConnectLoginLink shipped in v2.7.0.
+func Example_payouts() {
 	ctx := context.Background()
 
 	p, err := producer.NewProducer(types.Config{
@@ -77,27 +124,16 @@ func Example_marketplace() {
 	}
 	fmt.Println("open this URL to complete payout onboarding:", onboard.URL)
 
-	status, err := p.GetConnectStatus(ctx)
-	if err != nil {
+	if _, err := p.GetConnectStatus(ctx); err != nil {
 		panic(err)
 	}
 
-	if status.CanPriceDatasets {
-		price := 999 // $9.99/mo, in USD cents
-		listed := true
-		if _, err := p.SetDatasetMarketplace(ctx, "dataset-id", types.SetDatasetMarketplaceInput{
-			PriceMonthlyCents: &price,
-			Listed:            &listed,
-		}); err != nil {
-			panic(err)
-		}
-	}
-
-	earnings, err := p.GetEarnings(ctx, "")
+	// 403 until onboarding is complete.
+	dashboard, err := p.CreateConnectLoginLink(ctx)
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println(earnings)
+	fmt.Println("manage payout account at:", dashboard.URL)
 }
 
 // Example_partnerInvite invites a consumer partner and grants access to
@@ -122,6 +158,7 @@ func Example_partnerInvite() {
 		CompanyName:   "Acme Analytics",
 		BusinessEmail: "data@acme.example",
 		Datasets:      []string{"dataset-id"},
+		Tier:          "free",
 	})
 	if err != nil {
 		panic(err)
