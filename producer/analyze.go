@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -42,11 +43,19 @@ func (p *Producer) analyzeData(filePath string, opts AnalysisOptions) (*Analysis
 		opts.SchemaSampleLimit = 0 // 0 means all records
 	}
 
-	file, err := os.Open(filePath)
+	safeFilePath, err := cleanContainedPath(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("invalid analysis file path: %w", err)
+	}
+
+	file, err := os.Open(filepath.Clean(safeFilePath))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		// The handle is read-only; scanner/read errors are returned separately.
+		_ = file.Close()
+	}()
 
 	var (
 		allFields         = make(map[string]bool)

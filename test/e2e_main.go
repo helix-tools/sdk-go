@@ -84,7 +84,10 @@ func main() {
 
 	// Create temp file for upload
 	tmpDir := filepath.Join("..", "..", "downloads")
-	os.MkdirAll(tmpDir, 0755)
+	if err := os.MkdirAll(tmpDir, 0750); err != nil {
+		fmt.Printf("❌ Failed to create test directory: %v\n", err)
+		os.Exit(1)
+	}
 
 	testFilePath := filepath.Join(tmpDir, "e2e-test-data.json")
 	jsonData, err := json.MarshalIndent(testData, "", "  ")
@@ -93,7 +96,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := os.WriteFile(testFilePath, jsonData, 0644); err != nil {
+	if err := os.WriteFile(testFilePath, jsonData, 0600); err != nil {
 		fmt.Printf("❌ Failed to write test file: %v\n", err)
 		os.Exit(1)
 	}
@@ -189,5 +192,7 @@ func main() {
 	fmt.Println("")
 
 	// Cleanup temp files
-	os.Remove(testFilePath)
+	if err := os.Remove(testFilePath); err != nil {
+		fmt.Printf("⚠️ Failed to remove test file: %v\n", err)
+	}
 }

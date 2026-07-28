@@ -414,6 +414,13 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 	// API versions — the callback path becomes a no-op.
 	eventID = urlInfo.EventID
 
+	phase = ErrorCategoryDiskWrite
+	safeOutputPath, err := cleanContainedPath(outputPath)
+	if err != nil {
+		errorMessage = err.Error()
+		return fmt.Errorf("invalid output path: %w", err)
+	}
+
 	// 3. Network fetch.
 	phase = ErrorCategoryNetworkFetch
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlInfo.DownloadURL, nil)
@@ -444,7 +451,10 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 			return fmt.Errorf("failed to create temp file: %w", terr)
 		}
 		defer os.Remove(tempFile.Name())
-		defer tempFile.Close()
+		defer func() {
+			// Best-effort fallback for early returns; the normal-path close is checked below.
+			_ = tempFile.Close()
+		}()
 
 		sizeGB := float64(contentLength) / (1024 * 1024 * 1024)
 		fmt.Printf("Streaming %.2f GB to temporary file...\n", sizeGB)
@@ -454,7 +464,10 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 			errorMessage = cerr.Error()
 			return fmt.Errorf("failed to stream to temp file: %w", cerr)
 		}
-		tempFile.Close()
+		if cerr := tempFile.Close(); cerr != nil {
+			errorMessage = cerr.Error()
+			return fmt.Errorf("failed to close temp file: %w", cerr)
+		}
 		fmt.Printf("Downloaded %d bytes to temp file\n", written)
 		bytesDownloaded = written
 
@@ -494,11 +507,11 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 		}
 
 		phase = ErrorCategoryDiskWrite
-		if werr := os.WriteFile(outputPath, data, 0644); werr != nil {
+		if werr := writeFileWithinRoot(safeOutputPath, data); werr != nil {
 			errorMessage = werr.Error()
 			return fmt.Errorf("failed to write file: %w", werr)
 		}
-		fmt.Printf("Saved to %s\n", outputPath)
+		fmt.Printf("Saved to %s\n", safeOutputPath)
 		return nil
 	}
 
@@ -542,11 +555,11 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 	}
 
 	phase = ErrorCategoryDiskWrite
-	if err := os.WriteFile(outputPath, data, 0644); err != nil {
+	if err := writeFileWithinRoot(safeOutputPath, data); err != nil {
 		errorMessage = err.Error()
 		return fmt.Errorf("failed to write file: %w", err)
 	}
-	fmt.Printf("Saved to %s\n", outputPath)
+	fmt.Printf("Saved to %s\n", safeOutputPath)
 
 	return nil
 }

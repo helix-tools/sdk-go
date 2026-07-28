@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Security
+- Hardened dataset file I/O against path traversal by cleaning paths, resolving
+  symlinks, rejecting paths outside their intended parent directory, and writing
+  downloads through an `os.Root` so filesystem operations cannot escape that
+  directory during symlink races.
+- Replaced retry-backoff jitter from `math/rand` with `crypto/rand` and added an
+  explicit bounds check before encoding encrypted-key lengths as `uint32`.
+- Downloaded and decrypted customer datasets are now created and enforced with
+  `0600` permissions instead of `0644`. This is an intentional behavior change:
+  downloaded files are no longer readable by other local users.
+- Restricted end-to-end test fixture directories/files to `0750`/`0600` and
+  now handle filesystem creation, close, and cleanup errors explicitly.
+- Raised the required Go version and CI toolchain from Go 1.25.1 to Go 1.25.12,
+  incorporating all standard-library security fixes published through the
+  latest stable Go 1.25 patch.
+- Upgraded `github.com/aws/aws-sdk-go-v2/service/s3` from v1.90.0 to v1.97.3
+  to fix reachable vulnerability `GO-2026-5764`.
+
 ### Documentation
 - docs: unify README to the canonical cross-SDK template -- restructured README.md into the 12 section names/order shared with the TypeScript and Go SDK READMEs (Overview, Installation, Authentication & Credentials incl. an STS subsection, Quickstart -- Producer, Quickstart -- Consumer, Marketplace, Partner Invites, Payouts (Stripe Connect), Versioning & Changelog, Support, License). Split the previous combined Marketplace section's payout-onboarding snippet into a dedicated Payouts (Stripe Connect) section; added an `UpdateDataset` snippet to the Producer quickstart. Moved the `/v2` module-path caveat out of Installation and into Versioning & Changelog. `producer/example_test.go` updated in lockstep (added `Example_payouts`, split from `Example_marketplace`; added the `UpdateDataset` call to `Example_quickstart`) so `go vet`/`go test` continue to compile every README snippet against the real API. No behavior change; corrected the Support section's documentation link to https://dev.helix.tools (was the wrong https://docs.helix.tools domain).
 
