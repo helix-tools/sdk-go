@@ -19,9 +19,11 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -312,7 +314,11 @@ func (p *Producer) encryptData(ctx context.Context, data []byte) ([]byte, error)
 	var result bytes.Buffer
 
 	// Write encrypted key length (4 bytes, big-endian).
-	if err := binary.Write(&result, binary.BigEndian, uint32(len(encryptOutput.CiphertextBlob))); err != nil {
+	keyLength, err := checkedEncryptedKeyLength(uint64(len(encryptOutput.CiphertextBlob)))
+	if err != nil {
+		return nil, err
+	}
+	if err := binary.Write(&result, binary.BigEndian, keyLength); err != nil {
 		return nil, fmt.Errorf("failed to write key length: %w", err)
 	}
 
@@ -329,6 +335,13 @@ func (p *Producer) encryptData(ctx context.Context, data []byte) ([]byte, error)
 	result.Write(actualEncryptedData)
 
 	return result.Bytes(), nil
+}
+
+func checkedEncryptedKeyLength(length uint64) (uint32, error) {
+	if length > uint64(math.MaxUint32) {
+		return 0, fmt.Errorf("encrypted key length %d exceeds uint32 capacity", length)
+	}
+	return uint32(length), nil
 }
 
 // CreateDatasetResponse represents the API response when creating a dataset record.
@@ -446,8 +459,13 @@ func (p *Producer) processFile(ctx context.Context, filePath string, opts Upload
 		return nil, fmt.Errorf("encryption requested but KMS key not found")
 	}
 
+	safeFilePath, err := cleanContainedPath(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("invalid upload file path: %w", err)
+	}
+
 	// Read original file
-	data, err := os.ReadFile(filePath)
+	data, err := os.ReadFile(filepath.Clean(safeFilePath))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}

@@ -32,10 +32,11 @@ package credentials
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"strings"
 	"sync"
@@ -404,10 +405,14 @@ func (p *Provider) mintWithRetry(ctx context.Context) (*mintSuccessResponse, err
 	var lastErr error
 	for attempt := 0; attempt < mintMaxAttempts; attempt++ {
 		if attempt > 0 {
+			delay, err := backoffDelay(attempt)
+			if err != nil {
+				return nil, fmt.Errorf("credentials: failed to generate retry jitter: %w", err)
+			}
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-time.After(backoffDelay(attempt)):
+			case <-time.After(delay):
 			}
 		}
 
@@ -425,10 +430,22 @@ func (p *Provider) mintWithRetry(ctx context.Context) (*mintSuccessResponse, err
 
 // backoffDelay returns exponential backoff (base * 2^(attempt-1)) with up
 // to +/-25% jitter, for the attempt'th retry (attempt >= 1).
-func backoffDelay(attempt int) time.Duration {
+func backoffDelay(attempt int) (time.Duration, error) {
+	return backoffDelayFrom(rand.Reader, attempt)
+}
+
+func backoffDelayFrom(random io.Reader, attempt int) (time.Duration, error) {
+	var randomBytes [8]byte
+	if _, err := io.ReadFull(random, randomBytes[:]); err != nil {
+		return 0, err
+	}
+
+	// Use the upper 53 random bits so every possible value is represented
+	// exactly as a float64 in [0, 1).
+	randomFraction := float64(binary.BigEndian.Uint64(randomBytes[:])>>11) / (1 << 53)
 	base := mintRetryBaseDelay * time.Duration(int64(1)<<uint(attempt-1))
-	jitter := time.Duration((rand.Float64()*0.5 - 0.25) * float64(base)) //nolint:gosec // timing jitter, not security-sensitive
-	return base + jitter
+	jitter := time.Duration((randomFraction*0.5 - 0.25) * float64(base))
+	return base + jitter, nil
 }
 
 // mint performs ONE mint HTTP round-trip. The second return value reports

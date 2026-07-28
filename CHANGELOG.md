@@ -3,6 +3,17 @@
 ## Unreleased
 
 ### Security
+- Hardened dataset file I/O against path traversal by cleaning paths, resolving
+  symlinks, rejecting paths outside their intended parent directory, and writing
+  downloads through an `os.Root` so filesystem operations cannot escape that
+  directory during symlink races.
+- Replaced retry-backoff jitter from `math/rand` with `crypto/rand` and added an
+  explicit bounds check before encoding encrypted-key lengths as `uint32`.
+- Downloaded and decrypted customer datasets are now created and enforced with
+  `0600` permissions instead of `0644`. This is an intentional behavior change:
+  downloaded files are no longer readable by other local users.
+- Restricted end-to-end test fixture directories/files to `0750`/`0600` and
+  now handle filesystem creation, close, and cleanup errors explicitly.
 - Raised the required Go version and CI toolchain from Go 1.25.1 to Go 1.25.12,
   incorporating all standard-library security fixes published through the
   latest stable Go 1.25 patch.
