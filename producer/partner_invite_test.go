@@ -625,6 +625,204 @@ func TestInviteConsumer_TrimsDatasetsOnWire(t *testing.T) {
 	}
 }
 
+// Per-consumer pricing program: InviteConsumer's datasets can be granted
+// either as the legacy flat []string (unchanged) or per-dataset via
+// DatasetTiers, where each dataset carries its own tier ("free" comps that
+// consumer even on a paid dataset; "paid" is rejected server-side on a
+// non-paid dataset). These tests drive the REAL InviteConsumer method.
+
+// TestInviteConsumer_LegacyDatasetsUnchanged is a regression guard: the
+// legacy []string form must still produce EXACTLY the same wire body as
+// before this feature shipped (same 5 keys, same shape) — this is the
+// "MUST keep working" requirement for the per-dataset-tier feature.
+func TestInviteConsumer_LegacyDatasetsUnchanged(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"consumer_id":"c-1","status":"provisioning","invited_by":"p","email_sent":true}`))
+	}))
+	defer server.Close()
+
+	p := newTestProducer(server.URL)
+	input := validInviteInput()
+	input.ContactName = "Jane Doe"
+	input.Tier = "free"
+
+	if _, err := p.InviteConsumer(context.Background(), input); err != nil {
+		t.Fatalf("InviteConsumer: %v", err)
+	}
+
+	if len(gotBody) != 5 {
+		t.Fatalf("expected exactly 5 keys in body, got %d: %+v", len(gotBody), gotBody)
+	}
+	datasets, ok := gotBody["datasets"].([]any)
+	if !ok || len(datasets) != 2 || datasets[0] != "ds-1" || datasets[1] != "ds-2" {
+		t.Fatalf("expected datasets [ds-1 ds-2] (plain strings) in body, got %v", gotBody["datasets"])
+	}
+	// Each element must be a bare string, NOT an object — proves the legacy
+	// shape is untouched by the new per-dataset-tier code path.
+	if _, isString := datasets[0].(string); !isString {
+		t.Fatalf("expected legacy dataset entries to be plain strings, got %T", datasets[0])
+	}
+}
+
+// TestInviteConsumer_DatasetTiers_HappyPath pins the wire shape of the
+// per-dataset-tier form: an array of {dataset_id, tier} objects under the
+// same "datasets" key, ids canonically trimmed like the legacy form.
+func TestInviteConsumer_DatasetTiers_HappyPath(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"consumer_id":"c-1","status":"provisioning","invited_by":"p","email_sent":true}`))
+	}))
+	defer server.Close()
+
+	p := newTestProducer(server.URL)
+	input := types.InviteConsumerInput{
+		CompanyName:   "Acme Partner Co",
+		BusinessEmail: "partners@acme.example.com",
+		DatasetTiers: []types.InviteConsumerDatasetGrant{
+			{DatasetID: "  ds-free  ", Tier: "free"},
+			{DatasetID: "ds-paid", Tier: "paid"},
+		},
+	}
+
+	if _, err := p.InviteConsumer(context.Background(), input); err != nil {
+		t.Fatalf("InviteConsumer: %v", err)
+	}
+
+	datasets, ok := gotBody["datasets"].([]any)
+	if !ok || len(datasets) != 2 {
+		t.Fatalf("expected 2 dataset entries in body, got %v", gotBody["datasets"])
+	}
+	first, ok := datasets[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected object entry, got %T: %v", datasets[0], datasets[0])
+	}
+	if first["dataset_id"] != "ds-free" {
+		t.Errorf("expected trimmed dataset_id ds-free, got %v", first["dataset_id"])
+	}
+	if first["tier"] != "free" {
+		t.Errorf("expected tier free, got %v", first["tier"])
+	}
+	second, ok := datasets[1].(map[string]any)
+	if !ok {
+		t.Fatalf("expected object entry, got %T: %v", datasets[1], datasets[1])
+	}
+	if second["dataset_id"] != "ds-paid" || second["tier"] != "paid" {
+		t.Errorf("expected {ds-paid, paid}, got %v", second)
+	}
+	// The legacy "datasets" key is the ONLY dataset-shaped key on the wire —
+	// there is no separate "dataset_tiers" key (json:"-" on that Go field).
+	if _, present := gotBody["dataset_tiers"]; present {
+		t.Errorf("body must not carry a dataset_tiers key, got %v", gotBody)
+	}
+}
+
+// TestInviteConsumer_DatasetTiers_ValidationRejects covers the per-dataset
+// client-side validation: both-forms-set, duplicate dataset id, and an
+// invalid tier must all fail fast with a *ValidationError and never hit the
+// transport.
+func TestInviteConsumer_DatasetTiers_ValidationRejects(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	p := newTestProducer(server.URL)
+
+	tests := []struct {
+		name      string
+		input     types.InviteConsumerInput
+		wantField string
+	}{
+		{
+			name: "both datasets and dataset_tiers set",
+			input: types.InviteConsumerInput{
+				CompanyName:   "Acme Partner Co",
+				BusinessEmail: "partners@acme.example.com",
+				Datasets:      []string{"ds-1"},
+				DatasetTiers:  []types.InviteConsumerDatasetGrant{{DatasetID: "ds-2", Tier: "free"}},
+			},
+			wantField: "datasets",
+		},
+		{
+			name: "duplicate dataset id in dataset_tiers",
+			input: types.InviteConsumerInput{
+				CompanyName:   "Acme Partner Co",
+				BusinessEmail: "partners@acme.example.com",
+				DatasetTiers: []types.InviteConsumerDatasetGrant{
+					{DatasetID: "ds-1", Tier: "free"},
+					{DatasetID: "ds-1", Tier: "paid"},
+				},
+			},
+			wantField: "dataset_tiers",
+		},
+		{
+			name: "invalid tier",
+			input: types.InviteConsumerInput{
+				CompanyName:   "Acme Partner Co",
+				BusinessEmail: "partners@acme.example.com",
+				DatasetTiers: []types.InviteConsumerDatasetGrant{
+					{DatasetID: "ds-1", Tier: "gold"},
+				},
+			},
+			wantField: "dataset_tiers",
+		},
+		{
+			name: "empty dataset id in dataset_tiers",
+			input: types.InviteConsumerInput{
+				CompanyName:   "Acme Partner Co",
+				BusinessEmail: "partners@acme.example.com",
+				DatasetTiers: []types.InviteConsumerDatasetGrant{
+					{DatasetID: "   ", Tier: "free"},
+				},
+			},
+			wantField: "dataset_tiers",
+		},
+		{
+			name: "neither datasets nor dataset_tiers set",
+			input: types.InviteConsumerInput{
+				CompanyName:   "Acme Partner Co",
+				BusinessEmail: "partners@acme.example.com",
+			},
+			wantField: "datasets",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, err := p.InviteConsumer(context.Background(), tt.input)
+			if err == nil {
+				t.Fatal("expected validation error, got nil")
+			}
+			if resp != nil {
+				t.Errorf("expected nil response on validation failure, got %+v", resp)
+			}
+			var vErr *ValidationError
+			if !errors.As(err, &vErr) {
+				t.Fatalf("expected *ValidationError, got %T: %v", err, err)
+			}
+			if vErr.Field != tt.wantField {
+				t.Errorf("expected field %q, got %q (%v)", tt.wantField, vErr.Field, err)
+			}
+		})
+	}
+
+	if requests != 0 {
+		t.Errorf("validation failures must not hit the API, got %d request(s)", requests)
+	}
+}
+
 // TestDeactivateConsumer_TrimsIDInPath pins that the TRIMMED consumer id is
 // path-escaped, not the raw arg (codex 2026-07-06: raw escape turned a padded
 // id into a %20-laden path that never matches).
