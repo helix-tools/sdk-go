@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+### Added
+- **Per-consumer pricing.** `Producer.ApproveSubscriptionRequest`'s
+  `ApproveSubscriptionRequestOptions` gained `PriceMonthlyCents *int64`: set
+  it to a pointer to `0` to comp that one consumer for free (provisioned
+  immediately, even on a paid dataset), to a positive value to approve at a
+  specific price for that consumer (checkout required, even on an otherwise
+  free dataset), or leave it `nil` to approve at the dataset's own listed
+  price. A negative value is rejected client-side before any request is
+  sent. `types.SubscriptionRequest` gained the matching
+  `PriceMonthlyCents *int64` read-back field.
+- **Per-dataset tiers on partner invites.** `types.InviteConsumerInput`
+  gained `DatasetTiers []InviteConsumerDatasetGrant`, an alternative to the
+  existing `Datasets []string` field: each grant carries its own
+  `{DatasetID, Tier}`, so one invite can comp a consumer on one dataset
+  ("free") while charging them for another ("paid"). Set exactly one of
+  `Datasets`/`DatasetTiers` — the legacy `[]string` form is unchanged and
+  fully backward compatible; setting both, a duplicate dataset id, or an
+  invalid tier are rejected client-side with a `*ValidationError` before
+  any request is sent.
+
+### Fixed
+- Go's dataset-create request now sends `"visibility": "private"` explicitly
+  on `UploadDataset`, matching the Python and TypeScript SDKs (both already
+  send it). The Go API defaults an absent/empty visibility to `"private"`
+  itself, so this closes a latent cross-SDK payload divergence rather than a
+  live bug. Still overridable via `UploadOptions.DatasetOverrides`.
+
+### Removed
+- Deleted `buildDatasetPayload` and its private helpers
+  (`generateDatasetID`, `slugify`, `defaultPricing`, `defaultStats`,
+  `defaultValidation`, `deepMergeMaps`, `cloneOverrides`) from
+  `producer/dataset_payload.go` as dead code: `git grep buildDatasetPayload`
+  showed zero callers on the live upload path (`createDatasetRecord` builds
+  its own, much smaller payload). Keeping it around was actively
+  misleading — its `defaultPricing()` emitted the legacy
+  `basic/professional/enterprise` pricing map, a shape superseded by the
+  marketplace `price_monthly_cents` model this release also extends, and
+  several of its ~30 keys (`created_at`, `stats`, `validation`,
+  `is_latest_version`, ...) are server-managed fields a client should never
+  set on create.
+
 ### Security
 - Hardened dataset file I/O against path traversal by cleaning paths, resolving
   symlinks, rejecting paths outside their intended parent directory, and writing
