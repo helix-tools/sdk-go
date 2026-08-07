@@ -4,15 +4,40 @@ package types
 // It matches invite-consumer-request.schema.json (sdk-schemas).
 //
 // Required: CompanyName (2-200 chars), BusinessEmail (valid email, max 254
-// chars), and Datasets (1-50 unique, non-blank dataset IDs that belong to
-// the inviting producer). Optional: ContactName (max 200 chars) and Tier —
-// currently only "free" is supported; empty defaults to "free" server-side.
+// chars), and EITHER Datasets OR DatasetTiers (never both) with 1-50
+// unique, non-blank dataset IDs that belong to the inviting producer.
+// Optional: ContactName (max 200 chars) and Tier — currently only "free"
+// is supported; empty defaults to "free" server-side.
 type InviteConsumerInput struct {
-	CompanyName   string   `json:"company_name"`
-	BusinessEmail string   `json:"business_email"`
-	ContactName   string   `json:"contact_name,omitempty"`
-	Tier          string   `json:"tier,omitempty"` // SubscriptionTier — only "free" is currently supported
-	Datasets      []string `json:"datasets"`
+	CompanyName   string `json:"company_name"`
+	BusinessEmail string `json:"business_email"`
+	ContactName   string `json:"contact_name,omitempty"`
+	Tier          string `json:"tier,omitempty"` // SubscriptionTier — only "free" is currently supported
+
+	// Datasets is the LEGACY id-only form: a flat list of dataset ids, all
+	// granted at the invite-wide Tier above. Mutually exclusive with
+	// DatasetTiers — set exactly one of the two.
+	Datasets []string `json:"datasets"`
+
+	// DatasetTiers is the per-dataset form: each dataset gets its own tier,
+	// which wins over the invite-wide Tier. "free" comps the consumer even
+	// on a paid dataset; "paid" is rejected server-side on a non-paid
+	// dataset. Mutually exclusive with Datasets — set exactly one of the
+	// two. Not marshalled directly (json:"-"): Producer.InviteConsumer
+	// serializes it onto the wire "datasets" key as an array of
+	// {dataset_id, tier} objects, per invite-consumer-request.schema.json's
+	// oneOf.
+	DatasetTiers []InviteConsumerDatasetGrant `json:"-"`
+}
+
+// InviteConsumerDatasetGrant is one entry of the per-dataset-tier form of
+// InviteConsumerInput.DatasetTiers. Tier is "free" (comp this consumer,
+// allowed even on a paid dataset) or "paid" (rejected server-side unless
+// the dataset itself is priced); empty defaults to "free" server-side,
+// matching the invite-wide Tier default.
+type InviteConsumerDatasetGrant struct {
+	DatasetID string `json:"dataset_id"`
+	Tier      string `json:"tier,omitempty"`
 }
 
 // InviteConsumerResponse is the response for POST /v1/self/invite-consumer.

@@ -98,6 +98,43 @@ func Example_marketplace() {
 	fmt.Println(earnings)
 }
 
+// Example_approveWithPrice approves an incoming subscription request at a
+// price for that one consumer, overriding the dataset's own marketplace
+// price — comping a consumer for free even on a paid dataset, or charging
+// them a specific price even on a free one. ApproveSubscriptionRequest's
+// PriceMonthlyCents option shipped alongside per-consumer pricing.
+func Example_approveWithPrice() {
+	ctx := context.Background()
+
+	p, err := producer.NewProducer(types.Config{
+		APIEndpoint:        "https://api-go.helix.tools",
+		AWSAccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
+		AWSSecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
+		CustomerID:         os.Getenv("HELIX_CUSTOMER_ID"),
+		Region:             "us-east-1",
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	requestID := "request-id"
+
+	// Comp this one consumer for free, even on a paid dataset — provisioned
+	// immediately, no checkout required.
+	free := int64(0)
+	if _, err := p.ApproveSubscriptionRequest(ctx, requestID, &types.ApproveSubscriptionRequestOptions{
+		PriceMonthlyCents: &free,
+	}); err != nil {
+		panic(err)
+	}
+
+	// Leave PriceMonthlyCents nil (or pass nil Options) to approve at the
+	// dataset's own listed price instead.
+	if _, err := p.ApproveSubscriptionRequest(ctx, requestID, nil); err != nil {
+		panic(err)
+	}
+}
+
 // Example_payouts onboards a producer for Stripe Connect Express payouts
 // and fetches a one-time dashboard login link. ConnectOnboard/
 // GetConnectStatus/CreateConnectLoginLink shipped in v2.7.0.
@@ -164,6 +201,20 @@ func Example_partnerInvite() {
 		panic(err)
 	}
 	fmt.Printf("invited consumer %s (email sent: %v)\n", invite.ConsumerID, invite.EmailSent)
+
+	// Per-consumer pricing: comp this consumer on one dataset while
+	// charging them for another, in the same invite. DatasetTiers is
+	// mutually exclusive with Datasets above — set exactly one of the two.
+	if _, err := p.InviteConsumer(ctx, types.InviteConsumerInput{
+		CompanyName:   "Acme Analytics",
+		BusinessEmail: "data@acme.example",
+		DatasetTiers: []types.InviteConsumerDatasetGrant{
+			{DatasetID: "free-dataset-id", Tier: "free"},
+			{DatasetID: "paid-dataset-id", Tier: "paid"},
+		},
+	}); err != nil {
+		panic(err)
+	}
 
 	consumers, err := p.ListConsumers(ctx)
 	if err != nil {
