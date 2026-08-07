@@ -245,8 +245,9 @@ _, err = p.ApproveSubscriptionRequest(ctx, requestID, &types.ApproveSubscription
 
 // Approve at a specific price for this consumer — they complete checkout
 // at that price, even if the dataset is otherwise free.
+customerPriceCents := int64(1500) // your own agreed price with this consumer, in USD cents
 _, err = p.ApproveSubscriptionRequest(ctx, requestID, &types.ApproveSubscriptionRequestOptions{
-	PriceMonthlyCents: &customerPriceCents, // your own agreed price, in USD cents
+	PriceMonthlyCents: &customerPriceCents,
 })
 
 // Leave PriceMonthlyCents nil (or omit Options) to approve at the
