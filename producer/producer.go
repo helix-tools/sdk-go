@@ -416,6 +416,12 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 	// access_tier not in {free,premium,enterprise}); the Python/TS SDKs send them
 	// too. access_tier defaults to "free" (the only live tier) and stays
 	// overridable via DatasetOverrides below.
+	//
+	// visibility is sent explicitly as "private" to match Python/TS (both send
+	// it on create) even though the server defaults an empty/absent visibility
+	// to "private" itself (datasets/service.go CreateDataset) — Go silently
+	// relying on that default, while the other two SDKs send it, was a latent
+	// cross-SDK payload divergence. Stays overridable via DatasetOverrides.
 	payload := map[string]any{
 		"name":           opts.DatasetName,
 		"description":    opts.Description,
@@ -425,6 +431,7 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 		"s3_bucket_name": p.BucketName,
 		"s3_key":         s3Key,
 		"access_tier":    "free",
+		"visibility":     "private",
 		"metadata":       metadata,
 	}
 
@@ -790,13 +797,19 @@ func (p *Producer) ListSubscriptionRequests(ctx context.Context, status string) 
 //   - Notes: Optional internal notes about the approval.
 //   - DatasetID: Optional specific dataset ID to grant access to
 //     (if not provided, uses the dataset from the original request).
+//   - PriceMonthlyCents: Optional per-consumer monthly USD-cents price for
+//     THIS approval (see types.ApproveSubscriptionRequestOptions for the
+//     full nil/0/positive semantics). A negative value is rejected
+//     client-side with a *ValidationError before any request is sent.
 //
-// Returns the updated subscription request with status "approved".
+// Returns the updated subscription request with status "approved" (or, when
+// PriceMonthlyCents is a positive value, "approved_pending_payment" until
+// the consumer completes checkout).
 func (p *Producer) ApproveSubscriptionRequest(ctx context.Context, requestID string, opts *types.ApproveSubscriptionRequestOptions) (*types.SubscriptionRequest, error) {
 	path := fmt.Sprintf("/v1/subscription-requests/%s", url.PathEscape(requestID))
 
-	// Use a map to include the optional dataset_id field, which is not part
-	// of ApproveRejectPayload.
+	// Use a map to include the optional dataset_id/price_monthly_cents
+	// fields, which are not part of ApproveRejectPayload.
 	payloadMap := map[string]any{
 		"action": "approve",
 	}
@@ -806,6 +819,17 @@ func (p *Producer) ApproveSubscriptionRequest(ctx context.Context, requestID str
 		}
 		if opts.DatasetID != nil {
 			payloadMap["dataset_id"] = *opts.DatasetID
+		}
+		if opts.PriceMonthlyCents != nil {
+			// CAREFUL: this branch is keyed on "!= nil", NOT on the pointed-to
+			// value — a pointer to 0 (free grant) MUST still reach the wire as
+			// price_monthly_cents:0, distinct from an absent key (dataset's own
+			// price applies). Conflating "nil" with "points to zero" was the bug
+			// this whole feature exists to avoid.
+			if *opts.PriceMonthlyCents < 0 {
+				return nil, &ValidationError{Field: "price_monthly_cents", Message: "must be >= 0"}
+			}
+			payloadMap["price_monthly_cents"] = *opts.PriceMonthlyCents
 		}
 	}
 

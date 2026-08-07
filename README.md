@@ -228,6 +228,32 @@ _, err = p.SetDatasetMarketplace(ctx, datasetID, types.SetDatasetMarketplaceInpu
 earnings, err := p.GetEarnings(ctx, "") // optionally GetEarnings(ctx, "2026-07")
 ```
 
+### Per-consumer pricing on approval (producer)
+
+When a consumer requests access to a priced dataset, approving the
+request can set a price for that ONE consumer, overriding the dataset's
+own marketplace price — comp a specific consumer, or offer them a
+different rate. Platform terms are at https://helix.tools/#pricing.
+
+```go
+// Comp this one consumer for free, even on a paid dataset — provisioned
+// immediately, no checkout required.
+free := int64(0)
+_, err = p.ApproveSubscriptionRequest(ctx, requestID, &types.ApproveSubscriptionRequestOptions{
+	PriceMonthlyCents: &free,
+})
+
+// Approve at a specific price for this consumer — they complete checkout
+// at that price, even if the dataset is otherwise free.
+_, err = p.ApproveSubscriptionRequest(ctx, requestID, &types.ApproveSubscriptionRequestOptions{
+	PriceMonthlyCents: &customerPriceCents, // your own agreed price, in USD cents
+})
+
+// Leave PriceMonthlyCents nil (or omit Options) to approve at the
+// dataset's own listed price.
+_, err = p.ApproveSubscriptionRequest(ctx, requestID, nil)
+```
+
 ## Partner Invites
 
 Producers can invite a consumer partner company directly, auto-granting
@@ -237,6 +263,7 @@ mean it isn't enabled yet for your account (it can also mean an
 unrelated authorization issue) — contact support if it doesn't resolve.
 
 ```go
+// Legacy form: a flat list of dataset ids, all granted at the invite-wide Tier.
 invite, err := p.InviteConsumer(ctx, types.InviteConsumerInput{
 	CompanyName:   "Acme Analytics",
 	BusinessEmail: "data@acme.example",
@@ -249,6 +276,21 @@ invite, err := p.InviteConsumer(ctx, types.InviteConsumerInput{
 consumers, err := p.ListConsumers(ctx) // includes deactivated relations
 
 _, err = p.DeactivateConsumer(ctx, invite.ConsumerID) // revokes access
+```
+
+To comp this consumer on one dataset while charging them for another in
+the same invite, use `DatasetTiers` instead of `Datasets` — set exactly
+one of the two:
+
+```go
+invite, err = p.InviteConsumer(ctx, types.InviteConsumerInput{
+	CompanyName:   "Acme Analytics",
+	BusinessEmail: "data@acme.example",
+	DatasetTiers: []types.InviteConsumerDatasetGrant{
+		{DatasetID: freeDatasetID, Tier: "free"}, // comped for this consumer
+		{DatasetID: paidDatasetID, Tier: "paid"}, // billed at that dataset's listed price
+	},
+})
 ```
 
 ## Payouts (Stripe Connect)

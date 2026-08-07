@@ -92,6 +92,80 @@ func TestCreateDatasetRecord_IncludesS3BucketName(t *testing.T) {
 	}
 }
 
+// TestCreateDatasetRecord_IncludesVisibility drives the real createDatasetRecord
+// and pins that the POST /v1/datasets body carries visibility == "private" by
+// default. Python and TS both send "visibility": "private" explicitly on
+// create; Go previously sent no visibility key at all, relying on the
+// server's own empty-visibility default (datasets/service.go CreateDataset)
+// happening to also be "private". That worked today but was a latent
+// cross-SDK payload divergence — dead-code audit found alongside the
+// per-consumer-pricing work (buildDatasetPayload, the only other place that
+// set visibility, had zero callers on the live upload path and was removed).
+func TestCreateDatasetRecord_IncludesVisibility(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ds-1","upload_url":"https://example.invalid/put"}`))
+	}))
+	defer server.Close()
+
+	p := newTestProducer(server.URL)
+
+	tmpDir := t.TempDir()
+	dataFile := filepath.Join(tmpDir, "data.ndjson")
+	if err := os.WriteFile(dataFile, []byte(strings.Repeat(`{"id":1,"name":"x"}`+"\n", 20)), 0o644); err != nil {
+		t.Fatalf("write temp file: %v", err)
+	}
+
+	opts := NewUploadOptions("e2e-visibility-test")
+	if _, err := p.createDatasetRecord(context.Background(), dataFile, opts); err != nil {
+		t.Fatalf("createDatasetRecord returned error: %v", err)
+	}
+
+	got, ok := gotBody["visibility"]
+	if !ok {
+		t.Fatalf("create-dataset body is MISSING visibility; keys=%v", keysOf(gotBody))
+	}
+	if got != "private" {
+		t.Fatalf("expected visibility=%q, got %q", "private", got)
+	}
+}
+
+// TestCreateDatasetRecord_VisibilityOverridable is the edge case: a producer
+// who explicitly wants a public dataset can still override visibility via
+// DatasetOverrides — the explicit default above must not become a hardcoded
+// wall.
+func TestCreateDatasetRecord_VisibilityOverridable(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ds-1","upload_url":"https://example.invalid/put"}`))
+	}))
+	defer server.Close()
+
+	p := newTestProducer(server.URL)
+
+	tmpDir := t.TempDir()
+	dataFile := filepath.Join(tmpDir, "data.ndjson")
+	if err := os.WriteFile(dataFile, []byte(strings.Repeat(`{"id":1,"name":"x"}`+"\n", 20)), 0o644); err != nil {
+		t.Fatalf("write temp file: %v", err)
+	}
+
+	opts := NewUploadOptions("e2e-visibility-override-test")
+	opts.DatasetOverrides = map[string]any{"visibility": "public"}
+	if _, err := p.createDatasetRecord(context.Background(), dataFile, opts); err != nil {
+		t.Fatalf("createDatasetRecord returned error: %v", err)
+	}
+
+	if gotBody["visibility"] != "public" {
+		t.Fatalf("expected overridden visibility=%q, got %q", "public", gotBody["visibility"])
+	}
+}
+
 func keysOf(m map[string]any) []string {
 	ks := make([]string, 0, len(m))
 	for k := range m {
