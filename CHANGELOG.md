@@ -18,6 +18,29 @@
   for the legacy-string, mixed-tier-object, and tier-omitted-object forms,
   so a future change to any of the three SDKs' invite-consumer payload can
   be caught by diffing against the other two.
+
+### Fixed
+- `InviteConsumer`'s wire body now always sends the top-level `"tier"` key
+  as `"free"` when `InviteConsumerInput.Tier` is left unset, instead of
+  omitting the key. This is a **wire-body change** (the JSON payload POSTed
+  to `/v1/self/invite-consumer` differs for callers who leave `Tier` unset),
+  closing a divergence the golden wire-contract test caught against the
+  Python SDK's defaulted `tier: str = "free"` parameter and the TypeScript
+  SDK's `tier ?? 'free'` (its own comment states the intent: "Always send
+  tier for cross-SDK wire parity"). Behavior-preserving from the Go caller's
+  perspective: `validateInviteConsumerInput` already rejected any `Tier`
+  other than `""`/`"free"`, so `"free"` was already the only value the
+  server could ever receive — this only makes that value explicit on the
+  wire instead of relying on the server's own default for an absent key.
+
+## 2026-08-06 (v2.9.1)
+
+### Documentation
+- docs(readme): declare `customerPriceCents` in per-consumer pricing sample -- the per-consumer approval-pricing README snippet referenced `customerPriceCents` without declaring it, so the fragment failed to compile if extracted verbatim. Declared it inline (`customerPriceCents := int64(1500)`), matching the style already used for the free-grant example two lines above. Verified via `go build` against the real exported API. No behavior change (#17).
+
+## 2026-08-06 (v2.9.0)
+
+### Added
 - **Per-consumer pricing.** `Producer.ApproveSubscriptionRequest`'s
   `ApproveSubscriptionRequestOptions` gained `PriceMonthlyCents *int64`: set
   it to a pointer to `0` to comp that one consumer for free (provisioned
@@ -43,18 +66,6 @@
   send it). The Go API defaults an absent/empty visibility to `"private"`
   itself, so this closes a latent cross-SDK payload divergence rather than a
   live bug. Still overridable via `UploadOptions.DatasetOverrides`.
-- `InviteConsumer`'s wire body now always sends the top-level `"tier"` key
-  as `"free"` when `InviteConsumerInput.Tier` is left unset, instead of
-  omitting the key. This is a **wire-body change** (the JSON payload POSTed
-  to `/v1/self/invite-consumer` differs for callers who leave `Tier` unset),
-  closing a divergence the golden wire-contract test caught against the
-  Python SDK's defaulted `tier: str = "free"` parameter and the TypeScript
-  SDK's `tier ?? 'free'` (its own comment states the intent: "Always send
-  tier for cross-SDK wire parity"). Behavior-preserving from the Go caller's
-  perspective: `validateInviteConsumerInput` already rejected any `Tier`
-  other than `""`/`"free"`, so `"free"` was already the only value the
-  server could ever receive — this only makes that value explicit on the
-  wire instead of relying on the server's own default for an absent key.
 
 ### Removed
 - Deleted `buildDatasetPayload` and its private helpers
@@ -87,6 +98,8 @@
   latest stable Go 1.25 patch.
 - Upgraded `github.com/aws/aws-sdk-go-v2/service/s3` from v1.90.0 to v1.97.3
   to fix reachable vulnerability `GO-2026-5764`.
+
+## 2026-07-20 (v2.8.2)
 
 ### Documentation
 - docs: unify README to the canonical cross-SDK template -- restructured README.md into the 12 section names/order shared with the TypeScript and Go SDK READMEs (Overview, Installation, Authentication & Credentials incl. an STS subsection, Quickstart -- Producer, Quickstart -- Consumer, Marketplace, Partner Invites, Payouts (Stripe Connect), Versioning & Changelog, Support, License). Split the previous combined Marketplace section's payout-onboarding snippet into a dedicated Payouts (Stripe Connect) section; added an `UpdateDataset` snippet to the Producer quickstart. Moved the `/v2` module-path caveat out of Installation and into Versioning & Changelog. `producer/example_test.go` updated in lockstep (added `Example_payouts`, split from `Example_marketplace`; added the `UpdateDataset` call to `Example_quickstart`) so `go vet`/`go test` continue to compile every README snippet against the real API. No behavior change; corrected the Support section's documentation link to https://dev.helix.tools (was the wrong https://docs.helix.tools domain).
