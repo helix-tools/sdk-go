@@ -216,6 +216,17 @@ func Example_partnerInvite() {
 		panic(err)
 	}
 
+	// Prefer DatasetTiers for new code, even when every dataset is free:
+	// FreeDatasetGrants builds it from a plain id list so you never have to
+	// choose between this field and Datasets above.
+	if _, err := p.InviteConsumer(ctx, types.InviteConsumerInput{
+		CompanyName:   "Acme Analytics",
+		BusinessEmail: "data@acme.example",
+		DatasetTiers:  types.FreeDatasetGrants("dataset-id-1", "dataset-id-2"),
+	}); err != nil {
+		panic(err)
+	}
+
 	consumers, err := p.ListConsumers(ctx)
 	if err != nil {
 		panic(err)

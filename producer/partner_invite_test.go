@@ -115,9 +115,12 @@ func TestInviteConsumer_HappyPath(t *testing.T) {
 	}
 }
 
-// TestInviteConsumer_OmitsOptionalFields pins omitempty behavior: unset
-// contact_name and tier must be absent from the wire body.
-func TestInviteConsumer_OmitsOptionalFields(t *testing.T) {
+// TestInviteConsumer_OmitsContactNameButDefaultsTier pins that unset
+// contact_name is absent from the wire body, while unset tier is NOT
+// absent -- it defaults to "free" on the wire (see
+// TestInviteConsumer_TierDefaultsToFreeOnWire for the dedicated
+// cross-SDK-parity test of that default).
+func TestInviteConsumer_OmitsContactNameButDefaultsTier(t *testing.T) {
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
@@ -142,11 +145,75 @@ func TestInviteConsumer_OmitsOptionalFields(t *testing.T) {
 	if _, present := gotBody["contact_name"]; present {
 		t.Errorf("unset contact_name should be omitted from body, got %+v", gotBody)
 	}
-	if _, present := gotBody["tier"]; present {
-		t.Errorf("unset tier should be omitted from body, got %+v", gotBody)
+	if gotBody["tier"] != "free" {
+		t.Errorf(`unset tier should default to "free" on the wire, got %v (body: %+v)`, gotBody["tier"], gotBody)
 	}
-	if len(gotBody) != 3 {
-		t.Errorf("expected exactly 3 keys (company_name, business_email, datasets), got %d: %+v", len(gotBody), gotBody)
+	if len(gotBody) != 4 {
+		t.Errorf("expected exactly 4 keys (company_name, business_email, datasets, tier), got %d: %+v", len(gotBody), gotBody)
+	}
+}
+
+// TestInviteConsumer_TierDefaultsToFreeOnWire pins that an unset (empty)
+// Tier is defaulted to "free" on the wire body -- matching the Python SDK
+// (a defaulted `tier: str = "free"` parameter) and the TypeScript SDK
+// (`tier ?? 'free'`, with a comment stating the cross-SDK wire-parity
+// intent explicitly: "Always send tier for cross-SDK wire parity").
+// validateInviteConsumerInput already rejects any Tier value other than ""
+// or "free" (see the "unsupported tier" case in
+// TestInviteConsumer_ValidationRejects), so this makes an existing
+// implicit default explicit on the wire rather than changing behavior.
+func TestInviteConsumer_TierDefaultsToFreeOnWire(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"consumer_id":"c-1","status":"provisioning","invited_by":"p","email_sent":true}`))
+	}))
+	defer server.Close()
+
+	p := newTestProducer(server.URL)
+
+	input := validInviteInput()
+	input.Tier = "" // deliberately left unset
+
+	if _, err := p.InviteConsumer(context.Background(), input); err != nil {
+		t.Fatalf("InviteConsumer: %v", err)
+	}
+
+	if gotBody["tier"] != "free" {
+		t.Errorf(`expected tier defaulted to "free" on the wire, got %v (body: %+v)`, gotBody["tier"], gotBody)
+	}
+}
+
+// TestInviteConsumer_ExplicitFreeTierRoundTrips pins that explicitly
+// setting Tier: "free" produces the SAME wire value as leaving it unset --
+// the default and the explicit value must be indistinguishable on the
+// wire, so a caller migrating from an explicit "free" to omitting Tier
+// sees no payload change.
+func TestInviteConsumer_ExplicitFreeTierRoundTrips(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"consumer_id":"c-1","status":"provisioning","invited_by":"p","email_sent":true}`))
+	}))
+	defer server.Close()
+
+	p := newTestProducer(server.URL)
+
+	input := validInviteInput()
+	input.Tier = "free" // explicitly set
+
+	if _, err := p.InviteConsumer(context.Background(), input); err != nil {
+		t.Fatalf("InviteConsumer: %v", err)
+	}
+
+	if gotBody["tier"] != "free" {
+		t.Errorf(`expected tier "free" on the wire, got %v (body: %+v)`, gotBody["tier"], gotBody)
 	}
 }
 

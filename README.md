@@ -263,6 +263,14 @@ round trip. Gated behind the `partner_invite` feature flag; a `403` can
 mean it isn't enabled yet for your account (it can also mean an
 unrelated authorization issue) — contact support if it doesn't resolve.
 
+`InviteConsumerInput` grants datasets via EITHER `Datasets` (a flat list
+of ids) OR `DatasetTiers` (a list of per-dataset grants) — set exactly
+one of the two, never both. The TypeScript and Python SDKs expose this as
+a single `datasets` parameter that accepts either shape; Go has no union
+types, so it's split across these two mutually exclusive fields instead.
+`DatasetTiers` is recommended for new code since it covers both cases —
+see `FreeDatasetGrants` below.
+
 ```go
 // Legacy form: a flat list of dataset ids, all granted at the invite-wide Tier.
 invite, err := p.InviteConsumer(ctx, types.InviteConsumerInput{
@@ -291,6 +299,18 @@ invite, err = p.InviteConsumer(ctx, types.InviteConsumerInput{
 		{DatasetID: freeDatasetID, Tier: "free"}, // comped for this consumer
 		{DatasetID: paidDatasetID, Tier: "paid"}, // billed at that dataset's listed price
 	},
+})
+```
+
+`DatasetTiers` also covers the all-free case — `FreeDatasetGrants` builds
+it from a plain id list, so you never have to choose between the two
+fields above:
+
+```go
+invite, err = p.InviteConsumer(ctx, types.InviteConsumerInput{
+	CompanyName:   "Acme Analytics",
+	BusinessEmail: "data@acme.example",
+	DatasetTiers:  types.FreeDatasetGrants(datasetID1, datasetID2),
 })
 ```
 
