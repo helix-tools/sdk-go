@@ -129,6 +129,14 @@ type inviteConsumerWireBody struct {
 // dataset). Set exactly one of the two; setting both is rejected
 // client-side.
 //
+// input.Datasets and input.DatasetTiers are the Go encoding of a single
+// conceptual `datasets` parameter — the TypeScript and Python SDKs each
+// take ONE argument that accepts either shape via a union type; Go has no
+// sum types, so the same union is split across these two mutually
+// exclusive fields here. For new code, prefer DatasetTiers — build it with
+// types.FreeDatasetGrants(ids...) when every dataset is free, so callers
+// never have to pick between the two fields.
+//
 // The server provisions the consumer account asynchronously and sends a
 // welcome email; check InviteConsumerResponse.EmailSent (and EmailError)
 // to know whether the email dispatch succeeded — provisioning is not
