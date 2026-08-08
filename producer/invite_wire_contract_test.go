@@ -13,7 +13,7 @@ import (
 )
 
 // This file pins the EXACT JSON body this SDK POSTs to
-// /v1/self/invite-consumer for three canonical scenarios. The backlog item
+// /v1/self/invite-consumer for four canonical scenarios. The backlog item
 // this closes ("per-dataset invite tiers are expressed differently in kind
 // across the three SDKs") exists because per-SDK tests each validate their
 // own copy of the wire contract and cannot see divergence between them --
@@ -21,11 +21,16 @@ import (
 // TypeScript (@helix-tools/sdk-typescript) SDKs' equivalent tests
 // reintroduces exactly that gap.
 //
-// THE PYTHON AND TYPESCRIPT SDKs CARRY THE IDENTICAL EXPECTED BODIES BELOW
-// (same keys, same values, same structure) FOR THE SAME THREE SCENARIOS.
-// Any change to wantLegacyStringForm, wantObjectFormMixedTiers, or
-// wantObjectFormTierOmitted MUST be mirrored in both sibling SDKs' golden
-// wire-contract tests, or this cross-SDK contract silently drifts again.
+// THE PYTHON AND TYPESCRIPT SDKs PIN THESE SAME FOUR BODIES VERBATIM --
+// same company_name, business_email, contact_name, tier, and dataset ids,
+// not just the same keys/structure. A reviewer must be able to open all
+// three SDKs' golden wire-contract test files side by side and see
+// byte-identical JSON for each of the four scenarios below. ANY CHANGE TO
+// wantLegacyStringForm, wantObjectFormMixedTiers, wantObjectFormTierOmitted,
+// or wantLegacyFormWithContactName MUST be mirrored in both sibling SDKs'
+// golden wire-contract tests IN THE SAME CHANGE-SET, or this cross-SDK
+// contract silently drifts again -- exactly the blind spot this item was
+// filed about.
 //
 // All three SDKs ALWAYS send the top-level "tier" key as "free" when the
 // caller leaves it unset -- Python defaults the `tier` parameter to
@@ -38,19 +43,21 @@ import (
 // defaults an omitted per-dataset tier to "free" itself).
 //
 // Scenario naming mirrors the three forms invite-consumer-request.schema.json
-// allows for the "datasets" key:
+// allows for the "datasets" key, plus a fourth pinning an optional field:
 //   (a) legacy string form   -- a flat array of dataset id strings
 //   (b) object form          -- an array of {dataset_id, tier} objects
-//   (c) object form, tier omitted on one entry -- proves the PER-DATASET
-//       "tier" key is genuinely optional on the wire (server defaults it to
-//       "free"), not just optional in the Go struct.
+//   (c) object form, tier omitted on the FIRST entry only -- proves the
+//       PER-DATASET "tier" key is genuinely optional on the wire (server
+//       defaults it to "free"), not just optional in the Go struct
+//   (d) legacy string form with contact_name supplied -- pins the optional
+//       ContactName field's presence on the wire, which (a)-(c) don't cover
 
 // wantLegacyStringForm is scenario (a): 2 dataset ids, no tiers.
 const wantLegacyStringForm = `{
 	"company_name": "Acme Analytics",
 	"business_email": "data@acme.example",
 	"tier": "free",
-	"datasets": ["ds-1", "ds-2"]
+	"datasets": ["dataset-123", "dataset-456"]
 }`
 
 // wantObjectFormMixedTiers is scenario (b): 2 datasets, one free, one paid.
@@ -59,12 +66,12 @@ const wantObjectFormMixedTiers = `{
 	"business_email": "data@acme.example",
 	"tier": "free",
 	"datasets": [
-		{"dataset_id": "ds-free", "tier": "free"},
-		{"dataset_id": "ds-paid", "tier": "paid"}
+		{"dataset_id": "dataset-123", "tier": "free"},
+		{"dataset_id": "dataset-456", "tier": "paid"}
 	]
 }`
 
-// wantObjectFormTierOmitted is scenario (c): object form where the second
+// wantObjectFormTierOmitted is scenario (c): object form where the FIRST
 // entry's PER-DATASET tier is left unset client-side and must be ABSENT
 // from that wire object entirely (not sent as "" or null) -- the server
 // defaults an omitted per-dataset tier to "free". The top-level "tier" is
@@ -74,9 +81,20 @@ const wantObjectFormTierOmitted = `{
 	"business_email": "data@acme.example",
 	"tier": "free",
 	"datasets": [
-		{"dataset_id": "ds-1", "tier": "free"},
-		{"dataset_id": "ds-2"}
+		{"dataset_id": "dataset-123"},
+		{"dataset_id": "dataset-456", "tier": "paid"}
 	]
+}`
+
+// wantLegacyFormWithContactName is scenario (d): the legacy string form
+// with an optional ContactName supplied, pinning that contact_name appears
+// on the wire alongside the always-present tier.
+const wantLegacyFormWithContactName = `{
+	"company_name": "Acme Analytics",
+	"business_email": "data@acme.example",
+	"contact_name": "Dana Ruiz",
+	"tier": "free",
+	"datasets": ["dataset-123"]
 }`
 
 // captureInviteBody starts a test server that captures the raw POST body of
@@ -132,7 +150,7 @@ func TestInviteWireContract_LegacyStringForm(t *testing.T) {
 	_, err := p.InviteConsumer(context.Background(), types.InviteConsumerInput{
 		CompanyName:   "Acme Analytics",
 		BusinessEmail: "data@acme.example",
-		Datasets:      []string{"ds-1", "ds-2"},
+		Datasets:      []string{"dataset-123", "dataset-456"},
 	})
 	if err != nil {
 		t.Fatalf("InviteConsumer: %v", err)
@@ -152,8 +170,8 @@ func TestInviteWireContract_ObjectFormMixedTiers(t *testing.T) {
 		CompanyName:   "Acme Analytics",
 		BusinessEmail: "data@acme.example",
 		DatasetTiers: []types.InviteConsumerDatasetGrant{
-			{DatasetID: "ds-free", Tier: "free"},
-			{DatasetID: "ds-paid", Tier: "paid"},
+			{DatasetID: "dataset-123", Tier: "free"},
+			{DatasetID: "dataset-456", Tier: "paid"},
 		},
 	})
 	if err != nil {
@@ -163,9 +181,10 @@ func TestInviteWireContract_ObjectFormMixedTiers(t *testing.T) {
 	assertWireBodyEqual(t, wantObjectFormMixedTiers, *gotRaw)
 }
 
-// TestInviteWireContract_ObjectFormTierOmitted pins scenario (c): a grant
-// whose Tier is left as the Go zero value ("") must produce an object
-// entry with NO "tier" key at all -- not an empty string, not null.
+// TestInviteWireContract_ObjectFormTierOmitted pins scenario (c): the FIRST
+// grant's Tier is left as the Go zero value ("") and must produce an
+// object entry with NO "tier" key at all -- not an empty string, not null.
+// The second grant carries an explicit "paid" tier.
 func TestInviteWireContract_ObjectFormTierOmitted(t *testing.T) {
 	p, gotRaw := captureInviteBody(t)
 
@@ -173,8 +192,8 @@ func TestInviteWireContract_ObjectFormTierOmitted(t *testing.T) {
 		CompanyName:   "Acme Analytics",
 		BusinessEmail: "data@acme.example",
 		DatasetTiers: []types.InviteConsumerDatasetGrant{
-			{DatasetID: "ds-1", Tier: "free"},
-			{DatasetID: "ds-2"}, // Tier deliberately unset
+			{DatasetID: "dataset-123"}, // Tier deliberately unset
+			{DatasetID: "dataset-456", Tier: "paid"},
 		},
 	})
 	if err != nil {
@@ -184,10 +203,33 @@ func TestInviteWireContract_ObjectFormTierOmitted(t *testing.T) {
 	assertWireBodyEqual(t, wantObjectFormTierOmitted, *gotRaw)
 }
 
+// TestInviteWireContract_LegacyFormWithContactName pins scenario (d): the
+// legacy string form with an optional ContactName supplied. No prior
+// scenario covers ContactName's presence on the wire.
+func TestInviteWireContract_LegacyFormWithContactName(t *testing.T) {
+	p, gotRaw := captureInviteBody(t)
+
+	_, err := p.InviteConsumer(context.Background(), types.InviteConsumerInput{
+		CompanyName:   "Acme Analytics",
+		BusinessEmail: "data@acme.example",
+		ContactName:   "Dana Ruiz",
+		Datasets:      []string{"dataset-123"},
+	})
+	if err != nil {
+		t.Fatalf("InviteConsumer: %v", err)
+	}
+
+	assertWireBodyEqual(t, wantLegacyFormWithContactName, *gotRaw)
+}
+
 // TestInviteWireContract_FreeDatasetGrantsMatchesObjectForm pins that
 // types.FreeDatasetGrants produces the IDENTICAL wire body to a hand-built
 // DatasetTiers slice of all-free grants -- the helper is purely a
-// convenience constructor, never a different code path on the wire.
+// convenience constructor, never a different code path on the wire. This
+// is additional Go-only coverage beyond the four cross-SDK canonical
+// scenarios above (FreeDatasetGrants has no TypeScript/Python equivalent
+// to diff against, since Go is the only SDK needing a union-avoidance
+// helper).
 func TestInviteWireContract_FreeDatasetGrantsMatchesObjectForm(t *testing.T) {
 	p, gotRaw := captureInviteBody(t)
 
