@@ -8,6 +8,18 @@ package types
 // unique, non-blank dataset IDs that belong to the inviting producer.
 // Optional: ContactName (max 200 chars) and Tier — currently only "free"
 // is supported; empty defaults to "free" server-side.
+//
+// Datasets and DatasetTiers are the Go encoding of a single conceptual
+// parameter: the TypeScript and Python SDKs each expose ONE `datasets`
+// argument that accepts either a flat list of dataset id strings or a list
+// of per-dataset grant objects (their languages' union/sum types let one
+// parameter carry both shapes). Go has no sum types, so the same union is
+// split across these two mutually-exclusive fields — exactly one must be
+// set, never both, never neither; see validateInviteConsumerInput in
+// producer/partner_invite.go for the exact-one-of check. For NEW code,
+// prefer DatasetTiers (optionally built with FreeDatasetGrants) since it
+// covers both the flat-id case and the per-dataset-tier case; Datasets
+// remains fully supported and is not deprecated.
 type InviteConsumerInput struct {
 	CompanyName   string `json:"company_name"`
 	BusinessEmail string `json:"business_email"`
@@ -16,7 +28,9 @@ type InviteConsumerInput struct {
 
 	// Datasets is the LEGACY id-only form: a flat list of dataset ids, all
 	// granted at the invite-wide Tier above. Mutually exclusive with
-	// DatasetTiers — set exactly one of the two.
+	// DatasetTiers — set exactly one of the two. Equivalent to passing a
+	// plain string array to the single `datasets` parameter on the
+	// TypeScript and Python SDKs.
 	Datasets []string `json:"datasets"`
 
 	// DatasetTiers is the per-dataset form: each dataset gets its own tier,
@@ -26,8 +40,33 @@ type InviteConsumerInput struct {
 	// two. Not marshalled directly (json:"-"): Producer.InviteConsumer
 	// serializes it onto the wire "datasets" key as an array of
 	// {dataset_id, tier} objects, per invite-consumer-request.schema.json's
-	// oneOf.
+	// oneOf. Equivalent to passing a list of per-dataset grant objects to
+	// the single `datasets` parameter on the TypeScript and Python SDKs.
+	// Use FreeDatasetGrants to build this from a plain id list without
+	// having to choose between this field and Datasets.
 	DatasetTiers []InviteConsumerDatasetGrant `json:"-"`
+}
+
+// FreeDatasetGrants returns one free-tier grant per dataset id, in the same
+// order, so a Go caller can always populate
+// InviteConsumerInput.DatasetTiers instead of choosing between it and the
+// legacy Datasets field — matching the single `datasets` parameter the
+// TypeScript and Python SDKs expose, which accepts a plain id list OR a
+// list of per-dataset grant objects interchangeably.
+//
+// FreeDatasetGrants does not deduplicate or validate ids: duplicate or
+// blank ids pass through unchanged and are rejected the same way
+// InviteConsumer rejects a hand-built []InviteConsumerDatasetGrant with the
+// same problem — see validateInviteConsumerInput in
+// producer/partner_invite.go. Calling it with no ids returns an empty
+// slice, which itself fails the "must contain at least 1 dataset"
+// validation rather than silently producing a single blank-id grant.
+func FreeDatasetGrants(ids ...string) []InviteConsumerDatasetGrant {
+	grants := make([]InviteConsumerDatasetGrant, len(ids))
+	for i, id := range ids {
+		grants[i] = InviteConsumerDatasetGrant{DatasetID: id, Tier: "free"}
+	}
+	return grants
 }
 
 // InviteConsumerDatasetGrant is one entry of the per-dataset-tier form of
