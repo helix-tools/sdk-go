@@ -7,7 +7,10 @@ package types
 // chars), and EITHER Datasets OR DatasetTiers (never both) with 1-50
 // unique, non-blank dataset IDs that belong to the inviting producer.
 // Optional: ContactName (max 200 chars) and Tier — currently only "free"
-// is supported; empty defaults to "free" server-side.
+// is supported; an unset Tier is defaulted to "free" and always sent on
+// the wire (Producer.InviteConsumer does this before marshalling), never
+// silently omitted — matching the Python and TypeScript SDKs, which both
+// always send their equivalent `tier` parameter too.
 //
 // Datasets and DatasetTiers are the Go encoding of a single conceptual
 // parameter: the TypeScript and Python SDKs each expose ONE `datasets`
@@ -24,7 +27,7 @@ type InviteConsumerInput struct {
 	CompanyName   string `json:"company_name"`
 	BusinessEmail string `json:"business_email"`
 	ContactName   string `json:"contact_name,omitempty"`
-	Tier          string `json:"tier,omitempty"` // SubscriptionTier — only "free" is currently supported
+	Tier          string `json:"tier,omitempty"` // SubscriptionTier — only "free" is currently supported; unset is defaulted to "free" and always sent on the wire, see InviteConsumer
 
 	// Datasets is the LEGACY id-only form: a flat list of dataset ids, all
 	// granted at the invite-wide Tier above. Mutually exclusive with

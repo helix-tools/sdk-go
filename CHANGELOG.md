@@ -43,6 +43,18 @@
   send it). The Go API defaults an absent/empty visibility to `"private"`
   itself, so this closes a latent cross-SDK payload divergence rather than a
   live bug. Still overridable via `UploadOptions.DatasetOverrides`.
+- `InviteConsumer`'s wire body now always sends the top-level `"tier"` key
+  as `"free"` when `InviteConsumerInput.Tier` is left unset, instead of
+  omitting the key. This is a **wire-body change** (the JSON payload POSTed
+  to `/v1/self/invite-consumer` differs for callers who leave `Tier` unset),
+  closing a divergence the golden wire-contract test caught against the
+  Python SDK's defaulted `tier: str = "free"` parameter and the TypeScript
+  SDK's `tier ?? 'free'` (its own comment states the intent: "Always send
+  tier for cross-SDK wire parity"). Behavior-preserving from the Go caller's
+  perspective: `validateInviteConsumerInput` already rejected any `Tier`
+  other than `""`/`"free"`, so `"free"` was already the only value the
+  server could ever receive — this only makes that value explicit on the
+  wire instead of relying on the server's own default for an absent key.
 
 ### Removed
 - Deleted `buildDatasetPayload` and its private helpers

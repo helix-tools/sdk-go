@@ -113,11 +113,22 @@ func validateInviteConsumerInput(input types.InviteConsumerInput) error {
 // []string or a per-dataset-tier []object — onto the wire "datasets" key,
 // per invite-consumer-request.schema.json's oneOf. Datasets is `any` so
 // json.Marshal picks whichever concrete slice type InviteConsumer sets.
+//
+// Tier deliberately has NO omitempty: InviteConsumer always populates it
+// (defaulting to "free" when input.Tier is unset) before marshalling, so
+// the wire body always carries "tier" — matching the Python SDK's
+// defaulted `tier: str = "free"` parameter and the TypeScript SDK's
+// `tier ?? 'free'` (see that SDK's comment: "Always send tier for
+// cross-SDK wire parity"). Dropping omitempty here means a future bug that
+// leaves Tier as "" would marshal a loud `"tier":""` instead of silently
+// omitting the key — the golden wire-contract tests in
+// invite_wire_contract_test.go catch either failure mode, but an explicit
+// tag matches the "always present" invariant this field now holds.
 type inviteConsumerWireBody struct {
 	CompanyName   string `json:"company_name"`
 	BusinessEmail string `json:"business_email"`
 	ContactName   string `json:"contact_name,omitempty"`
-	Tier          string `json:"tier,omitempty"`
+	Tier          string `json:"tier"`
 	Datasets      any    `json:"datasets"`
 }
 
@@ -154,11 +165,21 @@ func (p *Producer) InviteConsumer(ctx context.Context, input types.InviteConsume
 		return nil, err
 	}
 
+	// Default an unset Tier to "free" on the wire — validateInviteConsumerInput
+	// above already rejects any Tier other than "" or "free", so "free" is
+	// the only legal value; this makes that implicit default explicit on the
+	// wire instead of omitting the key, matching the Python and TypeScript
+	// SDKs (both always send "tier"; see inviteConsumerWireBody's doc comment).
+	tier := input.Tier
+	if tier == "" {
+		tier = "free"
+	}
+
 	wire := inviteConsumerWireBody{
 		CompanyName:   input.CompanyName,
 		BusinessEmail: input.BusinessEmail,
 		ContactName:   input.ContactName,
-		Tier:          input.Tier,
+		Tier:          tier,
 	}
 
 	// Send CANONICAL (trimmed) dataset/dataset-tier ids — validation trims for

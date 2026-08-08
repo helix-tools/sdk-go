@@ -27,11 +27,21 @@ import (
 // wantObjectFormTierOmitted MUST be mirrored in both sibling SDKs' golden
 // wire-contract tests, or this cross-SDK contract silently drifts again.
 //
+// All three SDKs ALWAYS send the top-level "tier" key as "free" when the
+// caller leaves it unset -- Python defaults the `tier` parameter to
+// `"free"`, TypeScript defaults it with `tier ?? 'free'` (whose own comment
+// states the intent verbatim: "Always send tier for cross-SDK wire
+// parity"), and Go now defaults it the same way in InviteConsumer before
+// marshalling. This is the top-level invite-wide tier, distinct from the
+// PER-DATASET "tier" key nested inside each object-form grant in scenarios
+// (b)/(c) below, which remains genuinely optional on the wire (the server
+// defaults an omitted per-dataset tier to "free" itself).
+//
 // Scenario naming mirrors the three forms invite-consumer-request.schema.json
 // allows for the "datasets" key:
 //   (a) legacy string form   -- a flat array of dataset id strings
 //   (b) object form          -- an array of {dataset_id, tier} objects
-//   (c) object form, tier omitted on one entry -- proves the per-dataset
+//   (c) object form, tier omitted on one entry -- proves the PER-DATASET
 //       "tier" key is genuinely optional on the wire (server defaults it to
 //       "free"), not just optional in the Go struct.
 
@@ -39,6 +49,7 @@ import (
 const wantLegacyStringForm = `{
 	"company_name": "Acme Analytics",
 	"business_email": "data@acme.example",
+	"tier": "free",
 	"datasets": ["ds-1", "ds-2"]
 }`
 
@@ -46,6 +57,7 @@ const wantLegacyStringForm = `{
 const wantObjectFormMixedTiers = `{
 	"company_name": "Acme Analytics",
 	"business_email": "data@acme.example",
+	"tier": "free",
 	"datasets": [
 		{"dataset_id": "ds-free", "tier": "free"},
 		{"dataset_id": "ds-paid", "tier": "paid"}
@@ -53,12 +65,14 @@ const wantObjectFormMixedTiers = `{
 }`
 
 // wantObjectFormTierOmitted is scenario (c): object form where the second
-// entry's tier is left unset client-side and must be ABSENT from the wire
-// object entirely (not sent as "" or null) -- the server defaults an
-// omitted per-dataset tier to "free".
+// entry's PER-DATASET tier is left unset client-side and must be ABSENT
+// from that wire object entirely (not sent as "" or null) -- the server
+// defaults an omitted per-dataset tier to "free". The top-level "tier" is
+// still always present, defaulted to "free" like every other scenario.
 const wantObjectFormTierOmitted = `{
 	"company_name": "Acme Analytics",
 	"business_email": "data@acme.example",
+	"tier": "free",
 	"datasets": [
 		{"dataset_id": "ds-1", "tier": "free"},
 		{"dataset_id": "ds-2"}
@@ -189,6 +203,7 @@ func TestInviteWireContract_FreeDatasetGrantsMatchesObjectForm(t *testing.T) {
 	want := `{
 		"company_name": "Acme Analytics",
 		"business_email": "data@acme.example",
+		"tier": "free",
 		"datasets": [
 			{"dataset_id": "ds-1", "tier": "free"},
 			{"dataset_id": "ds-2", "tier": "free"}
