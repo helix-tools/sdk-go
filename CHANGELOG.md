@@ -3,6 +3,21 @@
 ## Unreleased
 
 ### Added
+- **`types.FreeDatasetGrants` helper + invite union parity docs.**
+  `types.FreeDatasetGrants(ids ...string) []InviteConsumerDatasetGrant`
+  converts a plain dataset-id list into one free-tier grant per id, so a Go
+  caller can always populate `InviteConsumerInput.DatasetTiers` instead of
+  choosing between it and the legacy `Datasets` field — matching the
+  single `datasets` union parameter the TypeScript and Python SDKs expose.
+  `Datasets`/`DatasetTiers` are unchanged (this is additive, no breaking
+  change); their doc comments and `InviteConsumer`'s now state explicitly
+  that they are the Go encoding of that one cross-SDK union, that exactly
+  one must be set, and that `DatasetTiers` is recommended for new code.
+  Added a golden wire-body contract test
+  (`producer/invite_wire_contract_test.go`) pinning the exact JSON POSTed
+  for the legacy-string, mixed-tier-object, and tier-omitted-object forms,
+  so a future change to any of the three SDKs' invite-consumer payload can
+  be caught by diffing against the other two.
 - **Per-consumer pricing.** `Producer.ApproveSubscriptionRequest`'s
   `ApproveSubscriptionRequestOptions` gained `PriceMonthlyCents *int64`: set
   it to a pointer to `0` to comp that one consumer for free (provisioned
