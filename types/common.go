@@ -134,12 +134,25 @@ type Dataset struct {
 	Pricing         map[string]any `json:"pricing"`
 	Stats           map[string]any `json:"stats"`
 	LastUpdated     string         `json:"last_updated"`
-	CreatedAt       string         `json:"created_at"`
-	CreatedBy       string         `json:"created_by"`
-	UpdatedAt       string         `json:"updated_at"`
-	UpdatedBy       string         `json:"updated_by"`
-	DeletedAt       *string        `json:"deleted_at,omitempty"`
-	DeletedBy       *string        `json:"deleted_by,omitempty"`
+	// LastUpdatedData is when the dataset's underlying DATA last changed
+	// (distinct from LastUpdated/UpdatedAt, which track metadata). Nullable:
+	// datasets that have never had a file upload/delete carry null.
+	LastUpdatedData *string `json:"last_updated_data,omitempty"`
+	CreatedAt       string  `json:"created_at"`
+	CreatedBy       string  `json:"created_by"`
+	UpdatedAt       string  `json:"updated_at"`
+	UpdatedBy       string  `json:"updated_by"`
+	DeletedAt       *string `json:"deleted_at,omitempty"`
+	DeletedBy       *string `json:"deleted_by,omitempty"`
+	// FileFormats, TotalFiles, TotalSizeBytes, OriginalSize, CompressedSize,
+	// and AccessCount are storage-usage stats populated by the API's dataset
+	// stats pipeline; absent on datasets predating that pipeline.
+	FileFormats    []string `json:"file_formats,omitempty"`
+	TotalFiles     int64    `json:"total_files,omitempty"`
+	TotalSizeBytes int64    `json:"total_size_bytes,omitempty"`
+	OriginalSize   int64    `json:"original_size,omitempty"`
+	CompressedSize int64    `json:"compressed_size,omitempty"`
+	AccessCount    int64    `json:"access_count,omitempty"`
 	// Marketplace pricing (schema PR #18). Optional and server-managed: nil
 	// while the marketplace_payments feature flag is off — tolerate absence.
 	Marketplace *DatasetMarketplace `json:"marketplace,omitempty"`

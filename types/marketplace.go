@@ -40,17 +40,29 @@ type DatasetMarketplace struct {
 	Listed *bool `json:"listed,omitempty"`
 	// DelistedAt is a server-managed ISO 8601 timestamp; null while listed.
 	DelistedAt *string `json:"delisted_at,omitempty"`
+	// PendingDeletionAt is server-managed: the latest current_period_end
+	// across this dataset's active paid subscriptions — the moment the last
+	// paid subscriber loses access and the dataset becomes removable. Null
+	// when no active paid subscription has a known period end.
+	PendingDeletionAt *string `json:"pending_deletion_at,omitempty"`
 }
 
 // SubscriptionBilling is the billing (payment) state of a marketplace
 // subscription (subscription.billing). Optional: free/legacy subscriptions omit
 // it or carry BillingStatus "free".
 type SubscriptionBilling struct {
-	BillingStatus           BillingStatus `json:"billing_status,omitempty"`
-	StripeSubscriptionID    *string       `json:"stripe_subscription_id,omitempty"`
-	StripeCheckoutSessionID *string       `json:"stripe_checkout_session_id,omitempty"`
-	CurrentPeriodEnd        *string       `json:"current_period_end,omitempty"`
-	CancelAtPeriodEnd       *bool         `json:"cancel_at_period_end,omitempty"`
+	BillingStatus        BillingStatus `json:"billing_status,omitempty"`
+	StripeSubscriptionID *string       `json:"stripe_subscription_id,omitempty"`
+	// StripePriceID is server-managed: the Stripe Price pinned to this
+	// subscription. When present it overrides the dataset's
+	// marketplace.stripe_price_id at checkout; null/absent defers to it.
+	StripePriceID           *string `json:"stripe_price_id,omitempty"`
+	StripeCheckoutSessionID *string `json:"stripe_checkout_session_id,omitempty"`
+	// PriceMonthlyCents is a denormalised USD-cents amount captured at
+	// purchase for display/audit without a Stripe round-trip. 0 = free grant.
+	PriceMonthlyCents *int    `json:"price_monthly_cents,omitempty"`
+	CurrentPeriodEnd  *string `json:"current_period_end,omitempty"`
+	CancelAtPeriodEnd *bool   `json:"cancel_at_period_end,omitempty"`
 }
 
 // MarketplaceBrowseParams are the optional query filters for BrowseMarketplace

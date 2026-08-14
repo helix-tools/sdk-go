@@ -31,6 +31,16 @@ const (
 	TierEnterprise   SubscriptionTier = "enterprise"
 )
 
+// ConsumerInfo is the server-side enrichment of the consumer that owns a
+// subscription (subscription.consumer_info). Populated by the API on read
+// paths (e.g. GET /v1/subscriptions) so producers can render their
+// Subscribers tab without an N+1 fan-out per consumer_id. Mirrors the
+// producer-side producer_info enrichment.
+type ConsumerInfo struct {
+	CompanyName string `json:"company_name,omitempty"`
+	Email       string `json:"email,omitempty"`
+}
+
 // Subscription represents an active subscription to a dataset or producer.
 type Subscription struct {
 	ID                 string  `json:"_id"`
@@ -46,8 +56,11 @@ type Subscription struct {
 	SNSSubscriptionARN *string `json:"sns_subscription_arn,omitempty"`
 	SQSQueueARN        *string `json:"sqs_queue_arn,omitempty"`
 	SQSQueueURL        *string `json:"sqs_queue_url,omitempty"`
-	CreatedAt          string  `json:"created_at"`
-	UpdatedAt          string  `json:"updated_at"`
+	// ConsumerInfo is optional server-side enrichment; absent unless the API
+	// populated it on this read path.
+	ConsumerInfo *ConsumerInfo `json:"consumer_info,omitempty"`
+	CreatedAt    string        `json:"created_at"`
+	UpdatedAt    string        `json:"updated_at"`
 	// Billing is the marketplace billing (payment) state (schema PR #18).
 	// Optional: free/legacy subscriptions omit it or carry billing_status
 	// "free". Distinct from Status (the ACCESS state). Tolerate absence (nil).
