@@ -30,9 +30,6 @@ type Company struct {
 	StripeCustomerID     *string          `json:"stripe_customer_id,omitempty"`
 	StripeSubscriptionID string           `json:"stripe_subscription_id,omitempty"`
 	StripeStatus         string           `json:"stripe_status,omitempty"`
-	AWSCustomerID        *string          `json:"aws_customer_id,omitempty"`
-	S3Bucket             string           `json:"s3_bucket,omitempty"`
-	KMSKeyID             string           `json:"kms_key_id,omitempty"`
 	Status               string           `json:"status"`         // CompanyStatus: provisioning, active, inactive, suspended, provisioning_failed, onboarding_failed, deprovisioning, decommission_failed
 	Tier                 string           `json:"tier,omitempty"` // SubscriptionTier — canonical write value is "free"
 	FeatureFlags         FeatureFlags     `json:"feature_flags,omitempty"`
