@@ -20,33 +20,32 @@ const (
 
 // Company represents a company/customer in the system.
 type Company struct {
-	ID               string              `json:"_id"`
-	CompanyName      string              `json:"company_name"`
-	BusinessEmail    string              `json:"business_email"`
-	BillingEmail     string              `json:"billing_email,omitempty"`
-	CustomerType     string              `json:"customer_type"` // "producer", "consumer", or "both"
-	Phone            *string             `json:"phone,omitempty"`
-	Address          *Address            `json:"address,omitempty"`
-	StripeCustomerID     *string             `json:"stripe_customer_id,omitempty"`
-	StripeSubscriptionID string              `json:"stripe_subscription_id,omitempty"`
-	StripeStatus         string              `json:"stripe_status,omitempty"`
-	AWSCustomerID        *string             `json:"aws_customer_id,omitempty"`
-	S3Bucket         string              `json:"s3_bucket,omitempty"`
-	KMSKeyID         string              `json:"kms_key_id,omitempty"`
-	Status           string              `json:"status"` // CompanyStatus: provisioning, active, inactive, suspended, provisioning_failed, onboarding_failed, deprovisioning, decommission_failed
-	Tier             string              `json:"tier,omitempty"` // SubscriptionTier — canonical write value is "free"
-	FeatureFlags     FeatureFlags        `json:"feature_flags,omitempty"`
-	Settings         *CompanySettings    `json:"settings,omitempty"`
-	Onboarding       *OnboardingInfo     `json:"onboarding,omitempty"`
-	Infrastructure   *InfrastructureInfo `json:"infrastructure,omitempty"`
-	CreatedAt        string              `json:"created_at"`
-	CreatedBy        string              `json:"created_by,omitempty"`
-	UpdatedAt        string              `json:"updated_at"`
-	UpdatedBy        string              `json:"updated_by,omitempty"`
-	DeletedAt        *string             `json:"deleted_at,omitempty"`
-	DeletedBy        *string             `json:"deleted_by,omitempty"`
-	UserCount        int                 `json:"user_count,omitempty"`
-	Users            []CompanyUser       `json:"users,omitempty"`
+	ID                   string           `json:"_id"`
+	CompanyName          string           `json:"company_name"`
+	BusinessEmail        string           `json:"business_email"`
+	BillingEmail         string           `json:"billing_email,omitempty"`
+	CustomerType         string           `json:"customer_type"` // "producer", "consumer", or "both"
+	Phone                *string          `json:"phone,omitempty"`
+	Address              *Address         `json:"address,omitempty"`
+	StripeCustomerID     *string          `json:"stripe_customer_id,omitempty"`
+	StripeSubscriptionID string           `json:"stripe_subscription_id,omitempty"`
+	StripeStatus         string           `json:"stripe_status,omitempty"`
+	AWSCustomerID        *string          `json:"aws_customer_id,omitempty"`
+	S3Bucket             string           `json:"s3_bucket,omitempty"`
+	KMSKeyID             string           `json:"kms_key_id,omitempty"`
+	Status               string           `json:"status"`         // CompanyStatus: provisioning, active, inactive, suspended, provisioning_failed, onboarding_failed, deprovisioning, decommission_failed
+	Tier                 string           `json:"tier,omitempty"` // SubscriptionTier — canonical write value is "free"
+	FeatureFlags         FeatureFlags     `json:"feature_flags,omitempty"`
+	Settings             *CompanySettings `json:"settings,omitempty"`
+	Onboarding           *OnboardingInfo  `json:"onboarding,omitempty"`
+	CreatedAt            string           `json:"created_at"`
+	CreatedBy            string           `json:"created_by,omitempty"`
+	UpdatedAt            string           `json:"updated_at"`
+	UpdatedBy            string           `json:"updated_by,omitempty"`
+	DeletedAt            *string          `json:"deleted_at,omitempty"`
+	DeletedBy            *string          `json:"deleted_by,omitempty"`
+	UserCount            int              `json:"user_count,omitempty"`
+	Users                []CompanyUser    `json:"users,omitempty"`
 }
 
 // FeatureFlag is a single feature flag entry with audit metadata, mirroring
@@ -95,38 +94,28 @@ type OnboardingInfo struct {
 	OnboardingSource         string  `json:"onboarding_source,omitempty"` // "api", "portal", "manual", "import", "migration"
 }
 
-// InfrastructureInfo contains provisioned infrastructure details.
-type InfrastructureInfo struct {
-	IAMUserARN         string `json:"iam_user_arn,omitempty"`
-	S3Bucket           string `json:"s3_bucket,omitempty"`
-	KMSKeyID           string `json:"kms_key_id,omitempty"`
-	CredentialsSSMPath string `json:"credentials_ssm_path,omitempty"`
-	SQSQueueURL        string `json:"sqs_queue_url,omitempty"`
-	SQSQueueARN        string `json:"sqs_queue_arn,omitempty"`
-}
-
 // CompanyUser represents a user within a company.
 type CompanyUser struct {
-	ID          string            `json:"_id"`
-	Email       string            `json:"email"`
-	FirstName   string            `json:"first_name,omitempty"`
-	LastName    string            `json:"last_name,omitempty"`
-	Phone       string            `json:"phone,omitempty"`
-	CompanyID   string            `json:"company_id"`
-	CompanyName string            `json:"company_name,omitempty"`
-	Role        string            `json:"role"` // "owner", "admin", "member"
-	Status      string            `json:"status"` // "active", "inactive", "suspended", "deleted"
-	Permissions *UserPermissions  `json:"permissions,omitempty"`
-	CreatedAt   string            `json:"created_at"`
-	UpdatedAt   string            `json:"updated_at,omitempty"`
+	ID          string           `json:"_id"`
+	Email       string           `json:"email"`
+	FirstName   string           `json:"first_name,omitempty"`
+	LastName    string           `json:"last_name,omitempty"`
+	Phone       string           `json:"phone,omitempty"`
+	CompanyID   string           `json:"company_id"`
+	CompanyName string           `json:"company_name,omitempty"`
+	Role        string           `json:"role"`   // "owner", "admin", "member"
+	Status      string           `json:"status"` // "active", "inactive", "suspended", "deleted"
+	Permissions *UserPermissions `json:"permissions,omitempty"`
+	CreatedAt   string           `json:"created_at"`
+	UpdatedAt   string           `json:"updated_at,omitempty"`
 }
 
 // UserPermissions defines what actions a user can perform.
 type UserPermissions struct {
-	CanCreateDatasets  bool `json:"can_create_datasets,omitempty"`
-	CanDeleteDatasets  bool `json:"can_delete_datasets,omitempty"`
-	CanManageBilling   bool `json:"can_manage_billing,omitempty"`
-	CanInviteUsers     bool `json:"can_invite_users,omitempty"`
+	CanCreateDatasets bool `json:"can_create_datasets,omitempty"`
+	CanDeleteDatasets bool `json:"can_delete_datasets,omitempty"`
+	CanManageBilling  bool `json:"can_manage_billing,omitempty"`
+	CanInviteUsers    bool `json:"can_invite_users,omitempty"`
 }
 
 // CreateCompanyRequest is the payload for POST /v1/companies.
