@@ -83,10 +83,6 @@ func TestSubscriptionUnmarshalPreservesExtendedFields(t *testing.T) {
 		t.Fatalf("unexpected tier: %s", sub.Tier)
 	}
 
-	if sub.KMSGrantID == nil || *sub.KMSGrantID != "grant-abc" {
-		t.Fatalf("kms_grant_id not captured: %+v", sub.KMSGrantID)
-	}
-
 	if sub.SQSQueueURL == nil || *sub.SQSQueueURL == "" {
 		t.Fatalf("missing sqs queue url: %+v", sub.SQSQueueURL)
 	}

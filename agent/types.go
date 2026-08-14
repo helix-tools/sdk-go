@@ -63,25 +63,31 @@ type RateLimitConfig struct {
 // TrustTier is one of:  "T0", "T1", "T2".
 // Status is one of:     "active", "disabled", "review".
 type AgentRecord struct {
-	AgentID                  string          `json:"agent_id"`
-	DisplayName              string          `json:"display_name"`
-	ActorClass               string          `json:"actor_class"`
-	OwnerOrgID               string          `json:"owner_org_id"`
-	TrustTier                string          `json:"trust_tier"`
-	Status                   string          `json:"status"`
-	AllowedCustomers         []string        `json:"allowed_customers,omitempty"`
-	AllowedOperations        []string        `json:"allowed_operations,omitempty"`
-	ForbiddenOperations      []string        `json:"forbidden_operations,omitempty"`
-	DefaultTokenTTLSeconds   int             `json:"default_token_ttl_seconds"`
-	WebhookURL               string          `json:"webhook_url,omitempty"`
-	MCPServers               []string        `json:"mcp_servers,omitempty"`
-	RequiresHumanApprovalFor []string        `json:"requires_human_approval_for,omitempty"`
-	RedactionProfile         string          `json:"redaction_profile,omitempty"`
-	AllowedIPRanges          []string        `json:"allowed_ip_ranges,omitempty"`
-	RateLimit                RateLimitConfig `json:"rate_limit,omitempty"`
-	Version                  int             `json:"version"`
-	CreatedAt                time.Time       `json:"created_at"`
-	UpdatedAt                time.Time       `json:"updated_at"`
+	AgentID                  string   `json:"agent_id"`
+	DisplayName              string   `json:"display_name"`
+	ActorClass               string   `json:"actor_class"`
+	OwnerOrgID               string   `json:"owner_org_id"`
+	TrustTier                string   `json:"trust_tier"`
+	Status                   string   `json:"status"`
+	AllowedCustomers         []string `json:"allowed_customers,omitempty"`
+	AllowedOperations        []string `json:"allowed_operations,omitempty"`
+	ForbiddenOperations      []string `json:"forbidden_operations,omitempty"`
+	DefaultTokenTTLSeconds   int      `json:"default_token_ttl_seconds"`
+	WebhookURL               string   `json:"webhook_url,omitempty"`
+	MCPServers               []string `json:"mcp_servers,omitempty"`
+	RequiresHumanApprovalFor []string `json:"requires_human_approval_for,omitempty"`
+	RedactionProfile         string   `json:"redaction_profile,omitempty"`
+	AllowedIPRanges          []string `json:"allowed_ip_ranges,omitempty"`
+	// JWKSURI verifies agent-signed assertions for external agents with their
+	// own keys. Required (https:// only) when ActorClass == "external_agent".
+	JWKSURI string `json:"jwks_uri,omitempty"`
+	// PublicKeyFingerprint is the SHA-256 fingerprint of the agent's public
+	// key, used for identity pinning.
+	PublicKeyFingerprint string          `json:"public_key_fingerprint,omitempty"`
+	RateLimit            RateLimitConfig `json:"rate_limit,omitempty"`
+	Version              int             `json:"version"`
+	CreatedAt            time.Time       `json:"created_at"`
+	UpdatedAt            time.Time       `json:"updated_at"`
 }
 
 // RegistryPeer is the minimal peer-discovery shape returned from
