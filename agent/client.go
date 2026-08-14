@@ -345,6 +345,13 @@ func WithA2ACustomerID(customerID string) A2AOption {
 // webhook delivery happens in the background with retries +
 // eventual DLQ. The status in the response is typically "queued".
 //
+// The SDK validates operation and customer_id locally — both are
+// required by the server and rejected with a 400 if missing, so
+// callers must attach them via WithA2AOperation and
+// WithA2ACustomerID or the SDK returns an error before making the
+// request. correlationID is an optional idempotency key and may be
+// passed as "".
+//
 // Server requires:
 //
 //   - recipient_agent_id != caller.agent_id
@@ -352,10 +359,6 @@ func WithA2ACustomerID(customerID string) A2AOption {
 //   - customer_id non-empty, in caller's token scope
 //     (pass via WithA2ACustomerID)
 //   - recipient must exist in the active registry
-//
-// The simpler signature — recipient, correlation, payload — is the
-// primary happy path; callers that need Operation or CustomerID
-// should attach them via the options.
 //
 // POST /v1/agents/a2a/send
 func (c *Client) SendA2A(ctx context.Context, recipientAgentID, correlationID string, payload any, opts ...A2AOption) (*A2ASendResponse, error) {
@@ -368,6 +371,12 @@ func (c *Client) SendA2A(ctx context.Context, recipientAgentID, correlationID st
 		if opt != nil {
 			opt(&req)
 		}
+	}
+	if req.Operation == "" {
+		return nil, errors.New("agent: operation is required (pass via WithA2AOperation)")
+	}
+	if req.CustomerID == "" {
+		return nil, errors.New("agent: customerID is required (pass via WithA2ACustomerID)")
 	}
 
 	var out A2ASendResponse
