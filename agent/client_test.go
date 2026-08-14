@@ -273,6 +273,69 @@ func TestSendA2A_Success(t *testing.T) {
 	}
 }
 
+func TestSendA2A_MissingOperationErrorsLocally(t *testing.T) {
+	var requests atomic.Int32
+	ts := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		writeJSON(t, w, http.StatusAccepted, A2ASendResponse{MessageID: "m", Status: "queued"})
+	})
+
+	c := NewClient(ts.URL(), "jwt")
+	_, err := c.SendA2A(context.Background(), "agent-peer", "corr-9",
+		map[string]string{"hello": "world"},
+		WithA2ACustomerID("cust-123"),
+	)
+	if err == nil {
+		t.Fatal("err=nil, want a local validation error for missing operation")
+	}
+	if requests.Load() != 0 {
+		t.Errorf("server saw %d requests, want 0 — client must not call out without operation", requests.Load())
+	}
+}
+
+func TestSendA2A_MissingCustomerIDErrorsLocally(t *testing.T) {
+	var requests atomic.Int32
+	ts := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		writeJSON(t, w, http.StatusAccepted, A2ASendResponse{MessageID: "m", Status: "queued"})
+	})
+
+	c := NewClient(ts.URL(), "jwt")
+	_, err := c.SendA2A(context.Background(), "agent-peer", "corr-9",
+		map[string]string{"hello": "world"},
+		WithA2AOperation("dataset.subscribe"),
+	)
+	if err == nil {
+		t.Fatal("err=nil, want a local validation error for missing customer_id")
+	}
+	if requests.Load() != 0 {
+		t.Errorf("server saw %d requests, want 0 — client must not call out without customer_id", requests.Load())
+	}
+}
+
+func TestSendA2A_EmptyCorrelationIDOmittedFromBody(t *testing.T) {
+	ts := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if _, present := body["correlation_id"]; present {
+			t.Errorf("body contains correlation_id key %v, want it omitted for empty correlationID", body["correlation_id"])
+		}
+		writeJSON(t, w, http.StatusAccepted, A2ASendResponse{MessageID: "m", Status: "queued"})
+	})
+
+	c := NewClient(ts.URL(), "jwt")
+	_, err := c.SendA2A(context.Background(), "agent-peer", "",
+		map[string]string{"hello": "world"},
+		WithA2AOperation("dataset.subscribe"),
+		WithA2ACustomerID("cust-123"),
+	)
+	if err != nil {
+		t.Fatalf("SendA2A: %v", err)
+	}
+}
+
 func TestMyAuditTrail_Success(t *testing.T) {
 	want := []AuditEntry{
 		{Timestamp: time.Now().UTC(), EventType: "agent.policy.evaluate", Status: "executed", Resource: "dataset/cust-1/ds-42"},
