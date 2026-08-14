@@ -33,7 +33,6 @@ type Company struct {
 	AWSCustomerID        *string             `json:"aws_customer_id,omitempty"`
 	S3Bucket         string              `json:"s3_bucket,omitempty"`
 	KMSKeyID         string              `json:"kms_key_id,omitempty"`
-	SNSTopicARN      string              `json:"sns_topic_arn,omitempty"`
 	Status           string              `json:"status"` // CompanyStatus: provisioning, active, inactive, suspended, provisioning_failed, onboarding_failed, deprovisioning, decommission_failed
 	Tier             string              `json:"tier,omitempty"` // SubscriptionTier — canonical write value is "free"
 	FeatureFlags     FeatureFlags        `json:"feature_flags,omitempty"`

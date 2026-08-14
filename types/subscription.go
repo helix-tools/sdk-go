@@ -52,9 +52,6 @@ type Subscription struct {
 	RequestID          string  `json:"request_id,omitempty"`
 	Tier               string  `json:"tier"`   // SubscriptionTier — canonical write value is "free"
 	Status             string  `json:"status"` // SubscriptionStatus: "active", "paused", "cancelled", "expired"
-	KMSGrantID         *string `json:"kms_grant_id,omitempty"`
-	SNSSubscriptionARN *string `json:"sns_subscription_arn,omitempty"`
-	SQSQueueARN        *string `json:"sqs_queue_arn,omitempty"`
 	SQSQueueURL        *string `json:"sqs_queue_url,omitempty"`
 	// ConsumerInfo is optional server-side enrichment; absent unless the API
 	// populated it on this read path.
