@@ -69,19 +69,183 @@ jobs:
         prerelease: false
         token: ${{ secrets.GITHUB_TOKEN }}
 
-  # Triggers the production E2E suite in helix-tools/e2e on merge to main. Requires the org/repo secret GH_PAT (a PAT allowed to dispatch to helix-tools/e2e).
+  # Triggers the production E2E suite in helix-tools/e2e on merge to main, then
+  # WAITS for that run to conclude and fails this job if it does. Requires the
+  # org/repo secret GH_PAT (a PAT allowed to dispatch to, and read Actions runs
+  # in, helix-tools/e2e).
+  #
+  # Ported from helix-tools/api's notify-e2e job (PR #258, commit f2104b5) --
+  # see that job's header comment for the full rationale on why selection is
+  # by exact-equality title match, never a substring/contains check or a
+  # timestamp-only fallback, and why a "cancelled" conclusion means following
+  # the chain to whichever run superseded it rather than failing outright.
   notify-e2e:
     name: Notify E2E Suite
     needs: [ build ]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ${{ vars.RUNNER == 'aws' && format('codebuild-helix-tools-{0}-runner-{1}-{2}', github.event.repository.name, github.run_id, github.run_attempt) || 'ubuntu-latest' }}
-    timeout-minutes: 5
+    # 5 min to locate the run + 30 min to wait out any collapse chain, plus
+    # slack for API latency between polls.
+    timeout-minutes: 40
 
     steps:
       - name: Trigger E2E suite
+        id: dispatch
         run: |
-          curl -sSf -X POST \
+          # A small lookback buffer absorbs clock skew between this runner
+          # and GitHub's server-side createdAt timestamps, so the locate step
+          # below can never miss the run because our own clock ran fast.
+          DISPATCH_TIME=$(date -u -d '-30 seconds' +%Y-%m-%dT%H:%M:%SZ)
+          echo "dispatch_time=${DISPATCH_TIME}" >> "$GITHUB_OUTPUT"
+
+          # --max-time bounds the whole request so a stalled connection can't
+          # consume this job's timeout budget on a single call.
+          curl -sSf --max-time 15 -X POST \
             -H "Authorization: Bearer ${{ secrets.GH_PAT }}" \
             -H "Accept: application/vnd.github+json" \
             https://api.github.com/repos/helix-tools/e2e/dispatches \
             -d '{"event_type":"e2e-trigger","client_payload":{"source":"sdk-go","sha":"${{ github.sha }}"}}'
+
+      - name: Locate the triggered E2E run
+        id: locate
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          # Full expected displayTitle, matched with EXACT equality below --
+          # not a substring/contains check.
+          TITLE_MARKER: "e2e: dispatch from sdk-go@${{ github.sha }}"
+        run: |
+          set -uo pipefail
+          DISPATCH_TIME="${{ steps.dispatch.outputs.dispatch_time }}"
+          DEADLINE=$(( $(date -u +%s) + 300 ))
+          RUN_ID=""
+
+          echo "Looking for an e2e run whose title exactly equals '${TITLE_MARKER}' (createdAt >= ${DISPATCH_TIME} used only as a lookback bound, never as the selector)"
+
+          while [ "$(date -u +%s)" -lt "$DEADLINE" ]; do
+            # `|| RUN_ID=""` guards this assignment: without it, a timeout(1)
+            # exit (124) or a transient gh/API failure would propagate as the
+            # exit status of the RUN_ID=$(...) assignment itself, which trips
+            # this step's inherited `set -e` and kills the job immediately
+            # instead of falling through to the sleep+retry below.
+            RUN_ID=$(timeout 20 gh run list -R helix-tools/e2e --workflow e2e.yml -L 30 \
+              --json databaseId,displayTitle,createdAt \
+              --jq "[.[] | select(.createdAt >= \"${DISPATCH_TIME}\") | select(.displayTitle == \"${TITLE_MARKER}\")] | sort_by(.createdAt) | .[0].databaseId // empty" 2>/dev/null) || RUN_ID=""
+
+            if [ -n "$RUN_ID" ]; then
+              echo "Found run ${RUN_ID} whose title is ${TITLE_MARKER}"
+              break
+            fi
+            sleep 10
+          done
+
+          if [ -z "$RUN_ID" ]; then
+            RUN_URL="https://github.com/helix-tools/e2e/actions"
+            echo "::error::No helix-tools/e2e run titled '${TITLE_MARKER}' appeared within 5 minutes of dispatching. See ${RUN_URL}."
+            {
+              echo "## E2E Gate"
+              echo "✗ FAILED — no e2e run titled \`${TITLE_MARKER}\` was observed to start within 5 minutes of the dispatch. [Check helix-tools/e2e Actions](${RUN_URL})."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          echo "run_id=${RUN_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for the E2E run to conclude
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          # Same marker as the locate step -- a chain-follow after a
+          # cancellation must keep matching OUR sha, never just "newer".
+          TITLE_MARKER: "e2e: dispatch from sdk-go@${{ github.sha }}"
+        run: |
+          set -uo pipefail
+          RUN_ID="${{ steps.locate.outputs.run_id }}"
+          DEADLINE=$(( $(date -u +%s) + 1800 ))
+
+          while true; do
+            if [ "$(date -u +%s)" -ge "$DEADLINE" ]; then
+              RUN_URL="https://github.com/helix-tools/e2e/actions/runs/${RUN_ID}"
+              echo "::error::Timed out after 30 minutes waiting for helix-tools/e2e run ${RUN_ID} to conclude. ${RUN_URL}"
+              {
+                echo "## E2E Gate"
+                echo "✗ FAILED — timed out waiting on [e2e run ${RUN_ID}](${RUN_URL})"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+
+            # The `if ! STATUS_JSON=$(...); then` form is deliberate: a
+            # command substitution inside an `if` condition is exempt from
+            # this step's inherited `set -e`, so a timeout(1) exit (124) or
+            # any other non-zero exit lands here and retries, instead of
+            # killing the job outright.
+            if ! STATUS_JSON=$(timeout 15 gh run view "$RUN_ID" -R helix-tools/e2e --json status,conclusion,createdAt 2>/dev/null); then
+              # Transient gh/API hiccup, or the call stalled past its own
+              # timeout -- retry rather than fail the job on a blip, and
+              # never let a single hung call eat the whole poll budget.
+              sleep 20
+              continue
+            fi
+
+            STATUS=$(echo "$STATUS_JSON" | jq -r '.status')
+            if [ "$STATUS" != "completed" ]; then
+              sleep 20
+              continue
+            fi
+
+            CONCLUSION=$(echo "$STATUS_JSON" | jq -r '.conclusion')
+            CREATED_AT=$(echo "$STATUS_JSON" | jq -r '.createdAt')
+
+            if [ "$CONCLUSION" == "cancelled" ]; then
+              echo "Run ${RUN_ID} was cancelled (superseded by a newer trigger in the e2e-prod concurrency group) -- following the chain, still matching '${TITLE_MARKER}'."
+
+              # `|| NEXT_RUN_ID="__LOOKUP_FAILED__"` distinguishes a transient
+              # call failure (timeout 124, gh/API hiccup -- retry the lookup)
+              # from a call that succeeded but found no successor (a real
+              # "chain ends here" -- fail). Without the guard, a stalled call
+              # would trip this step's inherited `set -e` on this bare
+              # assignment and kill the job outright instead of retrying;
+              # collapsing it straight into the empty-string branch below
+              # would instead misreport a transient hiccup as "no successor
+              # run could be found" and fail the job for the wrong reason.
+              NEXT_RUN_ID=$(timeout 20 gh run list -R helix-tools/e2e --workflow e2e.yml -L 30 \
+                --json databaseId,displayTitle,createdAt \
+                --jq "[.[] | select(.createdAt > \"${CREATED_AT}\") | select(.displayTitle == \"${TITLE_MARKER}\")] | sort_by(.createdAt) | .[0].databaseId // empty" 2>/dev/null) || NEXT_RUN_ID="__LOOKUP_FAILED__"
+
+              if [ "$NEXT_RUN_ID" == "__LOOKUP_FAILED__" ]; then
+                echo "Transient failure looking up the successor run for '${TITLE_MARKER}' -- retrying."
+                sleep 20
+                continue
+              fi
+
+              if [ -z "$NEXT_RUN_ID" ]; then
+                RUN_URL="https://github.com/helix-tools/e2e/actions/runs/${RUN_ID}"
+                echo "::error::helix-tools/e2e run ${RUN_ID} (matching '${TITLE_MARKER}') was cancelled/superseded and no successor run carrying the same sha could be found -- this commit's e2e run never completed. ${RUN_URL}"
+                {
+                  echo "## E2E Gate"
+                  echo "✗ FAILED — [e2e run ${RUN_ID}](${RUN_URL}) matching \`${TITLE_MARKER}\` was superseded with no successor to follow"
+                } >> "$GITHUB_STEP_SUMMARY"
+                exit 1
+              fi
+
+              RUN_ID="$NEXT_RUN_ID"
+              continue
+            fi
+
+            break
+          done
+
+          RUN_URL="https://github.com/helix-tools/e2e/actions/runs/${RUN_ID}"
+
+          if [ "$CONCLUSION" != "success" ]; then
+            echo "::error::helix-tools/e2e run ${RUN_ID} concluded with '${CONCLUSION}', not success. ${RUN_URL}"
+            {
+              echo "## E2E Gate"
+              echo "✗ FAILED — [e2e run ${RUN_ID}](${RUN_URL}) concluded: ${CONCLUSION}"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          echo "✓ helix-tools/e2e run ${RUN_ID} succeeded"
+          {
+            echo "## E2E Gate"
+            echo "✓ [e2e run ${RUN_ID}](${RUN_URL}) succeeded"
+          } >> "$GITHUB_STEP_SUMMARY"
