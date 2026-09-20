@@ -403,17 +403,25 @@ func TestSubscription_DatasetInfoContract(t *testing.T) {
 // always-on gate, and this compares it against the real file when given one.
 const datasetInfoSchemaEnv = "HELIX_SUBSCRIPTION_SCHEMA"
 
+// datasetInfoSchemasRequiredEnv is set to "1" on CI, where a missing schema
+// path is a failure rather than a skip, so the comparison cannot silently stop
+// running if the schemas checkout is removed from the workflow.
+const datasetInfoSchemasRequiredEnv = "HELIX_SCHEMAS_REQUIRED"
+
 // TestSubscription_DatasetInfoMatchesSchemaFile is the category-6 contract
 // test: the reflected DatasetInfo keys must equal
 // subscription.schema.json#properties.dataset_info.properties, dataset_info
 // must be optional on Subscription, and no key inside it may be required.
-// When datasetInfoSchemaEnv is unset it logs that it did not run the
-// comparison; when set to an unreadable or dataset_info-less file it FAILS.
+// When datasetInfoSchemaEnv is unset it SKIPS visibly (or FAILS when
+// datasetInfoSchemasRequiredEnv is "1"); when set to an unreadable or
+// dataset_info-less file it FAILS.
 func TestSubscription_DatasetInfoMatchesSchemaFile(t *testing.T) {
 	path := os.Getenv(datasetInfoSchemaEnv)
 	if path == "" {
-		t.Logf("%s not set: schema-file comparison NOT run (in-repo pinned key set only)", datasetInfoSchemaEnv)
-		return
+		if os.Getenv(datasetInfoSchemasRequiredEnv) == "1" {
+			t.Fatalf("%s not set but %s=1: CI must compare against the real schema file", datasetInfoSchemaEnv, datasetInfoSchemasRequiredEnv)
+		}
+		t.Skipf("%s not set: schema-file comparison not run (in-repo pinned key set only)", datasetInfoSchemaEnv)
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
