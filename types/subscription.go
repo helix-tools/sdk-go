@@ -41,6 +41,19 @@ type ConsumerInfo struct {
 	Email       string `json:"email,omitempty"`
 }
 
+// DatasetInfo is the server-side enrichment of the dataset a subscription
+// points at (subscription.dataset_info). Populated by the API on read paths
+// (e.g. GET /v1/subscriptions) so a consumer can show when the dataset was
+// last uploaded and how large it is without an N+1 fetch per dataset_id.
+// Every key is optional; the object is exactly these five keys.
+type DatasetInfo struct {
+	Name        string `json:"name,omitempty"`
+	LastUpdated string `json:"last_updated,omitempty"`
+	UpdatedAt   string `json:"updated_at,omitempty"`
+	RecordCount int64  `json:"record_count,omitempty"`
+	SizeBytes   int64  `json:"size_bytes,omitempty"`
+}
+
 // Subscription represents an active subscription to a dataset or producer.
 type Subscription struct {
 	ID                 string  `json:"_id"`
@@ -56,8 +69,12 @@ type Subscription struct {
 	// ConsumerInfo is optional server-side enrichment; absent unless the API
 	// populated it on this read path.
 	ConsumerInfo *ConsumerInfo `json:"consumer_info,omitempty"`
-	CreatedAt    string        `json:"created_at"`
-	UpdatedAt    string        `json:"updated_at"`
+	// DatasetInfo is optional server-side enrichment of the subscribed
+	// dataset; absent unless the API populated it on this read path, and nil
+	// when dataset_id is null (an all-datasets subscription) or unresolved.
+	DatasetInfo *DatasetInfo `json:"dataset_info,omitempty"`
+	CreatedAt   string       `json:"created_at"`
+	UpdatedAt   string       `json:"updated_at"`
 	// Billing is the marketplace billing (payment) state (schema PR #18).
 	// Optional: free/legacy subscriptions omit it or carry billing_status
 	// "free". Distinct from Status (the ACCESS state). Tolerate absence (nil).

@@ -20,6 +20,22 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
+    # The contract test in types/ compares Subscription.DatasetInfo against the
+    # real subscription schema. HELIX_SCHEMAS_REQUIRED=1 makes a missing schema a
+    # FAILURE here (locally, the test skips visibly when the path is unset).
+    - name: Checkout sdk-schemas
+      uses: actions/checkout@v4
+      with:
+        repository: helix-tools/sdk-schemas
+        ref: v1.7.0
+        path: schemas
+        token: ${{ secrets.GH_PAT }}
+
+    - name: Point tests at the schemas checkout
+      run: |
+        echo "HELIX_SUBSCRIPTION_SCHEMA=${GITHUB_WORKSPACE}/schemas/subscription.schema.json" >> "$GITHUB_ENV"
+        echo "HELIX_SCHEMAS_REQUIRED=1" >> "$GITHUB_ENV"
+
     - name: Setup Go
       uses: actions/setup-go@v4
       with:
@@ -38,6 +54,9 @@ jobs:
 
     - name: Build
       run: go build ./...
+
+    - name: Test
+      run: go test -short -race ./...
 
   create-release:
     name: Create GitHub Release
