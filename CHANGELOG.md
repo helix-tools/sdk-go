@@ -3,6 +3,19 @@
 ## Unreleased
 
 ### Added
+- **`types.DatasetInfo` and `Subscription.DatasetInfo` (additive, minor).**
+  `GET /v1/subscriptions` can now return an optional `dataset_info` object
+  describing the dataset a subscription points at, so a consumer can show
+  when the dataset was last uploaded and how large it is without a separate
+  lookup per subscription. `DatasetInfo` carries exactly five optional
+  fields — `Name`, `LastUpdated`, `UpdatedAt` (RFC 3339 strings),
+  `RecordCount` and `SizeBytes` (`int64`) — and `Subscription.DatasetInfo`
+  is a `*DatasetInfo` that is `nil` when the object is absent or `null`
+  (for example an all-datasets subscription). Existing code is unaffected.
+  `RecordCount` and `SizeBytes` are integers on the wire; a fractional or
+  string value is reported by `json.Unmarshal` as a `*json.UnmarshalTypeError`
+  naming the field rather than decoding to a wrong count. The five-key set
+  is pinned by a contract test against the shared subscription schema.
 - **`types.FreeDatasetGrants` helper + invite union parity docs.**
   `types.FreeDatasetGrants(ids ...string) []InviteConsumerDatasetGrant`
   converts a plain dataset-id list into one free-tier grant per id, so a Go
