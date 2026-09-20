@@ -13,3 +13,5 @@ rename a key. Lane F2 adds SIBLING fields next to `dataset_info`, never keys ins
 - types/subscription_test.go
 - CHANGELOG.md
 - PLAN.md
+- .github/workflows/go.yml
+- consumer/consumer_dataset_info_test.go
