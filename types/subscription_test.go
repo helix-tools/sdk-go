@@ -829,7 +829,8 @@ func TestSubscription_UsageCountersMatchSchemaFile(t *testing.T) {
 			t.Fatalf("Subscription has no field %s for schema key %s", fieldName, key)
 		}
 		wantType := schemaTypeForGoField(t, fieldName, field.Type)
-		if !schemaTypeIncludes(prop["type"], wantType) {
+		gotType, ok := prop["type"].(string)
+		if !ok || gotType != wantType {
 			t.Errorf("schema %s.type = %v, want %s (reflected from Subscription.%s %v)", key, prop["type"], wantType, fieldName, field.Type)
 		}
 	}
