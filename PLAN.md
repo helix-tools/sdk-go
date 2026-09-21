@@ -53,5 +53,9 @@ it can never join `SignedHeaders` regardless of header-set order relative to sig
 - `producer/producer_useragent_test.go` (new)
 - `agent/client.go`
 - `agent/client_test.go` (one prefix assertion updated to match the new format)
+- `credentials/broker.go` (STS mint POST now sets `User-Agent` before signing)
+- `credentials/broker_useragent_test.go` (new — mirrors
+  `consumer_useragent_test.go`'s positive + not-in-SignedHeaders pair for
+  the mint request)
 - `CHANGELOG.md`
 - `PLAN.md`
