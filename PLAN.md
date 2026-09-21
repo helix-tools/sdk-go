@@ -1,21 +1,27 @@
-# PLAN — additive usage-counter fields on `types.Subscription` (ClickUp 86e3bcy33)
+# PLAN — strict schema type check for dataset_info counters (ClickUp 86e3c1uy2)
 
-Lane: F2 · sdk-go. Adds the five optional subscription usage counters, following the
-`dataset_info` precedent (commit `38202db`) exactly: pointer fields for absent-vs-zero
-distinction, a reflect-based Go-side contract test, and a schema-file contract test against
-the shared `subscription.schema.json` (pinned at commit `6f88b95` in the sdk-schemas repo).
-Base `origin/main` @ `38202db`.
+Lane: fix/dataset-info-strict-schema-type · sdk-go. Test-only change. Base `origin/main` @
+`54c8027`.
+
+## Problem
+`TestSubscription_DatasetInfoMatchesSchemaFile` (types/subscription_test.go) checked
+`dataset_info.record_count`/`size_bytes` schema types via `schemaTypeIncludes`, which
+returns true for a union type like `["integer","number"]`. The sibling usage-counter
+contract test in the same file already compares `type` with strict string equality
+(`prop["type"].(string) == wantType`, added on the F2 branch, commit `013e7df`). The
+`dataset_info` check should use the same strict pattern so a schema drifted to a union
+type fails the test instead of silently passing.
 
 ## Contract
-Five TOP-LEVEL optional `Subscription` fields — siblings of `dataset_info`, `billing`,
-`created_at` — never nested inside a new object: `access_count`, `accesses_this_month`,
-`monthly_access_cap`, `remaining_accesses` (integer, minimum -1; -1 = unlimited),
-`last_accessed_at` (RFC 3339 string, omitted when never downloaded). Never add or rename a
-key without the schema changing first.
+`subscription.schema.json` (sdk-schemas v1.9.0, commit `68ef733`) declares
+`dataset_info.properties.record_count.type` and `.size_bytes.type` as the plain string
+`"integer"` — confirmed by reading the file before making this change.
+
+## Change
+- Replace the `schemaTypeIncludes(...)` call with the strict `gotType, ok :=
+  di.Properties[k]["type"].(string); !ok || gotType != "integer"` pattern.
+- Delete the now-unused `schemaTypeIncludes` helper (no other callers in the repo).
 
 ## Files
-- types/subscription.go
 - types/subscription_test.go
-- .github/workflows/go.yml
-- CHANGELOG.md
 - PLAN.md
