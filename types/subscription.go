@@ -75,22 +75,29 @@ type Subscription struct {
 	DatasetInfo *DatasetInfo `json:"dataset_info,omitempty"`
 	// AccessCount, AccessesThisMonth, MonthlyAccessCap, RemainingAccesses and
 	// LastAccessedAt are the usage-counter enrichment on a subscription,
-	// derived on read from the download ledger and never incremented by this
-	// SDK. All five are optional: absent on a response served by an API build
+	// populated by the API on read and never incremented by this SDK. All
+	// five are optional: absent on a response served by an API build
 	// predating usage counters. Pointers so an explicit 0 (a real "no
 	// downloads yet" or "no accesses remaining") is distinct from absent —
 	// never a fabricated 0.
+	// AccessCount is the total downloads recorded for this subscription.
 	AccessCount *int64 `json:"access_count,omitempty"`
-	// AccessesThisMonth resets when the UTC calendar month rolls over.
+	// AccessesThisMonth is downloads so far in the current UTC calendar
+	// month; it resets when the month rolls over.
 	AccessesThisMonth *int64 `json:"accesses_this_month,omitempty"`
 	// MonthlyAccessCap is the maximum downloads allowed per UTC calendar
 	// month for this subscription.
 	MonthlyAccessCap *int64 `json:"monthly_access_cap,omitempty"`
-	// RemainingAccesses is downloads remaining before MonthlyAccessCap is
-	// reached. -1 = unlimited (no monthly cap).
+	// RemainingAccesses is downloads remaining this month before
+	// MonthlyAccessCap is reached. -1 = unlimited (no monthly cap).
 	RemainingAccesses *int64 `json:"remaining_accesses,omitempty"`
-	// LastAccessedAt is an RFC 3339 timestamp, omitted (nil) when this
-	// consumer has never downloaded from this subscription.
+	// LastAccessedAt is when the consumer last downloaded from this
+	// subscription, RFC 3339, absent if the consumer has never downloaded.
+	// Carried as *string (not *time.Time) so it round-trips any RFC 3339
+	// value the API emits byte-for-byte and never fails decoding on a
+	// nonconforming timestamp — the same pattern this SDK already uses for
+	// its other *_at timestamp fields (e.g. ApprovedAt/RejectedAt in
+	// subscription_request.go).
 	LastAccessedAt *string `json:"last_accessed_at,omitempty"`
 	CreatedAt      string  `json:"created_at"`
 	UpdatedAt      string  `json:"updated_at"`
