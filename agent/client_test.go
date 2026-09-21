@@ -106,8 +106,8 @@ func TestMe_Success(t *testing.T) {
 	if ts.lastAuth != "Bearer jwt-token" {
 		t.Errorf("auth=%q, want 'Bearer jwt-token'", ts.lastAuth)
 	}
-	if !strings.HasPrefix(ts.lastUA, "helix-connect-sdk-go") {
-		t.Errorf("user-agent=%q, want prefix 'helix-connect-sdk-go'", ts.lastUA)
+	if !strings.HasPrefix(ts.lastUA, "helix-sdk-go/") {
+		t.Errorf("user-agent=%q, want prefix 'helix-sdk-go/'", ts.lastUA)
 	}
 }
 

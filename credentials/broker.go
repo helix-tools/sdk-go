@@ -42,6 +42,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/helix-tools/sdk-go/v2/internal/useragent"
 	"github.com/helix-tools/sdk-go/v2/types"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -511,6 +512,11 @@ func (p *Provider) buildRequest(ctx context.Context) (*http.Request, error) {
 	if err != nil {
 		return nil, fmt.Errorf("credentials: failed to build mint request: %w", err)
 	}
+
+	// SigV4 ignores User-Agent when building its signed-headers set (see
+	// aws-sdk-go-v2's signer/internal/v4.IgnoredHeaders), so setting it
+	// before signing is safe — mirrors consumer.makeAPIRequest.
+	req.Header.Set("User-Agent", useragent.String())
 
 	bootstrap := awscreds.NewStaticCredentialsProvider(p.cfg.AWSAccessKeyID, p.cfg.AWSSecretAccessKey, "")
 	bootstrapCreds, err := bootstrap.Retrieve(ctx)

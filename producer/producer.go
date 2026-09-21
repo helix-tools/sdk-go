@@ -28,6 +28,7 @@ import (
 	"time"
 
 	stscreds "github.com/helix-tools/sdk-go/v2/credentials"
+	"github.com/helix-tools/sdk-go/v2/internal/useragent"
 	"github.com/helix-tools/sdk-go/v2/types"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -669,6 +670,11 @@ func (p *Producer) makeAPIRequest(ctx context.Context, method, path string, body
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	// SigV4 ignores User-Agent when building its signed-headers set (see
+	// aws-sdk-go-v2's signer/internal/v4.IgnoredHeaders), so setting it
+	// before signing is safe — TestMakeAPIRequest_UserAgentNotInSignedHeaders
+	// pins that it never leaks into SignedHeaders regardless.
+	req.Header.Set("User-Agent", useragent.String())
 
 	// Sign request with AWS SigV4.
 	creds, err := p.awsConfig.Credentials.Retrieve(ctx)
