@@ -495,3 +495,377 @@ func schemaTypeIncludes(typ any, want string) bool {
 	}
 	return false
 }
+
+// usageCounterContractKeys is the ONE cross-SDK contract for the five
+// optional subscription usage-counter fields. Unlike dataset_info these are
+// TOP-LEVEL Subscription keys (siblings of dataset_info/billing/created_at
+// in the schema), never nested inside an object. Never add or rename a key
+// here without the schema changing first.
+var usageCounterContractKeys = []string{
+	"access_count", "accesses_this_month", "last_accessed_at",
+	"monthly_access_cap", "remaining_accesses",
+}
+
+// subscriptionJSONWithFields builds a minimal valid Subscription wire body,
+// splicing raw top-level "key": value pairs in before the closing brace when
+// non-empty (unlike subscriptionJSON, which only ever appends dataset_info).
+func subscriptionJSONWithFields(extra string) string {
+	raw := `{
+		"_id": "sub-1",
+		"consumer_id": "cons-1",
+		"dataset_id": "ds-1",
+		"producer_id": "prod-1",
+		"tier": "free",
+		"status": "active",
+		"created_at": "2026-01-01T00:00:00Z",
+		"updated_at": "2026-01-01T00:00:00Z"`
+	if extra != "" {
+		raw += ", " + extra
+	}
+	return raw + "}"
+}
+
+const fullUsageCountersJSON = `"access_count": 42, "accesses_this_month": 7, "monthly_access_cap": 100, "remaining_accesses": 93, "last_accessed_at": "2026-09-20T00:01:43Z"`
+
+// TestSubscription_UsageCountersRoundTrip pins the four ledger-derived usage
+// counters plus last_accessed_at (subscription.schema.json) to their typed
+// Subscription fields. Without this, a consumer dashboard reading GET
+// /v1/subscriptions cannot show remaining downloads or the monthly cap.
+func TestSubscription_UsageCountersRoundTrip(t *testing.T) {
+	var sub Subscription
+	if err := json.Unmarshal([]byte(subscriptionJSONWithFields(fullUsageCountersJSON)), &sub); err != nil {
+		t.Fatalf("unmarshal Subscription: %v", err)
+	}
+	if sub.AccessCount == nil || *sub.AccessCount != 42 {
+		t.Errorf("AccessCount = %v, want pointer to 42", sub.AccessCount)
+	}
+	if sub.AccessesThisMonth == nil || *sub.AccessesThisMonth != 7 {
+		t.Errorf("AccessesThisMonth = %v, want pointer to 7", sub.AccessesThisMonth)
+	}
+	if sub.MonthlyAccessCap == nil || *sub.MonthlyAccessCap != 100 {
+		t.Errorf("MonthlyAccessCap = %v, want pointer to 100", sub.MonthlyAccessCap)
+	}
+	if sub.RemainingAccesses == nil || *sub.RemainingAccesses != 93 {
+		t.Errorf("RemainingAccesses = %v, want pointer to 93", sub.RemainingAccesses)
+	}
+	if sub.LastAccessedAt == nil || *sub.LastAccessedAt != "2026-09-20T00:01:43Z" {
+		t.Errorf("LastAccessedAt = %v, want pointer to %q", sub.LastAccessedAt, "2026-09-20T00:01:43Z")
+	}
+
+	// Re-encode and compare against the input on the wire: every one of the
+	// five keys must survive decode -> encode under its exact schema name.
+	out, err := json.Marshal(sub)
+	if err != nil {
+		t.Fatalf("marshal Subscription: %v", err)
+	}
+	got := wireMap(t, out)
+	want := map[string]any{
+		"access_count":        float64(42),
+		"accesses_this_month": float64(7),
+		"monthly_access_cap":  float64(100),
+		"remaining_accesses":  float64(93),
+		"last_accessed_at":    "2026-09-20T00:01:43Z",
+	}
+	for k, w := range want {
+		if !reflect.DeepEqual(got[k], w) {
+			t.Errorf("re-encoded %s = %v, want %v", k, got[k], w)
+		}
+	}
+}
+
+// TestSubscription_UsageCountersAbsentIsNil proves a subscription read on a
+// path that predates usage counters (an old API build mid rolling-deploy)
+// decodes all five fields to nil pointers — never a crash, and never a
+// fabricated 0 that a UI would render as "0 downloads remaining" for a
+// subscription that has never been measured at all.
+func TestSubscription_UsageCountersAbsentIsNil(t *testing.T) {
+	var sub Subscription
+	if err := json.Unmarshal([]byte(subscriptionJSONWithFields("")), &sub); err != nil {
+		t.Fatalf("unmarshal Subscription: %v", err)
+	}
+	if sub.AccessCount != nil {
+		t.Errorf("AccessCount = %d, want nil", *sub.AccessCount)
+	}
+	if sub.AccessesThisMonth != nil {
+		t.Errorf("AccessesThisMonth = %d, want nil", *sub.AccessesThisMonth)
+	}
+	if sub.MonthlyAccessCap != nil {
+		t.Errorf("MonthlyAccessCap = %d, want nil", *sub.MonthlyAccessCap)
+	}
+	if sub.RemainingAccesses != nil {
+		t.Errorf("RemainingAccesses = %d, want nil", *sub.RemainingAccesses)
+	}
+	if sub.LastAccessedAt != nil {
+		t.Errorf("LastAccessedAt = %q, want nil", *sub.LastAccessedAt)
+	}
+	if sub.ID != "sub-1" {
+		t.Errorf("ID = %q, want %q (absent counters must not disturb siblings)", sub.ID, "sub-1")
+	}
+
+	out, err := json.Marshal(sub)
+	if err != nil {
+		t.Fatalf("marshal Subscription: %v", err)
+	}
+	got := wireMap(t, out)
+	for _, key := range usageCounterContractKeys {
+		if _, present := got[key]; present {
+			t.Errorf("nil %s re-encoded a wire key: %s", key, out)
+		}
+	}
+}
+
+// TestSubscription_UsageCountersExplicitZeroIsNotNil is the self-attack
+// dual of AbsentIsNil: an explicit 0 (a real "no downloads yet" or "no
+// monthly cap configured") must decode to a non-nil pointer to 0 and survive
+// re-encoding, never collapse to the same nil a missing key produces.
+func TestSubscription_UsageCountersExplicitZeroIsNotNil(t *testing.T) {
+	raw := subscriptionJSONWithFields(`"access_count": 0, "accesses_this_month": 0, "monthly_access_cap": 0, "remaining_accesses": 0`)
+	var sub Subscription
+	if err := json.Unmarshal([]byte(raw), &sub); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if sub.AccessCount == nil || *sub.AccessCount != 0 {
+		t.Errorf("AccessCount = %v, want non-nil pointer to 0", sub.AccessCount)
+	}
+	if sub.AccessesThisMonth == nil || *sub.AccessesThisMonth != 0 {
+		t.Errorf("AccessesThisMonth = %v, want non-nil pointer to 0", sub.AccessesThisMonth)
+	}
+	if sub.MonthlyAccessCap == nil || *sub.MonthlyAccessCap != 0 {
+		t.Errorf("MonthlyAccessCap = %v, want non-nil pointer to 0", sub.MonthlyAccessCap)
+	}
+	if sub.RemainingAccesses == nil || *sub.RemainingAccesses != 0 {
+		t.Errorf("RemainingAccesses = %v, want non-nil pointer to 0", sub.RemainingAccesses)
+	}
+
+	out, err := json.Marshal(sub)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := wireMap(t, out)
+	for _, key := range []string{"access_count", "accesses_this_month", "monthly_access_cap", "remaining_accesses"} {
+		v, present := got[key]
+		if !present {
+			t.Errorf("explicit 0 for %s dropped on re-encode, want the key present with value 0", key)
+			continue
+		}
+		if v != float64(0) {
+			t.Errorf("%s = %v, want 0", key, v)
+		}
+	}
+}
+
+// TestSubscription_UsageCountersRemainingAccessesUnlimited pins the -1
+// unlimited sentinel (subscription.schema.json remaining_accesses.minimum =
+// -1): a subscription with no monthly cap must decode -1, not error as an
+// out-of-range value and not clamp to 0.
+func TestSubscription_UsageCountersRemainingAccessesUnlimited(t *testing.T) {
+	raw := subscriptionJSONWithFields(`"remaining_accesses": -1`)
+	var sub Subscription
+	if err := json.Unmarshal([]byte(raw), &sub); err != nil {
+		t.Fatalf("unmarshal remaining_accesses:-1: %v", err)
+	}
+	if sub.RemainingAccesses == nil || *sub.RemainingAccesses != -1 {
+		t.Errorf("RemainingAccesses = %v, want pointer to -1 (unlimited sentinel)", sub.RemainingAccesses)
+	}
+	out, err := json.Marshal(sub)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if got := wireMap(t, out)["remaining_accesses"]; got != float64(-1) {
+		t.Errorf("re-encoded remaining_accesses = %v, want -1", got)
+	}
+}
+
+// TestSubscription_UsageCountersFractionalValueErrors is the bad-path test:
+// the schema declares each counter an integer; a fractional value must
+// surface as a *json.UnmarshalTypeError naming the field, never silently
+// truncate to a wrong count.
+func TestSubscription_UsageCountersFractionalValueErrors(t *testing.T) {
+	for _, field := range []string{"access_count", "accesses_this_month", "monthly_access_cap", "remaining_accesses"} {
+		field := field
+		t.Run(field, func(t *testing.T) {
+			raw := subscriptionJSONWithFields(`"` + field + `": 1.5`)
+			var sub Subscription
+			err := json.Unmarshal([]byte(raw), &sub)
+			var typeErr *json.UnmarshalTypeError
+			if !errors.As(err, &typeErr) {
+				t.Fatalf("unmarshal %s=1.5: err = %v, want *json.UnmarshalTypeError", field, err)
+			}
+			if !strings.HasSuffix(typeErr.Field, field) {
+				t.Errorf("error names field %q, want it to end in %s", typeErr.Field, field)
+			}
+		})
+	}
+}
+
+// TestSubscription_UsageCountersContract pins the SDK type to the five-key
+// usage-counter contract from the Go side: Subscription exposes each of the
+// four counters as *int64 and last_accessed_at as *string, each tagged
+// exactly <key>,omitempty (all optional), as TOP-LEVEL siblings of
+// DatasetInfo — never fields nested inside a new struct.
+func TestSubscription_UsageCountersContract(t *testing.T) {
+	typ := reflect.TypeOf(Subscription{})
+	wantTag := map[string]string{
+		"AccessCount":       "access_count,omitempty",
+		"AccessesThisMonth": "accesses_this_month,omitempty",
+		"MonthlyAccessCap":  "monthly_access_cap,omitempty",
+		"RemainingAccesses": "remaining_accesses,omitempty",
+		"LastAccessedAt":    "last_accessed_at,omitempty",
+	}
+	wantType := map[string]reflect.Type{
+		"AccessCount":       reflect.TypeOf((*int64)(nil)),
+		"AccessesThisMonth": reflect.TypeOf((*int64)(nil)),
+		"MonthlyAccessCap":  reflect.TypeOf((*int64)(nil)),
+		"RemainingAccesses": reflect.TypeOf((*int64)(nil)),
+		"LastAccessedAt":    reflect.TypeOf((*string)(nil)),
+	}
+	var gotKeys []string
+	for fieldName, tag := range wantTag {
+		field, found := typ.FieldByName(fieldName)
+		if !found {
+			t.Fatalf("Subscription has no field %s", fieldName)
+		}
+		if field.Tag.Get("json") != tag {
+			t.Errorf("Subscription.%s json tag = %q, want %q", fieldName, field.Tag.Get("json"), tag)
+		}
+		if field.Type != wantType[fieldName] {
+			t.Errorf("Subscription.%s type = %v, want %v", fieldName, field.Type, wantType[fieldName])
+		}
+		name, _, _ := strings.Cut(tag, ",")
+		gotKeys = append(gotKeys, name)
+	}
+	sort.Strings(gotKeys)
+	if !reflect.DeepEqual(gotKeys, usageCounterContractKeys) {
+		t.Errorf("usage-counter json keys = %v, want exactly %v", gotKeys, usageCounterContractKeys)
+	}
+}
+
+// usageCounterFieldByKey maps each wire key to the exported Subscription
+// field name that carries it, so the contract test below can look up the
+// field's Go type and compare it against the schema's declared type instead
+// of hard-coding the expected schema type per key.
+var usageCounterFieldByKey = map[string]string{
+	"access_count":        "AccessCount",
+	"accesses_this_month": "AccessesThisMonth",
+	"monthly_access_cap":  "MonthlyAccessCap",
+	"remaining_accesses":  "RemainingAccesses",
+	"last_accessed_at":    "LastAccessedAt",
+}
+
+// schemaTypeForGoField maps a struct field's Go type to the JSON Schema
+// "type" it must declare. Every usage-counter field is a pointer (see
+// TestSubscription_UsageCountersContract); a non-pointer field, or a pointer
+// to a Go kind this function doesn't recognize (e.g. a future *bool or
+// *float64 field added without updating this mapping), fails the test
+// loudly rather than silently comparing against an empty or wrong want type.
+func schemaTypeForGoField(t *testing.T, fieldName string, typ reflect.Type) string {
+	t.Helper()
+	if typ.Kind() != reflect.Ptr {
+		t.Fatalf("%s: Go type %v is not a pointer; schemaTypeForGoField only maps pointer fields", fieldName, typ)
+	}
+	switch typ.Elem().Kind() {
+	case reflect.Int64:
+		return "integer"
+	case reflect.String:
+		return "string"
+	default:
+		t.Fatalf("%s: no schema-type mapping for Go kind %v (add one to schemaTypeForGoField)", fieldName, typ.Elem().Kind())
+		return ""
+	}
+}
+
+// TestSubscription_UsageCountersMatchSchemaFile is the category-6 contract
+// test for the usage counters: same mechanism as
+// TestSubscription_DatasetInfoMatchesSchemaFile (datasetInfoSchemaEnv /
+// datasetInfoSchemasRequiredEnv — skip visibly when unset locally, fail when
+// CI requires it), but checking TOP-LEVEL schema properties since these five
+// keys are siblings of dataset_info, never nested inside it. Each key's
+// schema "type" is compared against the REFLECTED Go type of its
+// Subscription field (not a hard-coded expectation), so a future drift
+// between the two (e.g. a field accidentally retyped to *float64) is caught
+// here instead of only surfacing as a silent decode mismatch in production.
+func TestSubscription_UsageCountersMatchSchemaFile(t *testing.T) {
+	path := os.Getenv(datasetInfoSchemaEnv)
+	if path == "" {
+		if os.Getenv(datasetInfoSchemasRequiredEnv) == "1" {
+			t.Fatalf("%s not set but %s=1: CI must compare against the real schema file", datasetInfoSchemaEnv, datasetInfoSchemasRequiredEnv)
+		}
+		t.Skipf("%s not set: schema-file comparison not run (in-repo pinned key set only)", datasetInfoSchemaEnv)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s=%s: %v", datasetInfoSchemaEnv, path, err)
+	}
+	var schema struct {
+		Required   []string                  `json:"required"`
+		Properties map[string]map[string]any `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	for _, r := range schema.Required {
+		for _, key := range usageCounterContractKeys {
+			if r == key {
+				t.Errorf("schema lists %s as required; it is optional", key)
+			}
+		}
+	}
+	subType := reflect.TypeOf(Subscription{})
+	var schemaKeys []string
+	for _, key := range usageCounterContractKeys {
+		prop, ok := schema.Properties[key]
+		if !ok {
+			t.Errorf("%s has no properties.%s", path, key)
+			continue
+		}
+		schemaKeys = append(schemaKeys, key)
+
+		fieldName, ok := usageCounterFieldByKey[key]
+		if !ok {
+			t.Fatalf("no Subscription field mapped for schema key %s (update usageCounterFieldByKey)", key)
+		}
+		field, found := subType.FieldByName(fieldName)
+		if !found {
+			t.Fatalf("Subscription has no field %s for schema key %s", fieldName, key)
+		}
+		wantType := schemaTypeForGoField(t, fieldName, field.Type)
+		gotType, ok := prop["type"].(string)
+		if !ok || gotType != wantType {
+			t.Errorf("schema %s.type = %v, want %s (reflected from Subscription.%s %v)", key, prop["type"], wantType, fieldName, field.Type)
+		}
+	}
+	sort.Strings(schemaKeys)
+	if !reflect.DeepEqual(schemaKeys, usageCounterContractKeys) {
+		t.Errorf("schema usage-counter keys found = %v, want exactly %v", schemaKeys, usageCounterContractKeys)
+	}
+
+	// access_count, accesses_this_month and monthly_access_cap are counts:
+	// negative is never meaningful, so the schema's declared minimum must be
+	// exactly 0, not merely non-positive — a schema drifted to, say,
+	// minimum: -5 would silently admit a negative count this SDK would then
+	// decode without error.
+	for _, key := range []string{"access_count", "accesses_this_month", "monthly_access_cap"} {
+		min, ok := schema.Properties[key]["minimum"].(float64)
+		if !ok || min != 0 {
+			t.Errorf("schema %s.minimum = %v, want exactly 0", key, schema.Properties[key]["minimum"])
+		}
+	}
+
+	// remaining_accesses must admit the -1 unlimited sentinel: the schema's
+	// minimum must be <= -1. A schema pinned at minimum 0 would reject the
+	// sentinel this SDK accepts (see
+	// TestSubscription_UsageCountersRemainingAccessesUnlimited) and silently
+	// drift from the wire contract.
+	min, ok := schema.Properties["remaining_accesses"]["minimum"].(float64)
+	if !ok || min > -1 {
+		t.Errorf("schema remaining_accesses.minimum = %v, want <= -1 (must admit the unlimited sentinel)", schema.Properties["remaining_accesses"]["minimum"])
+	}
+
+	// last_accessed_at must be declared as an RFC 3339 date-time string on
+	// the wire, not a bare string: format is what pins the field's contract
+	// exactly, since Go decodes any JSON string into *string regardless.
+	format, ok := schema.Properties["last_accessed_at"]["format"].(string)
+	if !ok || format != "date-time" {
+		t.Errorf("schema last_accessed_at.format = %v, want %q", schema.Properties["last_accessed_at"]["format"], "date-time")
+	}
+}

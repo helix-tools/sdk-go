@@ -3,6 +3,22 @@
 ## Unreleased
 
 ### Added
+- **`Subscription` usage-counter fields (additive, minor).**
+  `GET /v1/subscriptions` can now return five optional usage-counter fields
+  alongside a subscription — `AccessCount`, `AccessesThisMonth`,
+  `MonthlyAccessCap`, `RemainingAccesses` (all `*int64`) and
+  `LastAccessedAt` (`*string`, RFC 3339) — so a consumer can render
+  downloads-this-month and the remaining quota without a separate lookup.
+  All five are top-level siblings of `DatasetInfo`, never nested inside it.
+  Pointers so an explicit `0` (no downloads yet, or no quota remaining) is
+  distinct from the field being absent; existing code that never reads them
+  is unaffected. `RemainingAccesses` accepts `-1` as the unlimited sentinel
+  (no monthly cap). `LastAccessedAt` is `nil` when the consumer has never
+  downloaded from this subscription. Each counter is an integer on the
+  wire; a fractional value is reported by `json.Unmarshal` as a
+  `*json.UnmarshalTypeError` naming the field rather than decoding to a
+  wrong count. The five-key set is pinned by a contract test against the
+  shared subscription schema.
 - **`types.DatasetInfo` and `Subscription.DatasetInfo` (additive, minor).**
   `GET /v1/subscriptions` can now return an optional `dataset_info` object
   describing the dataset a subscription points at, so a consumer can show
