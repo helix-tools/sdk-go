@@ -39,6 +39,7 @@ type capturedCall struct {
 	Method  string
 	Path    string
 	Payload map[string]any
+	Header  http.Header
 }
 
 // fakeAPI is a per-test httptest.Server that routes by URL pattern. The
@@ -122,6 +123,7 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 		Method:  r.Method,
 		Path:    r.URL.EscapedPath(),
 		Payload: payload,
+		Header:  r.Header.Clone(),
 	})
 	f.mu.Unlock()
 

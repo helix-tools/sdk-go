@@ -26,6 +26,7 @@ import (
 	"time"
 
 	stscreds "github.com/helix-tools/sdk-go/v2/credentials"
+	"github.com/helix-tools/sdk-go/v2/internal/useragent"
 	"github.com/helix-tools/sdk-go/v2/types"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -49,7 +50,7 @@ const emptyPayloadHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca49599
 // best-effort default for those dev-build cases; the wire-sent
 // sdk_version value for a normally-built consumer binary instead
 // reflects the actual resolved module version, which cannot drift.
-const SDKVersion = "2.8.1"
+const SDKVersion = "2.15.0"
 
 // SDKLanguage identifies this SDK's language in download outcome callbacks
 // (matches the dataset_download_event JSON Schema's sdk_language field).
@@ -793,6 +794,11 @@ func (c *Consumer) makeAPIRequest(ctx context.Context, method, path string, body
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	// SigV4 ignores User-Agent when building its signed-headers set (see
+	// aws-sdk-go-v2's signer/internal/v4.IgnoredHeaders), so setting it
+	// before signing is safe — TestMakeAPIRequest_UserAgentNotInSignedHeaders
+	// pins that it never leaks into SignedHeaders regardless.
+	req.Header.Set("User-Agent", useragent.String())
 
 	// Sign request with AWS SigV4
 	creds, err := c.awsConfig.Credentials.Retrieve(ctx)
