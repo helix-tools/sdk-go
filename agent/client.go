@@ -11,12 +11,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/helix-tools/sdk-go/v2/internal/useragent"
 )
 
-// userAgent is sent on every request so server-side logs can
-// attribute traffic to a specific SDK build. The version is
-// intentionally coarse — the server doesn't make decisions on it.
-const userAgent = "helix-connect-sdk-go/agent"
+// userAgent is sent on every request by default (see WithUserAgent to
+// override) so server-side logs and the helix-api request parser can
+// attribute traffic to a specific SDK build. Computed once — see
+// useragent.String().
+var userAgent = useragent.String()
 
 // defaultTimeout is the per-request HTTP timeout applied when the
 // caller doesn't supply one via WithHTTPClient. Chosen to be longer
@@ -55,7 +58,7 @@ func WithHTTPClient(hc *http.Client) Option {
 // WithUserAgent overrides the User-Agent header sent with each
 // request. Server logs attribute traffic via this header — callers
 // embedding the SDK in a named agent binary should set this to
-// something like "nova/1.4.2 (helix-connect-sdk-go)".
+// something like "nova/1.4.2 (helix-sdk-go)".
 func WithUserAgent(ua string) Option {
 	return func(c *Client) {
 		if strings.TrimSpace(ua) != "" {
