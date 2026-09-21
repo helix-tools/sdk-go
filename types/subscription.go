@@ -56,16 +56,16 @@ type DatasetInfo struct {
 
 // Subscription represents an active subscription to a dataset or producer.
 type Subscription struct {
-	ID                 string  `json:"_id"`
-	ConsumerID         string  `json:"consumer_id"`
-	CustomerID         string  `json:"customer_id,omitempty"` // Legacy field
-	DatasetID          *string `json:"dataset_id"`            // Required field, null for all-datasets subscription
-	DatasetName        string  `json:"dataset_name,omitempty"`
-	ProducerID         string  `json:"producer_id"`
-	RequestID          string  `json:"request_id,omitempty"`
-	Tier               string  `json:"tier"`   // SubscriptionTier — canonical write value is "free"
-	Status             string  `json:"status"` // SubscriptionStatus: "active", "paused", "cancelled", "expired"
-	SQSQueueURL        *string `json:"sqs_queue_url,omitempty"`
+	ID          string  `json:"_id"`
+	ConsumerID  string  `json:"consumer_id"`
+	CustomerID  string  `json:"customer_id,omitempty"` // Legacy field
+	DatasetID   *string `json:"dataset_id"`            // Required field, null for all-datasets subscription
+	DatasetName string  `json:"dataset_name,omitempty"`
+	ProducerID  string  `json:"producer_id"`
+	RequestID   string  `json:"request_id,omitempty"`
+	Tier        string  `json:"tier"`   // SubscriptionTier — canonical write value is "free"
+	Status      string  `json:"status"` // SubscriptionStatus: "active", "paused", "cancelled", "expired"
+	SQSQueueURL *string `json:"sqs_queue_url,omitempty"`
 	// ConsumerInfo is optional server-side enrichment; absent unless the API
 	// populated it on this read path.
 	ConsumerInfo *ConsumerInfo `json:"consumer_info,omitempty"`
@@ -73,8 +73,34 @@ type Subscription struct {
 	// dataset; absent unless the API populated it on this read path, and nil
 	// when dataset_id is null (an all-datasets subscription) or unresolved.
 	DatasetInfo *DatasetInfo `json:"dataset_info,omitempty"`
-	CreatedAt   string       `json:"created_at"`
-	UpdatedAt   string       `json:"updated_at"`
+	// AccessCount, AccessesThisMonth, MonthlyAccessCap, RemainingAccesses and
+	// LastAccessedAt are the usage-counter enrichment on a subscription,
+	// populated by the API on read and never incremented by this SDK. All
+	// five are optional: absent on a response served by an API build
+	// predating usage counters. Pointers so an explicit 0 (a real "no
+	// downloads yet" or "no accesses remaining") is distinct from absent —
+	// never a fabricated 0.
+	// AccessCount is the total downloads recorded for this subscription.
+	AccessCount *int64 `json:"access_count,omitempty"`
+	// AccessesThisMonth is downloads so far in the current UTC calendar
+	// month; it resets when the month rolls over.
+	AccessesThisMonth *int64 `json:"accesses_this_month,omitempty"`
+	// MonthlyAccessCap is the maximum downloads allowed per UTC calendar
+	// month for this subscription.
+	MonthlyAccessCap *int64 `json:"monthly_access_cap,omitempty"`
+	// RemainingAccesses is downloads remaining this month before
+	// MonthlyAccessCap is reached. -1 = unlimited (no monthly cap).
+	RemainingAccesses *int64 `json:"remaining_accesses,omitempty"`
+	// LastAccessedAt is when the consumer last downloaded from this
+	// subscription, RFC 3339, absent if the consumer has never downloaded.
+	// Carried as *string (not *time.Time) so it round-trips any RFC 3339
+	// value the API emits byte-for-byte and never fails decoding on a
+	// nonconforming timestamp — the same pattern this SDK already uses for
+	// its other *_at timestamp fields (e.g. ApprovedAt/RejectedAt in
+	// subscription_request.go).
+	LastAccessedAt *string `json:"last_accessed_at,omitempty"`
+	CreatedAt      string  `json:"created_at"`
+	UpdatedAt      string  `json:"updated_at"`
 	// Billing is the marketplace billing (payment) state (schema PR #18).
 	// Optional: free/legacy subscriptions omit it or carry billing_status
 	// "free". Distinct from Status (the ACCESS state). Tolerate absence (nil).
