@@ -8,11 +8,13 @@
   `User-Agent: helix-sdk-go/<version>`; no behaviour change. The header is
   set on every request `Consumer` and `Producer` sign and send to
   `APIEndpoint` (dataset CRUD, subscriptions, download-outcome callbacks,
-  ...) and on every `agent.Client` request, using the SDK's actual resolved
-  module version when available (falling back to a coarser default in dev
-  builds). It is intentionally excluded from the two calls this SDK does not
-  control the signature of — the presigned S3 download/upload — and is never
-  part of the SigV4 `SignedHeaders` set on the calls that do carry it.
+  ...), on every `agent.Client` request, and on the credential-broker mint
+  request (`credentials.Provider`'s STS session POST), using the SDK's
+  actual resolved module version when available (falling back to a coarser
+  default in dev builds). It is intentionally excluded from the two calls
+  this SDK does not control the signature of — the presigned S3
+  download/upload — and is never part of the SigV4 `SignedHeaders` set on
+  the calls that do carry it.
 - **`Subscription` usage-counter fields (additive, minor).**
   `GET /v1/subscriptions` can now return five optional usage-counter fields
   alongside a subscription — `AccessCount`, `AccessesThisMonth`,
