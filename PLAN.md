@@ -16,5 +16,6 @@ key without the schema changing first.
 ## Files
 - types/subscription.go
 - types/subscription_test.go
+- .github/workflows/go.yml
 - CHANGELOG.md
 - PLAN.md
