@@ -740,12 +740,50 @@ func TestSubscription_UsageCountersContract(t *testing.T) {
 	}
 }
 
+// usageCounterFieldByKey maps each wire key to the exported Subscription
+// field name that carries it, so the contract test below can look up the
+// field's Go type and compare it against the schema's declared type instead
+// of hard-coding the expected schema type per key.
+var usageCounterFieldByKey = map[string]string{
+	"access_count":        "AccessCount",
+	"accesses_this_month": "AccessesThisMonth",
+	"monthly_access_cap":  "MonthlyAccessCap",
+	"remaining_accesses":  "RemainingAccesses",
+	"last_accessed_at":    "LastAccessedAt",
+}
+
+// schemaTypeForGoField maps a struct field's Go type to the JSON Schema
+// "type" it must declare. Every usage-counter field is a pointer (see
+// TestSubscription_UsageCountersContract); a non-pointer field, or a pointer
+// to a Go kind this function doesn't recognize (e.g. a future *bool or
+// *float64 field added without updating this mapping), fails the test
+// loudly rather than silently comparing against an empty or wrong want type.
+func schemaTypeForGoField(t *testing.T, fieldName string, typ reflect.Type) string {
+	t.Helper()
+	if typ.Kind() != reflect.Ptr {
+		t.Fatalf("%s: Go type %v is not a pointer; schemaTypeForGoField only maps pointer fields", fieldName, typ)
+	}
+	switch typ.Elem().Kind() {
+	case reflect.Int64:
+		return "integer"
+	case reflect.String:
+		return "string"
+	default:
+		t.Fatalf("%s: no schema-type mapping for Go kind %v (add one to schemaTypeForGoField)", fieldName, typ.Elem().Kind())
+		return ""
+	}
+}
+
 // TestSubscription_UsageCountersMatchSchemaFile is the category-6 contract
 // test for the usage counters: same mechanism as
 // TestSubscription_DatasetInfoMatchesSchemaFile (datasetInfoSchemaEnv /
 // datasetInfoSchemasRequiredEnv — skip visibly when unset locally, fail when
 // CI requires it), but checking TOP-LEVEL schema properties since these five
-// keys are siblings of dataset_info, never nested inside it.
+// keys are siblings of dataset_info, never nested inside it. Each key's
+// schema "type" is compared against the REFLECTED Go type of its
+// Subscription field (not a hard-coded expectation), so a future drift
+// between the two (e.g. a field accidentally retyped to *float64) is caught
+// here instead of only surfacing as a silent decode mismatch in production.
 func TestSubscription_UsageCountersMatchSchemaFile(t *testing.T) {
 	path := os.Getenv(datasetInfoSchemaEnv)
 	if path == "" {
@@ -772,6 +810,7 @@ func TestSubscription_UsageCountersMatchSchemaFile(t *testing.T) {
 			}
 		}
 	}
+	subType := reflect.TypeOf(Subscription{})
 	var schemaKeys []string
 	for _, key := range usageCounterContractKeys {
 		prop, ok := schema.Properties[key]
@@ -780,17 +819,35 @@ func TestSubscription_UsageCountersMatchSchemaFile(t *testing.T) {
 			continue
 		}
 		schemaKeys = append(schemaKeys, key)
-		wantType := "integer"
-		if key == "last_accessed_at" {
-			wantType = "string"
+
+		fieldName, ok := usageCounterFieldByKey[key]
+		if !ok {
+			t.Fatalf("no Subscription field mapped for schema key %s (update usageCounterFieldByKey)", key)
 		}
+		field, found := subType.FieldByName(fieldName)
+		if !found {
+			t.Fatalf("Subscription has no field %s for schema key %s", fieldName, key)
+		}
+		wantType := schemaTypeForGoField(t, fieldName, field.Type)
 		if !schemaTypeIncludes(prop["type"], wantType) {
-			t.Errorf("schema %s.type = %v, want %s", key, prop["type"], wantType)
+			t.Errorf("schema %s.type = %v, want %s (reflected from Subscription.%s %v)", key, prop["type"], wantType, fieldName, field.Type)
 		}
 	}
 	sort.Strings(schemaKeys)
 	if !reflect.DeepEqual(schemaKeys, usageCounterContractKeys) {
 		t.Errorf("schema usage-counter keys found = %v, want exactly %v", schemaKeys, usageCounterContractKeys)
+	}
+
+	// access_count, accesses_this_month and monthly_access_cap are counts:
+	// negative is never meaningful, so the schema's declared minimum must be
+	// exactly 0, not merely non-positive — a schema drifted to, say,
+	// minimum: -5 would silently admit a negative count this SDK would then
+	// decode without error.
+	for _, key := range []string{"access_count", "accesses_this_month", "monthly_access_cap"} {
+		min, ok := schema.Properties[key]["minimum"].(float64)
+		if !ok || min != 0 {
+			t.Errorf("schema %s.minimum = %v, want exactly 0", key, schema.Properties[key]["minimum"])
+		}
 	}
 
 	// remaining_accesses must admit the -1 unlimited sentinel: the schema's
@@ -801,5 +858,13 @@ func TestSubscription_UsageCountersMatchSchemaFile(t *testing.T) {
 	min, ok := schema.Properties["remaining_accesses"]["minimum"].(float64)
 	if !ok || min > -1 {
 		t.Errorf("schema remaining_accesses.minimum = %v, want <= -1 (must admit the unlimited sentinel)", schema.Properties["remaining_accesses"]["minimum"])
+	}
+
+	// last_accessed_at must be declared as an RFC 3339 date-time string on
+	// the wire, not a bare string: format is what pins the field's contract
+	// exactly, since Go decodes any JSON string into *string regardless.
+	format, ok := schema.Properties["last_accessed_at"]["format"].(string)
+	if !ok || format != "date-time" {
+		t.Errorf("schema last_accessed_at.format = %v, want %q", schema.Properties["last_accessed_at"]["format"], "date-time")
 	}
 }
