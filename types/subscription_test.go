@@ -466,7 +466,8 @@ func TestSubscription_DatasetInfoMatchesSchemaFile(t *testing.T) {
 	// them integer: a "number" schema would let the API emit 1.5, which this
 	// SDK rejects.
 	for _, k := range []string{"record_count", "size_bytes"} {
-		if !schemaTypeIncludes(di.Properties[k]["type"], "integer") {
+		gotType, ok := di.Properties[k]["type"].(string)
+		if !ok || gotType != "integer" {
 			t.Errorf("schema dataset_info.%s.type = %v, want integer", k, di.Properties[k]["type"])
 		}
 	}
@@ -480,20 +481,6 @@ func TestSubscription_DatasetInfoMatchesSchemaFile(t *testing.T) {
 	if !reflect.DeepEqual(goKeys, schemaKeys) {
 		t.Errorf("DatasetInfo json tags = %v, schema dataset_info keys = %v; must be equal", goKeys, schemaKeys)
 	}
-}
-
-func schemaTypeIncludes(typ any, want string) bool {
-	switch v := typ.(type) {
-	case string:
-		return v == want
-	case []any:
-		for _, e := range v {
-			if e == want {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // usageCounterContractKeys is the ONE cross-SDK contract for the five
