@@ -462,6 +462,22 @@ func TestUploadDataset_ProcessesBeforePOST_SoRealSizesReachTheBody(t *testing.T)
 		t.Errorf("metadata.encrypted_size_bytes = %v, want exactly %d (len of the bytes actually uploaded)", md["encrypted_size_bytes"], len(uploadedBytes))
 	}
 
+	// Top-level size_bytes (restores v1.3.11's dataset_payload.go:168
+	// finalSize, which the API maps to the catalog's total_size_bytes) must
+	// be present, positive, and equal the exact byte length of the object
+	// actually PUT to S3 — not a derived/duplicated value that could drift
+	// from what was really uploaded.
+	sizeBytes, ok := postBody["size_bytes"].(float64)
+	if !ok {
+		t.Fatalf("top-level size_bytes missing or wrong type: %T", postBody["size_bytes"])
+	}
+	if sizeBytes <= 0 {
+		t.Errorf("top-level size_bytes = %v, want > 0", sizeBytes)
+	}
+	if int(sizeBytes) != len(uploadedBytes) {
+		t.Errorf("top-level size_bytes = %v, want exactly %d (len of the bytes actually PUT to S3)", sizeBytes, len(uploadedBytes))
+	}
+
 	if len(uploadedBytes) < 4+16+16 {
 		t.Fatalf("uploaded data too short to contain the envelope header: %d bytes", len(uploadedBytes))
 	}
@@ -528,6 +544,63 @@ func TestUploadDataset_ProcessesBeforePOST_SoRealSizesReachTheBody(t *testing.T)
 	tamperedSealed[len(tamperedSealed)-1] ^= 0xFF
 	if _, err := aesGCM.Open(nil, iv, tamperedSealed, nil); err == nil {
 		t.Fatal("expected AES-GCM decrypt to fail on a tampered tag, got success")
+	}
+}
+
+// TestCreateDatasetRecord_SizeBytesTopLevel_CompressOnly is chunk A(2) of the
+// size_bytes fix: UploadDataset itself hard-requires Encrypt=true
+// (processFile refuses Encrypt=false), so a real compress-only upload can
+// never reach createDatasetRecord through the public entry point. This test
+// exercises createDatasetRecord directly with a processed result shaped like
+// a compress-only pass (encryption_enabled=false, Data holding only the
+// compressed bytes) to prove size_bytes tracks len(processed.Data) — the
+// exact bytes that would be PUT to S3 — rather than being hardwired to the
+// encrypted-size case, so the field stays correct if compress-only is ever
+// allowed.
+func TestCreateDatasetRecord_SizeBytesTopLevel_CompressOnly(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ds-1","upload_url":"https://example.invalid/put"}`))
+	}))
+	defer server.Close()
+
+	p := newTestProducer(server.URL)
+	dataFile := writeNDJSON(t, 5)
+
+	compressedOnlyBytes := []byte("compressed-only-payload-bytes")
+	processed := &ProcessedFileData{
+		OriginalSize: 100,
+		Data:         compressedOnlyBytes,
+		Sizes: map[string]any{
+			"original_size_bytes":   int64(100),
+			"compressed_size_bytes": int64(len(compressedOnlyBytes)),
+			"encrypted_size_bytes":  int64(100),
+			"encryption_enabled":    false,
+			"compression_enabled":   true,
+		},
+	}
+
+	opts := NewUploadOptions("compress-only-size-bytes-test")
+	if _, err := p.createDatasetRecord(context.Background(), dataFile, opts, processed); err != nil {
+		t.Fatalf("createDatasetRecord returned error: %v", err)
+	}
+
+	sizeBytes, ok := gotBody["size_bytes"].(float64)
+	if !ok {
+		t.Fatalf("top-level size_bytes missing or wrong type: %T", gotBody["size_bytes"])
+	}
+	if sizeBytes <= 0 {
+		t.Errorf("top-level size_bytes = %v, want > 0", sizeBytes)
+	}
+	if int(sizeBytes) != len(compressedOnlyBytes) {
+		t.Errorf("top-level size_bytes = %v, want exactly %d (len of processed.Data, the bytes that would be PUT to S3 in a compress-only upload)", sizeBytes, len(compressedOnlyBytes))
+	}
+	md := gotBody["metadata"].(map[string]any)
+	if md["compressed_size_bytes"] != sizeBytes {
+		t.Errorf("top-level size_bytes = %v, want it to equal metadata.compressed_size_bytes = %v (Compress-only contract)", sizeBytes, md["compressed_size_bytes"])
 	}
 }
 

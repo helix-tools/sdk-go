@@ -133,6 +133,15 @@
   v1.3.11's unconditional `deepMergeMaps(payload, overrideCopy)`.
   `compressData`/`encryptData` themselves are unchanged (verified by diff),
   so the on-wire compress+encrypt byte format is unchanged.
+- **`UploadDataset` sends a top-level `size_bytes` again (wire-body change).**
+  v1.3.11 POSTed a top-level `"size_bytes": finalSize` on dataset create
+  (`dataset_payload.go:168`), and the API maps request `size_bytes` to the
+  catalog's `total_size_bytes` field. v2.16.0's `UploadDataset` payload
+  dropped this field entirely, so every re-upload zeroed the catalog's
+  `total_size_bytes` — observed in production going from `12,248,326` to `0`
+  for a real dataset. `size_bytes` is now `int64(len(processed.Data))`, the
+  exact byte length of the object PUT to S3 (compressed, then encrypted —
+  both mandatory), matching what the Python and TypeScript SDKs already send.
 - `InviteConsumer`'s wire body now always sends the top-level `"tier"` key
   as `"free"` when `InviteConsumerInput.Tier` is left unset, instead of
   omitting the key. This is a **wire-body change** (the JSON payload POSTed

@@ -458,6 +458,15 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 	// to "private" itself (datasets/service.go CreateDataset) — Go silently
 	// relying on that default, while the other two SDKs send it, was a latent
 	// cross-SDK payload divergence. Stays overridable via DatasetOverrides.
+	// size_bytes MUST be sent top-level: v1.3.11 sent it
+	// (dataset_payload.go:168, "size_bytes": finalSize) and the API maps
+	// request size_bytes to the catalog's total_size_bytes
+	// (datasets/service.go CreateDataset, ~line 699). v2.16.0 dropped it,
+	// which zeroed production total_size_bytes. len(processed.Data) is the
+	// exact byte length of the object about to be PUT to S3 (compressed,
+	// then encrypted — both mandatory), so it always matches
+	// metadata.encrypted_size_bytes today and would match
+	// metadata.compressed_size_bytes if a compress-only mode is ever added.
 	payload := map[string]any{
 		"name":           opts.DatasetName,
 		"description":    opts.Description,
@@ -470,6 +479,7 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 		"visibility":     "private",
 		"version":        version,
 		"record_count":   recordCount,
+		"size_bytes":     int64(len(processed.Data)),
 		"metadata":       metadata,
 	}
 
