@@ -80,7 +80,18 @@
   `ListMySubscriptionRequests` and `Consumer.BrowseMarketplace` were
   checked against their API handlers and are unaffected — their endpoints
   either return every matching row unbounded (no pagination) or already
-  expose the pagination block to the caller by design.
+  expose the pagination block to the caller by design. A follow-up review
+  found three more gaps in that same fix, closed in the same PR: (1) none
+  of the four methods checked the response's own `page` field against the
+  page requested, so a server that ignores `?page` and keeps re-serving
+  page 1 would silently duplicate items instead of erroring — pagination
+  now stops with an explicit error naming the mismatch the moment a
+  response's `page` disagrees with what was requested; (2) a successful
+  empty list returned a `nil` slice instead of the API's `[]`, so a caller
+  JSON-re-encoding the result got `null` — empty results are non-nil again;
+  (3) `Consumer.Dataset.ID` was tagged `json:"_id"` while `GET /v1/datasets`
+  actually sends `id`, so every dataset returned by `Consumer.ListDatasets`
+  had an empty `ID` — fixed to `json:"id"`.
 - **`UploadDataset` sends real sizes, `version` and full metadata again
   (wire-body change).** The v2.15.0 POST-first refactor (race-condition
   fix) moved the catalog-record `POST /v1/datasets` BEFORE file processing,

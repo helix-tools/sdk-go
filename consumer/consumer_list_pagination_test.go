@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -19,13 +22,19 @@ import (
 // consumer/producer with more than the API's default page size (20) got a
 // silently truncated result. These tests pin the pagination fix.
 
+// datasetsPageJSON renders one page of the API's exact ListDatasetsResponse
+// shape. The dataset id field is "id" (internal/resources/datasets/
+// types.go:90's DatasetResponse.ID, json:"id") — NOT "_id"; a fixture using
+// "_id" would silently match this package's local Dataset.ID tag even
+// though it doesn't match what the real API sends, concealing a decode bug
+// behind a passing test.
 func datasetsPageJSON(names []string, page, totalPages int) string {
 	items := ""
 	for i, name := range names {
 		if i > 0 {
 			items += ","
 		}
-		items += fmt.Sprintf(`{"_id":"ds-%s","name":%q}`, name, name)
+		items += fmt.Sprintf(`{"id":"ds-%s","name":%q}`, name, name)
 	}
 	return fmt.Sprintf(`{"datasets":[%s],"total_count":%d,"page":%d,"limit":100,"total_pages":%d}`,
 		items, len(names), page, totalPages)
@@ -51,6 +60,9 @@ func TestListDatasets_ExactAPIShape_ReturnsAllDatasets(t *testing.T) {
 	}
 	if datasets[0].Name != "a" || datasets[1].Name != "b" {
 		t.Errorf("datasets = %+v, want names [a b]", datasets)
+	}
+	if datasets[0].ID != "ds-a" || datasets[1].ID != "ds-b" {
+		t.Errorf("datasets = %+v, want ids [ds-a ds-b]", datasets)
 	}
 }
 
@@ -90,6 +102,9 @@ func TestListDatasets_FollowsThreePages_InOrder(t *testing.T) {
 		if datasets[i].Name != name {
 			t.Errorf("datasets[%d].Name = %q, want %q", i, datasets[i].Name, name)
 		}
+		if wantID := "ds-" + name; datasets[i].ID != wantID {
+			t.Errorf("datasets[%d].ID = %q, want %q", i, datasets[i].ID, wantID)
+		}
 	}
 
 	if got := atomic.LoadInt32(&requestCount); got != int32(len(pages)) {
@@ -121,8 +136,8 @@ func TestListDatasets_StopsOnEmptyPageDespiteHighTotalPages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListDatasets: %v", err)
 	}
-	if len(datasets) != 1 || datasets[0].Name != "a" {
-		t.Fatalf("datasets = %+v, want exactly [a]", datasets)
+	if len(datasets) != 1 || datasets[0].Name != "a" || datasets[0].ID != "ds-a" {
+		t.Fatalf("datasets = %+v, want exactly [{ID: ds-a Name: a}]", datasets)
 	}
 
 	if got := atomic.LoadInt32(&requestCount); got != 2 {
@@ -130,44 +145,57 @@ func TestListDatasets_StopsOnEmptyPageDespiteHighTotalPages(t *testing.T) {
 	}
 }
 
-// TestListDatasets_OldStructDecode_TruncatesAgainstRealAPIShape is the
-// negative control for criterion 2: decoding a single page the way
-// ListDatasets did before this fix (a local {datasets,count} struct with
-// no total_pages follow-through) silently drops every dataset past page 1
-// — it never errors, it just returns an incomplete list. That silent
-// truncation, not a decode error, is why this endpoint needed a different
-// negative control than ListMyDatasets' unmarshal failure.
-func TestListDatasets_OldStructDecode_TruncatesAgainstRealAPIShape(t *testing.T) {
-	// Page 1 of a 3-page result, exactly what the old ListDatasets would
-	// have received and stopped at.
-	body := datasetsPageJSON([]string{"a", "b"}, 1, 3)
+// TestListDatasets_RejectsBareArrayShape is the negative control for
+// criterion 1, exercised through the public method rather than a
+// standalone json.Unmarshal: a server that regresses to a bare array
+// (the shape ListMyDatasets' pre-fix decode target expected, and which
+// this package's own envelope decode has never accepted) must make
+// ListDatasets itself fail, not merely a hand-rolled decode in the test
+// body. The historical truncation bug this package actually had (silently
+// stopping after page 1 because total_pages was never read) is covered,
+// through the same public method, by
+// TestListDatasets_FollowsThreePages_InOrder's exact-request-count
+// assertion and TestListDatasets_StopsOnEmptyPageDespiteHighTotalPages.
+func TestListDatasets_RejectsBareArrayShape(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`[{"id":"ds-a","name":"a"}]`))
+	}))
+	defer server.Close()
 
-	var oldShape struct {
-		Datasets []Dataset `json:"datasets"`
-		Count    int       `json:"count"`
+	if _, err := newTestConsumer(server.URL).ListDatasets(context.Background()); err == nil {
+		t.Fatal("ListDatasets unexpectedly succeeded against a bare-array response; the negative control no longer holds")
 	}
-	if err := json.Unmarshal([]byte(body), &oldShape); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(oldShape.Datasets) != 2 {
-		t.Fatalf("old single-page decode got %d datasets, want 2", len(oldShape.Datasets))
-	}
-	// The old code had no way to know 3 more datasets existed on pages 2
-	// and 3 — that's the bug TestListDatasets_FollowsThreePages_InOrder
-	// above now covers.
 }
 
 // TestListSubscriptions_FollowsAllPages pins that the second caller of
 // paginateAll (GET /v1/subscriptions) is wired correctly: its own field
 // names ("subscriptions", not "datasets") and its own item type must
 // decode and paginate exactly like ListDatasets does.
+//
+// The mock is keyed on the ?page query parameter the client actually sent
+// (not a request counter), and the test asserts the exact sequence of
+// requested pages (1,2,3) — a client that re-requested page 1 instead of
+// advancing would get the same two items back forever and fail this
+// assertion, rather than being silently satisfied by a counter that
+// advances regardless of what the client asked for.
 func TestListSubscriptions_FollowsAllPages(t *testing.T) {
-	pages := [][]string{{"sub-1", "sub-2"}, {"sub-3"}}
-	var requestCount int32
+	pages := [][]string{{"sub-1", "sub-2"}, {"sub-3"}, {"sub-4"}}
+
+	var mu sync.Mutex
+	var requestedPages []int
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := atomic.AddInt32(&requestCount, 1)
-		page := int(n)
+		page, err := strconv.Atoi(r.URL.Query().Get("page"))
+		if err != nil {
+			t.Fatalf("page query param: %v", err)
+		}
+
+		mu.Lock()
+		requestedPages = append(requestedPages, page)
+		mu.Unlock()
+
 		if page < 1 || page > len(pages) {
 			t.Fatalf("unexpected request for page %d", page)
 		}
@@ -192,13 +220,130 @@ func TestListSubscriptions_FollowsAllPages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListSubscriptions: %v", err)
 	}
-	if len(subs) != 3 {
-		t.Fatalf("len(subs) = %d, want 3 (%+v)", len(subs), subs)
+	if len(subs) != 4 {
+		t.Fatalf("len(subs) = %d, want 4 (%+v)", len(subs), subs)
 	}
-	if subs[0].ID != "sub-1" || subs[1].ID != "sub-2" || subs[2].ID != "sub-3" {
-		t.Errorf("subs = %+v, want ids [sub-1 sub-2 sub-3] in order", subs)
+	if subs[0].ID != "sub-1" || subs[1].ID != "sub-2" || subs[2].ID != "sub-3" || subs[3].ID != "sub-4" {
+		t.Errorf("subs = %+v, want ids [sub-1 sub-2 sub-3 sub-4] in order", subs)
 	}
-	if got := atomic.LoadInt32(&requestCount); got != int32(len(pages)) {
-		t.Errorf("request count = %d, want exactly %d", got, len(pages))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []int{1, 2, 3}; !reflect.DeepEqual(requestedPages, want) {
+		t.Errorf("requested pages = %v, want %v", requestedPages, want)
+	}
+}
+
+// TestListDatasets_ServerIgnoresPageParam_ReturnsError is acceptance
+// criterion 2 for ListDatasets: a server that ignores ?page and keeps
+// answering with page=1 (total_pages=3) must not be trusted to be
+// advancing — paginateAll must notice the response's page doesn't match
+// the page it requested and stop with an error, instead of appending the
+// same item three times.
+func TestListDatasets_ServerIgnoresPageParam_ReturnsError(t *testing.T) {
+	var requestCount int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requestCount, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Always reports page=1, regardless of the requested ?page.
+		_, _ = w.Write([]byte(datasetsPageJSON([]string{"a"}, 1, 3)))
+	}))
+	defer server.Close()
+
+	datasets, err := newTestConsumer(server.URL).ListDatasets(context.Background())
+	if err == nil {
+		t.Fatalf("ListDatasets unexpectedly succeeded against a server that ignores ?page; datasets = %+v", datasets)
+	}
+	if len(datasets) != 0 {
+		t.Errorf("datasets = %+v, want no duplicated items on error", datasets)
+	}
+	if got := atomic.LoadInt32(&requestCount); got != 2 {
+		t.Errorf("request count = %d, want exactly 2 (page 1 succeeds, page 2 detects the mismatch)", got)
+	}
+}
+
+// TestListSubscriptions_ServerIgnoresPageParam_ReturnsError is the same
+// acceptance criterion 2 scenario for ListSubscriptions, pinning that the
+// page-mismatch check applies to both paginateAll callers in this package,
+// not just ListDatasets.
+func TestListSubscriptions_ServerIgnoresPageParam_ReturnsError(t *testing.T) {
+	var requestCount int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requestCount, 1)
+		body := `{"subscriptions":[{"_id":"sub-1","consumer_id":"test-customer","producer_id":"prod-1","tier":"free","status":"active"}],"total_count":3,"count":1,"page":1,"limit":100,"total_pages":3}`
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	subs, err := newTestConsumer(server.URL).ListSubscriptions(context.Background(), nil)
+	if err == nil {
+		t.Fatalf("ListSubscriptions unexpectedly succeeded against a server that ignores ?page; subs = %+v", subs)
+	}
+	if len(subs) != 0 {
+		t.Errorf("subs = %+v, want no duplicated items on error", subs)
+	}
+	if got := atomic.LoadInt32(&requestCount); got != 2 {
+		t.Errorf("request count = %d, want exactly 2 (page 1 succeeds, page 2 detects the mismatch)", got)
+	}
+}
+
+// TestListDatasets_EmptyResult_ReturnsEmptyNotNilSlice is acceptance
+// criterion 4: a successful empty list must marshal to JSON `[]`, not
+// `null`, exactly as it did before the pagination fix.
+func TestListDatasets_EmptyResult_ReturnsEmptyNotNilSlice(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(datasetsPageJSON(nil, 1, 1)))
+	}))
+	defer server.Close()
+
+	datasets, err := newTestConsumer(server.URL).ListDatasets(context.Background())
+	if err != nil {
+		t.Fatalf("ListDatasets: %v", err)
+	}
+	if datasets == nil {
+		t.Fatal("ListDatasets returned a nil slice for an empty result, want a non-nil empty slice")
+	}
+
+	got, err := json.Marshal(datasets)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if string(got) != "[]" {
+		t.Errorf("json.Marshal(datasets) = %s, want []", got)
+	}
+}
+
+// TestListSubscriptions_EmptyResult_ReturnsEmptyNotNilSlice is the same
+// acceptance criterion 4 scenario for ListSubscriptions.
+func TestListSubscriptions_EmptyResult_ReturnsEmptyNotNilSlice(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := `{"subscriptions":[],"total_count":0,"count":0,"page":1,"limit":100,"total_pages":1}`
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	subs, err := newTestConsumer(server.URL).ListSubscriptions(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListSubscriptions: %v", err)
+	}
+	if subs == nil {
+		t.Fatal("ListSubscriptions returned a nil slice for an empty result, want a non-nil empty slice")
+	}
+
+	got, err := json.Marshal(subs)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if string(got) != "[]" {
+		t.Errorf("json.Marshal(subs) = %s, want []", got)
 	}
 }

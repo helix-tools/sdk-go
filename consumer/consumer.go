@@ -158,7 +158,7 @@ type DownloadURLInfo struct {
 
 // Dataset represents a dataset in the catalog.
 type Dataset struct {
-	ID       string `json:"_id"`
+	ID       string `json:"id"`
 	Name     string `json:"name"`
 	Metadata struct {
 		CompressionEnabled bool `json:"compression_enabled"`
@@ -696,7 +696,7 @@ func (c *Consumer) decompressData(data []byte) ([]byte, error) {
 //	// List datasets from a specific producer
 //	datasets, err := consumer.ListDatasets(ctx, "company-123456")
 func (c *Consumer) ListDatasets(ctx context.Context, producerID ...string) ([]Dataset, error) {
-	return paginateAll(func(page int) ([]Dataset, int, error) {
+	return paginateAll(func(page int) ([]Dataset, *int, int, error) {
 		path := fmt.Sprintf("/v1/datasets?page=%d&limit=100", page)
 		if len(producerID) > 0 && producerID[0] != "" {
 			path = fmt.Sprintf("/v1/datasets?producer_id=%s&page=%d&limit=100", url.QueryEscape(producerID[0]), page)
@@ -704,21 +704,22 @@ func (c *Consumer) ListDatasets(ctx context.Context, producerID ...string) ([]Da
 
 		var response struct {
 			Datasets   []Dataset `json:"datasets"`
+			Page       *int      `json:"page"`
 			TotalPages int       `json:"total_pages"`
 		}
 
 		if err := c.makeAPIRequest(ctx, http.MethodGet, path, nil, &response); err != nil {
-			return nil, 0, err
+			return nil, nil, 0, err
 		}
 
-		return response.Datasets, response.TotalPages, nil
+		return response.Datasets, response.Page, response.TotalPages, nil
 	})
 }
 
 // ListSubscriptions lists all active subscriptions for this consumer.
 // For "both" customers (who are both producer and consumer), use opts.Role to filter by role.
 func (c *Consumer) ListSubscriptions(ctx context.Context, opts *ListSubscriptionsOptions) ([]Subscription, error) {
-	return paginateAll(func(page int) ([]Subscription, int, error) {
+	return paginateAll(func(page int) ([]Subscription, *int, int, error) {
 		path := fmt.Sprintf("/v1/subscriptions?page=%d&limit=100", page)
 		if opts != nil && opts.Role != "" {
 			path += "&role=" + url.QueryEscape(opts.Role)
@@ -726,14 +727,15 @@ func (c *Consumer) ListSubscriptions(ctx context.Context, opts *ListSubscription
 
 		var response struct {
 			Subscriptions []Subscription `json:"subscriptions"`
+			Page          *int           `json:"page"`
 			TotalPages    int            `json:"total_pages"`
 		}
 
 		if err := c.makeAPIRequest(ctx, http.MethodGet, path, nil, &response); err != nil {
-			return nil, 0, err
+			return nil, nil, 0, err
 		}
 
-		return response.Subscriptions, response.TotalPages, nil
+		return response.Subscriptions, response.Page, response.TotalPages, nil
 	})
 }
 
@@ -781,13 +783,24 @@ const maxListPages = 1000
 // the empty-page check is what keeps a server that misreports totalPages
 // (e.g. always claims more pages than it actually has) from ever being
 // trusted past its real data.
-func paginateAll[T any](fetchPage func(page int) (items []T, totalPages int, err error)) ([]T, error) {
-	var all []T
+//
+// fetchPage also returns the page number the server actually served
+// (respPage), nil when the response omits that field. A server that
+// ignores the requested ?page and keeps re-serving the same page (instead
+// of honestly reporting it) would otherwise make this loop append the same
+// items over and over until totalPages is reached — paginateAll rejects
+// that mismatch instead of silently duplicating data.
+func paginateAll[T any](fetchPage func(page int) (items []T, respPage *int, totalPages int, err error)) ([]T, error) {
+	all := []T{}
 
 	for page := 1; page <= maxListPages; page++ {
-		items, totalPages, err := fetchPage(page)
+		items, respPage, totalPages, err := fetchPage(page)
 		if err != nil {
 			return nil, err
+		}
+
+		if respPage != nil && *respPage != page {
+			return nil, fmt.Errorf("list pagination: requested page %d but server returned page %d", page, *respPage)
 		}
 
 		all = append(all, items...)

@@ -144,3 +144,82 @@ Checked against the API handlers at
    for `ListSubscriptions`), never replaces it — verified by
    `TestListMyDatasets_FollowsThreePages_InOrder`'s per-request `page` query-param assertion,
    which passes alongside the existing `producer_id`/`dataset_id` params in the other new tests.
+
+---
+
+# PLAN — list-pagination round 2: page-mismatch guard, honest fixtures, non-nil empty
+# results (ClickUp 86e3d27v3, same PR #28)
+
+Lane: fix/upload-sends-sizes · sdk-go. Base: HEAD of this branch (`7b7127a`), same PR as the
+list-pagination fix above. An independent review of `7b7127a` passed item 1 (envelope decode
+correctness, unchanged by this round) and failed three:
+
+1. Neither `paginateAll` checked the response's own `page` field against the page it requested,
+   so a server that ignores `?page` and keeps re-serving page 1 (while claiming `total_pages=3`)
+   would make the loop silently append the same items three times instead of erroring.
+2. The consumer dataset test fixture used `_id`, but the real API sends `id`
+   (`internal/resources/datasets/types.go:90`'s `DatasetResponse.ID`, `json:"id"`) — and this
+   package's own `Dataset.ID` field was *also* tagged `json:"_id"`, so the wrong fixture happened
+   to agree with the wrong SDK tag and the test's name-only assertions never caught either. The
+   two subscription pagination tests (producer's `GetDatasetSubscribers`, consumer's
+   `ListSubscriptions`) advanced their mock's page purely by counting requests, never reading the
+   `?page` the client actually sent — a client that kept re-requesting page 1 would still pass.
+   Both packages' negative-control tests for criterion 1 also stood apart from the SDK: they
+   `json.Unmarshal`ed a hand-rolled struct in the test body instead of calling the public method.
+3. `paginateAll` started `all` as `var all []T` (a nil slice). A successful empty list (0 items
+   on page 1) never appended anything, so the four list methods now returned `nil` instead of the
+   API's `[]` — a caller JSON-re-encoding the result got `null`, a regression from the pre-`paginateAll`
+   behavior for `ListDatasets`/`ListSubscriptions`/`GetDatasetSubscribers` (which decoded the API's
+   own array field directly).
+
+## Change
+- `producer/producer.go`, `consumer/consumer.go`: `paginateAll`'s `fetchPage` callback now also
+  returns the response's own page number (`*int`, nil when the field is absent); `paginateAll`
+  errors immediately (`"list pagination: requested page %d but server returned page %d"`) on a
+  mismatch, and `all` now starts as `[]T{}` instead of `var all []T` so an empty result stays `[]`
+  on the wire, not `null`. All four list-method closures (`ListMyDatasets`,
+  `GetDatasetSubscribers`, `ListDatasets`, `ListSubscriptions`) gained a `Page *int json:"page"`
+  field on their anonymous decode structs and pass it through.
+- `consumer/consumer.go`: `Dataset.ID`'s tag changed from `json:"_id"` to `json:"id"`, matching
+  what `GET /v1/datasets` actually sends (this type is decoded ONLY by `ListDatasets` — grepped
+  for other constructors/readers, found none — so the change is contained to that one path;
+  unrelated to `types.Dataset`'s `ID`/`IDAlias` dual-tag, which `GetDataset`/`DownloadDataset` use
+  and which review item 1 didn't flag).
+- `producer/producer_list_pagination_test.go`, `consumer/consumer_list_pagination_test.go`:
+  - Both dataset fixtures/tests already used (producer) or now use (consumer) `id`; the consumer
+    tests also assert `.ID` on returned items, not just `.Name`.
+  - `TestGetDatasetSubscribers_FollowsAllPages` / `TestListSubscriptions_FollowsAllPages`: the
+    mock now keys its response (including the echoed `page` field) on the actual `?page` query
+    parameter instead of a request counter, and the test asserts the exact requested-page
+    sequence (`[1,2,3]`) via a 3-page fixture — a client that re-requested page 1 would fail this
+    assertion instead of being silently satisfied.
+  - The two negative-control tests were rewritten to call the public method (`ListMyDatasets` /
+    `ListDatasets`) against a bare-array response and assert an error, instead of a standalone
+    `json.Unmarshal`.
+  - New tests per list method (8 total): `*_ServerIgnoresPageParam_ReturnsError` (mock always
+    reports `page=1, total_pages=3`; asserts an error, zero returned items, and exactly 2
+    requests) and `*_EmptyResult_ReturnsEmptyNotNilSlice` (asserts `json.Marshal` of an empty
+    result is `[]`, not `null`).
+- `CHANGELOG.md`: documented under `## Unreleased` → `### Fixed`, appended to the existing list-
+  pagination entry.
+- `PLAN.md`: this section.
+
+## Self-attack
+1. **Does the page-mismatch check false-positive on a legitimate response that omits `page`
+   entirely (an older API build)?** No: `respPage` is `*int`; when the JSON response has no
+   `"page"` key, `json.Decode` leaves it `nil`, and `paginateAll` only compares when
+   `respPage != nil`. No existing or new test feeds a response without `page` and expects
+   success-with-mismatch, so this path is asserted only by absence of failure in every other test
+   (all of which include `page`); the pointer's nil-skips-the-check behavior itself follows
+   directly from the Go zero value of an unset `*int` field, not from anything more subtle.
+2. **Does the new page-mismatch error ever fire on a CORRECT server because of an off-by-one in
+   the comparison?** No: `paginateAll`'s loop variable `page` starts at 1 (matching a 1-based API)
+   and every existing positive-path test (`FollowsThreePages`, `StopsOnEmptyPage`,
+   `FollowsAllPages`) already asserts `total items` and/or `exact request sequence`, which would
+   fail immediately if the comparison misfired on a page that genuinely matched — confirmed by
+   running the full pre-existing positive-path suite alongside the new mismatch tests, all green.
+3. **Changing `consumer.Dataset.ID`'s tag from `_id` to `id` — does anything outside
+   `ListDatasets` construct or read a `consumer.Dataset` expecting the old tag?** Grepped
+   `consumer.Dataset\b` and `Dataset{` across the whole module (not just this package): zero
+   hits outside its own declaration and `ListDatasets`'s decode target. `types.Dataset` (used by
+   `GetDataset`/`DownloadDataset`/producer's `ListMyDatasets`) is a separate type, untouched.
