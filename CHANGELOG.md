@@ -61,6 +61,78 @@
   be caught by diffing against the other two.
 
 ### Fixed
+- **`ListMyDatasets`, `GetDatasetSubscribers`, `ListDatasets` and
+  `ListSubscriptions` decode the API's paginated response and follow every
+  page.** `GET /v1/datasets` and `GET /v1/subscriptions` both return a
+  paginated object (`{datasets|subscriptions, total_count, page, limit,
+  total_pages}`), not a bare array. `Producer.ListMyDatasets` decoded
+  straight into `[]types.Dataset`, so every call failed with "cannot
+  unmarshal object into Go value of type []types.Dataset" — observed
+  against production on 2026-09-23. `Producer.GetDatasetSubscribers`,
+  `Consumer.ListDatasets` and `Consumer.ListSubscriptions` already decoded
+  the envelope correctly but never followed `total_pages`, so any producer
+  or consumer with more than the API's default page size (20 items) got a
+  silently truncated result with no error. All four now page through the
+  full result (capped at 1000 pages, and stopping early if the server
+  returns an empty page) before returning; public signatures are
+  unchanged. `Producer.ListSubscriptionRequests`, `Producer.ListSubscribers`,
+  `Producer.ListConsumers`, `Consumer.ListSubscriptionRequests` /
+  `ListMySubscriptionRequests` and `Consumer.BrowseMarketplace` were
+  checked against their API handlers and are unaffected — their endpoints
+  either return every matching row unbounded (no pagination) or already
+  expose the pagination block to the caller by design. A follow-up review
+  found three more gaps in that same fix, closed in the same PR: (1) none
+  of the four methods checked the response's own `page` field against the
+  page requested, so a server that ignores `?page` and keeps re-serving
+  page 1 would silently duplicate items instead of erroring — pagination
+  now stops with an explicit error naming the mismatch the moment a
+  response's `page` disagrees with what was requested; (2) a successful
+  empty list returned a `nil` slice instead of the API's `[]`, so a caller
+  JSON-re-encoding the result got `null` — empty results are non-nil again;
+  (3) `Consumer.Dataset.ID` was tagged `json:"_id"` while `GET /v1/datasets`
+  actually sends `id`, so every dataset returned by `Consumer.ListDatasets`
+  had an empty `ID` — fixed to `json:"id"`. A second follow-up review found
+  that the (1) mismatch guard only fires when the response's `page` field
+  is present — a response that omits `page` entirely fell through the
+  check untouched, so a server that both ignores `?page` and never echoes
+  it back could still duplicate items with no error. The real API always
+  echoes `page` on both endpoints, so once more than one page is being
+  followed, an omitted `page` is now treated the same as a mismatch and
+  errors immediately, naming the requested page and the server's claimed
+  `total_pages`; a single-page result still accepts an absent `page` field
+  unchanged. A third follow-up review found that both guards check each
+  response only against itself, so a server that changes its story between
+  requests could dodge both at once: page 1 honestly reports `{page:1,
+  total_pages:3}`, then page 2 repeats the same item while dropping
+  `total_pages` to 1 and omitting `page` — which reads as a valid
+  single-page response in isolation and was silently accepted, duplicating
+  items with no error. Pagination now locks its shape (`total_pages`, and
+  whether `page` was present) from the first response and errors the
+  moment a later response departs from either, including `total_pages`
+  simply changing between otherwise well-formed pages (e.g. `3` then `2`).
+- **`UploadDataset` sends real sizes, `version` and full metadata again
+  (wire-body change).** The v2.15.0 POST-first refactor (race-condition
+  fix) moved the catalog-record `POST /v1/datasets` BEFORE file processing,
+  so it POSTed `original_size_bytes`/`compressed_size_bytes`/
+  `encrypted_size_bytes` as `0`, `version` as `""`, and dropped `record_count`
+  (top-level), `metadata.file_format` and `metadata.encoding` entirely —
+  every field v1.3.11 sent. The API stores exactly what it receives, so
+  every daily re-upload zeroed/blanked those fields in the catalog record.
+  `UploadDataset` now runs `processFile` (compress + encrypt, no upload)
+  FIRST, then builds the `POST /v1/datasets` body from the real result —
+  sizes, a computed `version` (today's UTC date, `now.Format("2006-01-02")`,
+  matching v1.3.11's `buildDatasetPayload`), `record_count` (top-level and
+  in `metadata`, defaulting to `0` when analysis fails, matching v1.3.11
+  instead of omitting the key), and `metadata.file_format`/`.encoding`
+  (`"json"`/`"utf-8"` defaults, only filled if the caller didn't already set
+  them). The POST still happens before any bytes reach S3 — file processing
+  has no network side effect beyond one local KMS `Encrypt` call — so the
+  race the original POST-first refactor closed (an S3 event firing before
+  the catalog record exists) is unaffected. `DatasetOverrides` still wins
+  over every computed value, including an explicit `version: ""`, matching
+  v1.3.11's unconditional `deepMergeMaps(payload, overrideCopy)`.
+  `compressData`/`encryptData` themselves are unchanged (verified by diff),
+  so the on-wire compress+encrypt byte format is unchanged.
 - `InviteConsumer`'s wire body now always sends the top-level `"tier"` key
   as `"free"` when `InviteConsumerInput.Tier` is left unset, instead of
   omitting the key. This is a **wire-body change** (the JSON payload POSTed

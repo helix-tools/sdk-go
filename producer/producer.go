@@ -360,10 +360,18 @@ type ProcessedFileData struct {
 	Analysis     *AnalysisResult
 }
 
-// createDatasetRecord creates a dataset record in the catalog and retrieves presigned URL.
-// This is step 1 of the new POST-first upload flow.
-func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opts UploadOptions) (*CreateDatasetResponse, error) {
-	// Analyze data before compression/encryption (memory-efficient streaming).
+// createDatasetRecord creates a dataset record in the catalog and retrieves a
+// presigned upload URL. This is step 2 of the upload flow — it runs AFTER
+// processFile (step 1) so the POST body carries the real sizes, version and
+// record_count, matching what v1.3.11 sent (producer.go buildDatasetPayload,
+// pre-v2). v2.15.0 called this before processFile, so it always POSTed
+// zero/absent sizes and an empty version; the caller (UploadDataset) still
+// POSTs before any bytes reach S3, so the catalog-record-before-upload race
+// protection the original POST-first refactor introduced is unchanged.
+func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opts UploadOptions, processed *ProcessedFileData) (*CreateDatasetResponse, error) {
+	// Analyze data (memory-efficient streaming). Independent of processFile's
+	// in-memory compress/encrypt pass over the same file, so it runs here
+	// regardless of step order.
 	var analysis *AnalysisResult
 	analysisResult, err := p.analyzeData(filePath, DefaultAnalysisOptions())
 	if err != nil {
@@ -372,27 +380,48 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 		analysis = analysisResult
 	}
 
-	// Build initial metadata (sizes will be updated after processing)
+	// Build metadata, starting from the caller's own keys.
 	metadata := make(map[string]any)
 	maps.Copy(metadata, opts.Metadata)
 
-	// Record encryption/compression so the CONSUMER download knows to reverse
-	// them: Consumer.DownloadDataset reads dataset.Metadata["encryption_enabled"]
-	// and ["compression_enabled"] to decide whether to decrypt/decompress. Without
-	// these, download returns the raw encrypted+compressed bytes and the round-trip
-	// sha256 mismatches. (Found 2026-07-06 by the SDK-only E2E suite — go round-trip
-	// corruption once notifications started arriving.) Upload mandates both.
-	metadata["encryption_enabled"] = opts.Encrypt
-	metadata["compression_enabled"] = opts.Compress
+	// Sizes (original/compressed/encrypted_size_bytes) plus
+	// encryption_enabled/compression_enabled, taken from the now-completed
+	// processFile pass. Matches v1.3.11's "sizes" map verbatim (same key
+	// names) instead of the encryption_enabled/compression_enabled-only pair
+	// v2.15.0 could set before processing had run.
+	//
+	// Also record encryption/compression so the CONSUMER download knows to
+	// reverse them: Consumer.DownloadDataset reads
+	// dataset.Metadata["encryption_enabled"] and ["compression_enabled"] to
+	// decide whether to decrypt/decompress. Without these, download returns
+	// the raw encrypted+compressed bytes and the round-trip sha256 mismatches.
+	// (Found 2026-07-06 by the SDK-only E2E suite — go round-trip corruption
+	// once notifications started arriving.) Upload mandates both.
+	maps.Copy(metadata, processed.Sizes)
 
-	// Add analysis results to metadata if available
+	// file_format / encoding defaults, matching v1.3.11's buildDatasetPayload
+	// (only fill if the caller didn't already set them via Metadata).
+	if _, exists := metadata["file_format"]; !exists {
+		metadata["file_format"] = "json"
+	}
+	if _, exists := metadata["encoding"]; !exists {
+		metadata["encoding"] = "utf-8"
+	}
+
+	// record_count defaults to 0, matching v1.3.11's buildDatasetPayload,
+	// which always set it (top-level AND in metadata) instead of omitting it
+	// when analysis failed.
+	recordCount := 0
 	if analysis != nil {
+		recordCount = analysis.RecordCount
 		metadata["schema"] = analysis.Schema
 		metadata["field_emptiness"] = analysis.FieldEmptiness
 		metadata["record_count"] = analysis.RecordCount
 		if analysis.AnalysisErrors > 0 {
 			metadata["analysis_errors"] = analysis.AnalysisErrors
 		}
+	} else {
+		metadata["record_count"] = 0
 	}
 
 	// s3_key MUST be sent, dataset-NAME-keyed, matching Python/TS
@@ -411,7 +440,13 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 	}
 	s3Key := fmt.Sprintf("datasets/%s/%s", opts.DatasetName, fileName)
 
-	// Build dataset payload (without size, which is set after upload).
+	// version defaults to today's UTC date, matching v1.3.11's
+	// buildDatasetPayload (`now.Format("2006-01-02")`), computed
+	// unconditionally so a caller who never touches DatasetOverrides still
+	// gets a non-empty version instead of the "" v2.15.0 sent.
+	version := time.Now().UTC().Format("2006-01-02")
+
+	// Build dataset payload, now WITH size, version and record_count.
 	// s3_bucket_name and access_tier are also REQUIRED by the create validator
 	// (ValidateCreateDatasetRequest rejects an empty s3_bucket_name and an
 	// access_tier not in {free,premium,enterprise}); the Python/TS SDKs send them
@@ -433,10 +468,14 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 		"s3_key":         s3Key,
 		"access_tier":    "free",
 		"visibility":     "private",
+		"version":        version,
+		"record_count":   recordCount,
 		"metadata":       metadata,
 	}
 
-	// Merge dataset overrides
+	// Merge dataset overrides — a caller's explicit value (including an
+	// explicit version, even "") always wins over the computed default
+	// above, matching v1.3.11's deepMergeMaps(payload, overrideCopy).
 	if opts.DatasetOverrides != nil {
 		maps.Copy(payload, opts.DatasetOverrides)
 	}
@@ -452,7 +491,9 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 }
 
 // processFile reads, compresses, and encrypts the file data.
-// This is step 2 of the new POST-first upload flow.
+// This is step 1 of the upload flow — it runs BEFORE createDatasetRecord so
+// the real sizes are known when the POST body is built. It has no network
+// side effect other than one KMS Encrypt call; it never uploads anything.
 func (p *Producer) processFile(ctx context.Context, filePath string, opts UploadOptions) (*ProcessedFileData, error) {
 	// Validate encryption/compression requirements
 	if !opts.Encrypt {
@@ -565,11 +606,18 @@ func (p *Producer) uploadToPresignedURL(ctx context.Context, uploadURL string, d
 }
 
 // UploadDataset uploads a dataset with optional encryption and compression.
-// NEW FLOW (POST-first to prevent race conditions):
-// 1. POST to /v1/datasets to create record and get presigned URL
-// 2. Process file (compress + encrypt)
-// 3. PUT to presigned URL
-// 4. Return dataset
+// FLOW (process-before-POST, still catalog-record-before-S3-upload):
+// 1. Process file (compress + encrypt) — no upload yet, so the real sizes
+//    are known.
+// 2. POST to /v1/datasets with those sizes plus version/record_count/
+//    metadata to create the record and get a presigned URL.
+// 3. PUT the processed bytes to the presigned URL.
+// 4. GET the dataset record and return it.
+//
+// Step 2 still happens before any bytes reach S3, so the race the original
+// POST-first refactor closed (an S3 event firing before the catalog record
+// exists) stays closed. A refused POST still means zero PUTs — step 1 has no
+// side effect beyond one local compress and one KMS Encrypt call.
 //
 // NOTE: Use NewUploadOptions() to get sane defaults.
 func (p *Producer) UploadDataset(ctx context.Context, filePath string, opts UploadOptions) (*types.Dataset, error) {
@@ -599,19 +647,21 @@ func (p *Producer) UploadDataset(ctx context.Context, filePath string, opts Uplo
 		return nil, fmt.Errorf("encryption requested but KMS key not found")
 	}
 
-	// Step 1: Create dataset record and get presigned URL
-	createResp, err := p.createDatasetRecord(ctx, filePath, opts)
+	// Step 1: Process file (encrypt/compress) so the real sizes are known
+	// before the POST.
+	processedData, err := p.processFile(ctx, filePath, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 2: Create dataset record — now WITH the real sizes/version/
+	// record_count/metadata — and get a presigned URL.
+	createResp, err := p.createDatasetRecord(ctx, filePath, opts, processedData)
 	if err != nil {
 		return nil, err
 	}
 
 	fmt.Printf("✅ Dataset record created: %s\n", createResp.ID)
-
-	// Step 2: Process file (encrypt/compress)
-	processedData, err := p.processFile(ctx, filePath, opts)
-	if err != nil {
-		return nil, err
-	}
 
 	// Step 3: Upload to presigned URL
 	if err := p.uploadToPresignedURL(ctx, createResp.UploadURL, processedData.Data); err != nil {
@@ -728,33 +778,119 @@ func (p *Producer) makeAPIRequest(ctx context.Context, method, path string, body
 	return nil
 }
 
-// ListMyDatasets lists all datasets uploaded by this producer
-func (p *Producer) ListMyDatasets(ctx context.Context) ([]types.Dataset, error) {
-	var datasets []types.Dataset
+// maxListPages caps how many pages paginateAll will follow for a single
+// list call, so a server whose total_pages disagrees with reality (or lies)
+// can't make a list method loop forever.
+const maxListPages = 1000
 
-	path := fmt.Sprintf("/v1/datasets?producer_id=%s", url.QueryEscape(p.CustomerID))
+// paginateAll drives fetchPage across pages 1..N, appending each page's
+// items in order. It stops at the server-reported totalPages or at the
+// first page that comes back with zero items, whichever happens first —
+// the empty-page check is what keeps a server that misreports totalPages
+// (e.g. always claims more pages than it actually has) from ever being
+// trusted past its real data.
+//
+// fetchPage also returns the page number the server actually served
+// (respPage), nil when the response omits that field. A server that
+// ignores the requested ?page and keeps re-serving the same page (instead
+// of honestly reporting it) would otherwise make this loop append the same
+// items over and over until totalPages is reached — paginateAll rejects
+// that mismatch instead of silently duplicating data.
+//
+// A response that omits page entirely is only trusted on a single-page
+// result (totalPages <= 1, where there is nothing to be ambiguous about).
+// Once more than one page is being followed, an omitted page is treated
+// the same as a mismatch: the real API always echoes the page it served,
+// so a multi-page response missing that field means a server that can't be
+// trusted to be advancing either — accepting it silently would let a
+// page-ignoring server return the first page N times over with no error.
+//
+// The first response also locks the pagination shape for the whole call:
+// its totalPages value, and whether it carried the page field. Every later
+// response must match both, or paginateAll errors instead of appending —
+// a server that reports total_pages=3 on page 1 and then total_pages=1
+// while omitting page on page 2 would otherwise dodge the checks above
+// (each response is self-consistent on its own) and silently re-serve the
+// same page under a shape that looks like a valid single page.
+func paginateAll[T any](fetchPage func(page int) (items []T, respPage *int, totalPages int, err error)) ([]T, error) {
+	all := []T{}
 
-	if err := p.makeAPIRequest(ctx, "GET", path, nil, &datasets); err != nil {
-		return nil, err
+	var (
+		lockedTotalPages  int
+		lockedPagePresent bool
+	)
+
+	for page := 1; page <= maxListPages; page++ {
+		items, respPage, totalPages, err := fetchPage(page)
+		if err != nil {
+			return nil, err
+		}
+
+		if page == 1 {
+			lockedTotalPages = totalPages
+			lockedPagePresent = respPage != nil
+		} else if totalPages != lockedTotalPages {
+			return nil, fmt.Errorf("list pagination: server reported total_pages=%d on page 1 but total_pages=%d on page %d", lockedTotalPages, totalPages, page)
+		} else if (respPage != nil) != lockedPagePresent {
+			return nil, fmt.Errorf("list pagination: server's page field presence on page %d (present=%v) no longer matches page 1 (present=%v)", page, respPage != nil, lockedPagePresent)
+		}
+
+		switch {
+		case respPage != nil && *respPage != page:
+			return nil, fmt.Errorf("list pagination: requested page %d but server returned page %d", page, *respPage)
+		case respPage == nil && totalPages > 1:
+			return nil, fmt.Errorf("list pagination: requested page %d of %d but server response omitted the page field", page, totalPages)
+		}
+
+		all = append(all, items...)
+
+		if len(items) == 0 || page >= totalPages {
+			break
+		}
 	}
 
-	return datasets, nil
+	return all, nil
 }
 
-// GetDatasetSubscribers lists all subscribers for a specific dataset.
+// ListMyDatasets lists all datasets uploaded by this producer, following
+// every page of GET /v1/datasets' paginated response until total_pages is
+// exhausted.
+func (p *Producer) ListMyDatasets(ctx context.Context) ([]types.Dataset, error) {
+	return paginateAll(func(page int) ([]types.Dataset, *int, int, error) {
+		path := fmt.Sprintf("/v1/datasets?producer_id=%s&page=%d&limit=100", url.QueryEscape(p.CustomerID), page)
+
+		var response struct {
+			Datasets   []types.Dataset `json:"datasets"`
+			Page       *int            `json:"page"`
+			TotalPages int             `json:"total_pages"`
+		}
+
+		if err := p.makeAPIRequest(ctx, "GET", path, nil, &response); err != nil {
+			return nil, nil, 0, err
+		}
+
+		return response.Datasets, response.Page, response.TotalPages, nil
+	})
+}
+
+// GetDatasetSubscribers lists all subscribers for a specific dataset,
+// following every page of GET /v1/subscriptions' paginated response.
 func (p *Producer) GetDatasetSubscribers(ctx context.Context, datasetID string) ([]types.Subscription, error) {
-	var response struct {
-		Subscriptions []types.Subscription `json:"subscriptions"`
-		Count         int                  `json:"count"`
-	}
+	return paginateAll(func(page int) ([]types.Subscription, *int, int, error) {
+		path := fmt.Sprintf("/v1/subscriptions?dataset_id=%s&page=%d&limit=100", url.QueryEscape(datasetID), page)
 
-	path := fmt.Sprintf("/v1/subscriptions?dataset_id=%s", url.QueryEscape(datasetID))
+		var response struct {
+			Subscriptions []types.Subscription `json:"subscriptions"`
+			Page          *int                 `json:"page"`
+			TotalPages    int                  `json:"total_pages"`
+		}
 
-	if err := p.makeAPIRequest(ctx, http.MethodGet, path, nil, &response); err != nil {
-		return nil, err
-	}
+		if err := p.makeAPIRequest(ctx, http.MethodGet, path, nil, &response); err != nil {
+			return nil, nil, 0, err
+		}
 
-	return response.Subscriptions, nil
+		return response.Subscriptions, response.Page, response.TotalPages, nil
+	})
 }
 
 // RevokeSubscription revokes a subscription.

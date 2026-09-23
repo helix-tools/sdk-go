@@ -1,6 +1,6 @@
 # SDK-GO: POST-First Upload Flow Implementation
 
-**ClickUp Task:** `86e00pauy`  
+**ClickUp Task:** `86e00pauy` (POST-first), `86e3d27v3` (process-before-POST sizes fix)
 **Issue:** Race condition where datasets were uploaded to S3 before catalog record was created  
 **Status:** ✅ Implemented & Tested
 
@@ -8,13 +8,20 @@
 
 ## Summary
 
-Refactored the `UploadDataset()` method to follow a **POST-first upload flow** to prevent race conditions. The SDK now creates the dataset record in the catalog FIRST to get a presigned URL, THEN uploads the data.
+Refactored the `UploadDataset()` method to follow a **POST-first upload flow** to prevent race conditions. The SDK creates the dataset record in the catalog before any bytes reach S3.
+
+**Revised (v2.16.0):** the POST-first refactor below originally POSTed before processing the
+file, so it sent zero sizes, an empty `version`, and dropped `record_count`/`file_format`/
+`encoding` — the catalog record lost those fields on every re-upload. The flow now processes
+the file (compress + encrypt, no upload) FIRST, so the POST carries the real values, while still
+POSTing before any bytes reach S3 (the original race-condition fix is unaffected — see
+`CHANGELOG.md`).
 
 ---
 
 ## Flow Changes
 
-### ❌ Old Flow (Race Condition)
+### ❌ Original Flow (Race Condition)
 ```
 1. Read file
 2. Compress locally
@@ -25,17 +32,30 @@ Refactored the `UploadDataset()` method to follow a **POST-first upload flow** t
    ❌ Problem: Race window between S3 upload and catalog registration
 ```
 
-### ✅ New Flow (POST-First)
+### ⚠️ v2.15.0 Flow (POST-First, but POST-before-processing)
 ```
-1. POST to /v1/datasets with metadata
+1. POST to /v1/datasets with metadata (sizes unknown yet: 0, version: "")
    → API returns: { id, upload_url (presigned), s3_key }
 2. Read file
 3. Compress locally
 4. Encrypt locally
 5. PUT to presigned URL (no AWS credentials needed)
 6. GET /v1/datasets/:id to fetch final record
-   ✅ Catalog record exists BEFORE upload
-   ✅ No race condition
+   ✅ Catalog record exists BEFORE upload (no race)
+   ❌ Problem: sizes/version/record_count/file_format/encoding are wrong on every POST
+```
+
+### ✅ Current Flow (v2.16.0: process-before-POST, still catalog-before-upload)
+```
+1. Read file, compress locally, encrypt locally (no upload yet)
+2. POST to /v1/datasets WITH the real original/compressed/encrypted sizes,
+   version (today's UTC date, caller-overridable), record_count, and
+   metadata.file_format/.encoding
+   → API returns: { id, upload_url (presigned), s3_key }
+3. PUT the already-processed bytes to the presigned URL (no AWS credentials needed)
+4. GET /v1/datasets/:id to fetch final record
+   ✅ Catalog record exists BEFORE upload (no race — step 2 still precedes step 3)
+   ✅ Catalog record carries real sizes/version/metadata, matching v1.3.11
    ✅ Presigned URL = scoped, time-limited access
 ```
 
@@ -64,46 +84,48 @@ type ProcessedFileData struct {
 
 ### New Methods
 
-#### 1. `createDatasetRecord()`
-**Step 1:** Creates catalog record and retrieves presigned URL
-- Analyzes data schema
-- POSTs to `/v1/datasets` with name, metadata, category, etc.
-- Returns `CreateDatasetResponse` with presigned URL
-
-#### 2. `processFile()`
-**Step 2:** Processes file (compress + encrypt)
+#### 1. `processFile()`
+**Step 1:** Processes file (compress + encrypt), no upload
 - Validates encryption/compression requirements
 - Reads file
 - Compresses with gzip
 - Encrypts with KMS envelope encryption
-- Returns `ProcessedFileData`
+- Returns `ProcessedFileData` (now also carries the real sizes used by step 2)
+
+#### 2. `createDatasetRecord(ctx, filePath, opts, processed *ProcessedFileData)`
+**Step 2:** Creates catalog record and retrieves presigned URL
+- Analyzes data schema (independent read of the same file)
+- POSTs to `/v1/datasets` with name, metadata, category, sizes (from
+  `processed.Sizes`), `version`, `record_count`, etc.
+- Returns `CreateDatasetResponse` with presigned URL
 
 #### 3. `uploadToPresignedURL()`
 **Step 3:** Uploads to presigned URL
-- PUTs data to presigned URL using `http.Client`
+- PUTs the already-processed data to presigned URL using `http.Client`
 - No AWS credentials needed (presigned URL handles auth)
 - Returns error if upload fails
 
 ### Updated Method
 
-#### `UploadDataset()` - Orchestrates the new flow
+#### `UploadDataset()` - Orchestrates the current flow
 ```go
 func (p *Producer) UploadDataset(ctx context.Context, filePath string, opts UploadOptions) (*types.Dataset, error) {
     // Validate defaults
-    
-    // Step 1: Create dataset record, get presigned URL
-    createResp, err := p.createDatasetRecord(ctx, filePath, opts)
-    
-    // Step 2: Process file (encrypt/compress)
+
+    // Step 1: Process file (encrypt/compress) — no upload yet, so the real
+    // sizes are known before the POST.
     processedData, err := p.processFile(ctx, filePath, opts)
-    
+
+    // Step 2: Create dataset record WITH those sizes, get presigned URL.
+    createResp, err := p.createDatasetRecord(ctx, filePath, opts, processedData)
+
     // Step 3: Upload to presigned URL
     err = p.uploadToPresignedURL(ctx, createResp.UploadURL, processedData.Data)
-    
+
     // Step 4: Fetch and return dataset
     dataset := &types.Dataset{}
     p.makeAPIRequest(ctx, "GET", fmt.Sprintf("/v1/datasets/%s", createResp.ID), nil, dataset)
-    
+
     return dataset, nil
 }
 ```

@@ -158,7 +158,7 @@ type DownloadURLInfo struct {
 
 // Dataset represents a dataset in the catalog.
 type Dataset struct {
-	ID       string `json:"_id"`
+	ID       string `json:"id"`
 	Name     string `json:"name"`
 	Metadata struct {
 		CompressionEnabled bool `json:"compression_enabled"`
@@ -696,44 +696,47 @@ func (c *Consumer) decompressData(data []byte) ([]byte, error) {
 //	// List datasets from a specific producer
 //	datasets, err := consumer.ListDatasets(ctx, "company-123456")
 func (c *Consumer) ListDatasets(ctx context.Context, producerID ...string) ([]Dataset, error) {
-	type DatasetsResponse struct {
-		Datasets []Dataset `json:"datasets"`
-		Count    int       `json:"count"`
-	}
+	return paginateAll(func(page int) ([]Dataset, *int, int, error) {
+		path := fmt.Sprintf("/v1/datasets?page=%d&limit=100", page)
+		if len(producerID) > 0 && producerID[0] != "" {
+			path = fmt.Sprintf("/v1/datasets?producer_id=%s&page=%d&limit=100", url.QueryEscape(producerID[0]), page)
+		}
 
-	path := "/v1/datasets"
-	if len(producerID) > 0 && producerID[0] != "" {
-		path = fmt.Sprintf("/v1/datasets?producer_id=%s", url.QueryEscape(producerID[0]))
-	}
+		var response struct {
+			Datasets   []Dataset `json:"datasets"`
+			Page       *int      `json:"page"`
+			TotalPages int       `json:"total_pages"`
+		}
 
-	var response DatasetsResponse
-	if err := c.makeAPIRequest(ctx, http.MethodGet, path, nil, &response); err != nil {
-		return nil, err
-	}
+		if err := c.makeAPIRequest(ctx, http.MethodGet, path, nil, &response); err != nil {
+			return nil, nil, 0, err
+		}
 
-	return response.Datasets, nil
+		return response.Datasets, response.Page, response.TotalPages, nil
+	})
 }
 
 // ListSubscriptions lists all active subscriptions for this consumer.
 // For "both" customers (who are both producer and consumer), use opts.Role to filter by role.
 func (c *Consumer) ListSubscriptions(ctx context.Context, opts *ListSubscriptionsOptions) ([]Subscription, error) {
-	type SubscriptionsResponse struct {
-		Subscriptions []Subscription `json:"subscriptions"`
-		Count         int            `json:"count"`
-	}
+	return paginateAll(func(page int) ([]Subscription, *int, int, error) {
+		path := fmt.Sprintf("/v1/subscriptions?page=%d&limit=100", page)
+		if opts != nil && opts.Role != "" {
+			path += "&role=" + url.QueryEscape(opts.Role)
+		}
 
-	path := "/v1/subscriptions"
+		var response struct {
+			Subscriptions []Subscription `json:"subscriptions"`
+			Page          *int           `json:"page"`
+			TotalPages    int            `json:"total_pages"`
+		}
 
-	if opts != nil && opts.Role != "" {
-		path += "?role=" + url.QueryEscape(opts.Role)
-	}
+		if err := c.makeAPIRequest(ctx, http.MethodGet, path, nil, &response); err != nil {
+			return nil, nil, 0, err
+		}
 
-	var response SubscriptionsResponse
-	if err := c.makeAPIRequest(ctx, http.MethodGet, path, nil, &response); err != nil {
-		return nil, err
-	}
-
-	return response.Subscriptions, nil
+		return response.Subscriptions, response.Page, response.TotalPages, nil
+	})
 }
 
 // CreateSubscriptionRequest creates a subscription request to access a producer's datasets.
@@ -767,6 +770,80 @@ func (c *Consumer) CreateSubscriptionRequest(ctx context.Context, input types.Cr
 	}
 
 	return &result, nil
+}
+
+// maxListPages caps how many pages paginateAll will follow for a single
+// list call, so a server whose total_pages disagrees with reality (or lies)
+// can't make a list method loop forever.
+const maxListPages = 1000
+
+// paginateAll drives fetchPage across pages 1..N, appending each page's
+// items in order. It stops at the server-reported totalPages or at the
+// first page that comes back with zero items, whichever happens first —
+// the empty-page check is what keeps a server that misreports totalPages
+// (e.g. always claims more pages than it actually has) from ever being
+// trusted past its real data.
+//
+// fetchPage also returns the page number the server actually served
+// (respPage), nil when the response omits that field. A server that
+// ignores the requested ?page and keeps re-serving the same page (instead
+// of honestly reporting it) would otherwise make this loop append the same
+// items over and over until totalPages is reached — paginateAll rejects
+// that mismatch instead of silently duplicating data.
+//
+// A response that omits page entirely is only trusted on a single-page
+// result (totalPages <= 1, where there is nothing to be ambiguous about).
+// Once more than one page is being followed, an omitted page is treated
+// the same as a mismatch: the real API always echoes the page it served,
+// so a multi-page response missing that field means a server that can't be
+// trusted to be advancing either — accepting it silently would let a
+// page-ignoring server return the first page N times over with no error.
+//
+// The first response also locks the pagination shape for the whole call:
+// its totalPages value, and whether it carried the page field. Every later
+// response must match both, or paginateAll errors instead of appending —
+// a server that reports total_pages=3 on page 1 and then total_pages=1
+// while omitting page on page 2 would otherwise dodge the checks above
+// (each response is self-consistent on its own) and silently re-serve the
+// same page under a shape that looks like a valid single page.
+func paginateAll[T any](fetchPage func(page int) (items []T, respPage *int, totalPages int, err error)) ([]T, error) {
+	all := []T{}
+
+	var (
+		lockedTotalPages  int
+		lockedPagePresent bool
+	)
+
+	for page := 1; page <= maxListPages; page++ {
+		items, respPage, totalPages, err := fetchPage(page)
+		if err != nil {
+			return nil, err
+		}
+
+		if page == 1 {
+			lockedTotalPages = totalPages
+			lockedPagePresent = respPage != nil
+		} else if totalPages != lockedTotalPages {
+			return nil, fmt.Errorf("list pagination: server reported total_pages=%d on page 1 but total_pages=%d on page %d", lockedTotalPages, totalPages, page)
+		} else if (respPage != nil) != lockedPagePresent {
+			return nil, fmt.Errorf("list pagination: server's page field presence on page %d (present=%v) no longer matches page 1 (present=%v)", page, respPage != nil, lockedPagePresent)
+		}
+
+		switch {
+		case respPage != nil && *respPage != page:
+			return nil, fmt.Errorf("list pagination: requested page %d but server returned page %d", page, *respPage)
+		case respPage == nil && totalPages > 1:
+			return nil, fmt.Errorf("list pagination: requested page %d of %d but server response omitted the page field", page, totalPages)
+		}
+
+		all = append(all, items...)
+
+		if len(items) == 0 || page >= totalPages {
+			break
+		}
+	}
+
+	return all, nil
 }
 
 // makeAPIRequest makes an authenticated API request.
