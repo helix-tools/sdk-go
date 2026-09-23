@@ -43,7 +43,7 @@ func TestCreateDatasetRecord_IncludesS3BucketName(t *testing.T) {
 
 	opts := NewUploadOptions("e2e-bucket-test")
 	opts.Category = "general"
-	if _, err := p.createDatasetRecord(context.Background(), dataFile, opts); err != nil {
+	if _, err := p.createDatasetRecord(context.Background(), dataFile, opts, fakeProcessedFileData()); err != nil {
 		t.Fatalf("createDatasetRecord returned error: %v", err)
 	}
 
@@ -120,7 +120,7 @@ func TestCreateDatasetRecord_IncludesVisibility(t *testing.T) {
 	}
 
 	opts := NewUploadOptions("e2e-visibility-test")
-	if _, err := p.createDatasetRecord(context.Background(), dataFile, opts); err != nil {
+	if _, err := p.createDatasetRecord(context.Background(), dataFile, opts, fakeProcessedFileData()); err != nil {
 		t.Fatalf("createDatasetRecord returned error: %v", err)
 	}
 
@@ -157,7 +157,7 @@ func TestCreateDatasetRecord_VisibilityOverridable(t *testing.T) {
 
 	opts := NewUploadOptions("e2e-visibility-override-test")
 	opts.DatasetOverrides = map[string]any{"visibility": "public"}
-	if _, err := p.createDatasetRecord(context.Background(), dataFile, opts); err != nil {
+	if _, err := p.createDatasetRecord(context.Background(), dataFile, opts, fakeProcessedFileData()); err != nil {
 		t.Fatalf("createDatasetRecord returned error: %v", err)
 	}
 
@@ -172,4 +172,20 @@ func keysOf(m map[string]any) []string {
 		ks = append(ks, k)
 	}
 	return ks
+}
+
+// fakeProcessedFileData stands in for a real processFile() result in tests
+// that drive createDatasetRecord directly without paying for real
+// compress+KMS-encrypt work.
+func fakeProcessedFileData() *ProcessedFileData {
+	return &ProcessedFileData{
+		OriginalSize: 100,
+		Sizes: map[string]any{
+			"original_size_bytes":   int64(100),
+			"compressed_size_bytes": int64(40),
+			"encrypted_size_bytes":  int64(56),
+			"encryption_enabled":    true,
+			"compression_enabled":   true,
+		},
+	}
 }

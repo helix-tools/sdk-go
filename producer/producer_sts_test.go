@@ -87,7 +87,7 @@ func TestMakeAPIRequest_StaticMode_NoSecurityTokenHeader(t *testing.T) {
 		captured = r.Clone(r.Context())
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`[]`))
+		_, _ = w.Write([]byte(`{"datasets":[],"total_count":0,"page":1,"limit":100,"total_pages":0}`))
 	}))
 	defer server.Close()
 
@@ -117,7 +117,7 @@ func TestMakeAPIRequest_STSMode_SecurityTokenHeaderPresentAndSigned(t *testing.T
 		captured = r.Clone(r.Context())
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`[]`))
+		_, _ = w.Write([]byte(`{"datasets":[],"total_count":0,"page":1,"limit":100,"total_pages":0}`))
 	}))
 	defer server.Close()
 
