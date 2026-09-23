@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -43,12 +47,42 @@ func newTestProducerWithKMS(apiURL, kmsURL string) *Producer {
 // embedded for the encrypted data key.
 const fakeKMSCiphertextBlobB64 = "ZmFrZS1jaXBoZXJ0ZXh0LWJsb2I="
 
+// capturedDataKey lets a test recover the REAL AES-256 data key
+// encryptData generated and sent to KMS Encrypt as plaintext (KMS's real
+// job is only to protect that key at rest; a mock never needs to, so
+// capturing it here is enough to fully decrypt what was uploaded and prove
+// a real round trip, not just envelope shape).
+type capturedDataKey struct {
+	mu  sync.Mutex
+	key []byte
+}
+
+func (c *capturedDataKey) get() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.key
+}
+
 // newFakeKMSServer returns an httptest server that answers KMS Encrypt calls
 // (the only KMS action encryptData issues) with a fixed, decodable
-// CiphertextBlob so processFile can complete without a live KMS key.
-func newFakeKMSServer(t *testing.T) *httptest.Server {
+// CiphertextBlob so processFile can complete without a live KMS key. When
+// capture is non-nil, it also records the real plaintext data key from each
+// request so a test can independently decrypt the uploaded envelope.
+func newFakeKMSServer(t *testing.T, capture *capturedDataKey) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if capture != nil {
+			var req struct {
+				Plaintext string `json:"Plaintext"`
+			}
+			raw, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(raw, &req)
+			if dataKey, err := base64.StdEncoding.DecodeString(req.Plaintext); err == nil {
+				capture.mu.Lock()
+				capture.key = dataKey
+				capture.mu.Unlock()
+			}
+		}
 		w.Header().Set("Content-Type", "application/x-amz-json-1.1")
 		_, _ = w.Write([]byte(`{"CiphertextBlob":"` + fakeKMSCiphertextBlobB64 + `","KeyId":"test-kms-key"}`))
 	}))
@@ -275,20 +309,20 @@ func TestCreateDatasetRecord_ExplicitEmptyVersionOverridesComputedDate(t *testin
 // TestUploadDataset_NothingUploadedWhenPOSTRefused is acceptance question 2:
 // it drives the REAL public UploadDataset end-to-end (real processFile
 // compress+KMS-encrypt pass, real createDatasetRecord POST) against a mock
-// API that refuses the POST, and a mock presigned-PUT target that must never
-// receive a request.
+// API that refuses the POST. Unlike an earlier version of this test, it does
+// NOT check a separate, never-wired-in "presigned PUT" server for zero hits
+// — that only proves the producer didn't call THAT specific URL, not that it
+// made no further call at all. Instead every producer-bound HTTP request
+// (POST, and any hypothetical follow-up PUT/GET a regression might add) goes
+// through ONE shared handler that counts every hit, so "exactly 1 request
+// total" is the actual invariant under test.
 func TestUploadDataset_NothingUploadedWhenPOSTRefused(t *testing.T) {
 	for _, status := range []int{426, 403, 500} {
 		status := status
 		t.Run(http.StatusText(status), func(t *testing.T) {
-			var putCount int64
-			putServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				atomic.AddInt64(&putCount, 1)
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer putServer.Close()
-
+			var totalRequests int64
 			apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				atomic.AddInt64(&totalRequests, 1)
 				if r.URL.Path == "/v1/datasets" && r.Method == http.MethodPost {
 					w.WriteHeader(status)
 					_, _ = w.Write([]byte(`{"error":"refused"}`))
@@ -298,7 +332,7 @@ func TestUploadDataset_NothingUploadedWhenPOSTRefused(t *testing.T) {
 			}))
 			defer apiServer.Close()
 
-			kmsServer := newFakeKMSServer(t)
+			kmsServer := newFakeKMSServer(t, nil)
 			defer kmsServer.Close()
 
 			p := newTestProducerWithKMS(apiServer.URL, kmsServer.URL)
@@ -312,9 +346,22 @@ func TestUploadDataset_NothingUploadedWhenPOSTRefused(t *testing.T) {
 			if !strings.Contains(err.Error(), "failed to create dataset record") {
 				t.Errorf("expected error to mention dataset-record creation, got: %v", err)
 			}
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("expected error to unwrap to *APIError, got %T: %v", err, err)
+			}
+			if apiErr.StatusCode != status {
+				t.Errorf("APIError.StatusCode = %d, want %d", apiErr.StatusCode, status)
+			}
 
-			if got := atomic.LoadInt64(&putCount); got != 0 {
-				t.Errorf("presigned-PUT server received %d request(s), want 0 — a refused POST must upload nothing", got)
+			// Exactly 1: the refused POST itself, and NOTHING else — no PUT to
+			// any URL, no GET. TestUploadDataset_ProcessesBeforePOST_SoRealSizesReachTheBody
+			// is this counter's positive control: it proves the identical
+			// counting mechanism correctly reaches >1 on a real POST+PUT+GET
+			// happy path, so a silent "counts nothing, always passes" bug in
+			// the counter itself would be caught there, not hidden here.
+			if got := atomic.LoadInt64(&totalRequests); got != 1 {
+				t.Errorf("apiServer received %d total request(s), want exactly 1 (the refused POST) — a refused POST must upload nothing and issue no further call", got)
 			}
 		})
 	}
@@ -325,15 +372,26 @@ func TestUploadDataset_NothingUploadedWhenPOSTRefused(t *testing.T) {
 // POST body the mock API receives carries the REAL sizes of the processed
 // (compressed+encrypted) bytes, not zeros — only possible if processFile ran
 // before createDatasetRecord built the payload. It also exercises the
-// presigned PUT and the trailing GET, and inspects the uploaded envelope to
-// confirm its SHAPE is exactly what encryptData has always produced ([4B key
-// length][encrypted key][16B iv][16B tag][ciphertext]) — i.e. only the call
-// ORDER changed, not compressData/encryptData themselves.
+// presigned PUT and the trailing GET, and — using the fake KMS server's
+// captured (real) data key — fully AES-256-GCM DECRYPTS and gunzips the
+// uploaded envelope back to the exact original plaintext, proving a real
+// round trip rather than just the envelope's byte-length shape. A tampered
+// copy of the same envelope must fail to decrypt (negative control), which
+// is what makes the successful decrypt above meaningful rather than
+// accidental.
 func TestUploadDataset_ProcessesBeforePOST_SoRealSizesReachTheBody(t *testing.T) {
 	plaintext := []byte(strings.Repeat(`{"id":1,"name":"ringboost"}`+"\n", 500))
 	dataFile := filepath.Join(t.TempDir(), "data.ndjson")
 	if err := os.WriteFile(dataFile, plaintext, 0o644); err != nil {
 		t.Fatalf("write temp file: %v", err)
+	}
+
+	// Independently computed expected compressed size, via the same
+	// (unmodified) compressData this PR does not touch — an exact target,
+	// not just "smaller than original".
+	wantCompressed, err := (&Producer{}).compressData(plaintext, 6)
+	if err != nil {
+		t.Fatalf("compressData (expected value) returned error: %v", err)
 	}
 
 	var postBody map[string]any
@@ -368,7 +426,8 @@ func TestUploadDataset_ProcessesBeforePOST_SoRealSizesReachTheBody(t *testing.T)
 	}))
 	defer apiServer.Close()
 
-	kmsServer := newFakeKMSServer(t)
+	var capture capturedDataKey
+	kmsServer := newFakeKMSServer(t, &capture)
 	defer kmsServer.Close()
 
 	p := newTestProducerWithKMS(apiServer.URL, kmsServer.URL)
@@ -395,12 +454,12 @@ func TestUploadDataset_ProcessesBeforePOST_SoRealSizesReachTheBody(t *testing.T)
 		t.Errorf("metadata.original_size_bytes = %v, want %d (the real plaintext size — proves processFile ran BEFORE the POST)", md["original_size_bytes"], len(plaintext))
 	}
 	compressedSize, ok := md["compressed_size_bytes"].(float64)
-	if !ok || compressedSize <= 0 || compressedSize >= originalSize {
-		t.Errorf("metadata.compressed_size_bytes = %v, want a real positive value smaller than original_size_bytes (%v)", md["compressed_size_bytes"], originalSize)
+	if !ok || int(compressedSize) != len(wantCompressed) {
+		t.Errorf("metadata.compressed_size_bytes = %v, want exactly %d (independently computed via compressData)", md["compressed_size_bytes"], len(wantCompressed))
 	}
 	encryptedSize, ok := md["encrypted_size_bytes"].(float64)
-	if !ok || encryptedSize <= compressedSize {
-		t.Errorf("metadata.encrypted_size_bytes = %v, want a real value larger than compressed_size_bytes (%v, envelope overhead)", md["encrypted_size_bytes"], compressedSize)
+	if !ok || int(encryptedSize) != len(uploadedBytes) {
+		t.Errorf("metadata.encrypted_size_bytes = %v, want exactly %d (len of the bytes actually uploaded)", md["encrypted_size_bytes"], len(uploadedBytes))
 	}
 
 	if len(uploadedBytes) < 4+16+16 {
@@ -425,6 +484,50 @@ func TestUploadDataset_ProcessesBeforePOST_SoRealSizesReachTheBody(t *testing.T)
 	}
 	if len(ciphertext) == 0 {
 		t.Fatalf("ciphertext section is empty")
+	}
+
+	// Real decrypt: the fake KMS server captured the REAL AES-256 data key
+	// encryptData generated (it sends that key to KMS Encrypt as plaintext;
+	// a real KMS would protect it at rest, but our mock only needs to see
+	// it). Mirror encryptData's exact scheme in reverse.
+	dataKey := capture.get()
+	if len(dataKey) != 32 {
+		t.Fatalf("captured data key length = %d, want 32 (AES-256)", len(dataKey))
+	}
+	block, err := aes.NewCipher(dataKey)
+	if err != nil {
+		t.Fatalf("aes.NewCipher: %v", err)
+	}
+	aesGCM, err := cipher.NewGCMWithNonceSize(block, 16)
+	if err != nil {
+		t.Fatalf("cipher.NewGCMWithNonceSize: %v", err)
+	}
+	sealed := append(append([]byte{}, ciphertext...), tag...)
+
+	decompressed, err := aesGCM.Open(nil, iv, sealed, nil)
+	if err != nil {
+		t.Fatalf("AES-GCM decrypt of the uploaded envelope failed: %v", err)
+	}
+	gz, err := gzip.NewReader(bytes.NewReader(decompressed))
+	if err != nil {
+		t.Fatalf("gzip.NewReader on decrypted data: %v", err)
+	}
+	defer func() { _ = gz.Close() }()
+	gotPlaintext, err := io.ReadAll(gz)
+	if err != nil {
+		t.Fatalf("gunzip of decrypted data: %v", err)
+	}
+	if !bytes.Equal(gotPlaintext, plaintext) {
+		t.Fatalf("full round-trip mismatch: decrypted+decompressed %d bytes, want the original %d-byte plaintext", len(gotPlaintext), len(plaintext))
+	}
+
+	// Negative control: a tampered tag must fail to decrypt — proving the
+	// successful Open() above is really authenticating this exact envelope,
+	// not a no-op that would accept anything.
+	tamperedSealed := append([]byte{}, sealed...)
+	tamperedSealed[len(tamperedSealed)-1] ^= 0xFF
+	if _, err := aesGCM.Open(nil, iv, tamperedSealed, nil); err == nil {
+		t.Fatal("expected AES-GCM decrypt to fail on a tampered tag, got success")
 	}
 }
 
@@ -487,7 +590,7 @@ func TestUploadDataset_ExplicitVersionOverride_EndToEnd(t *testing.T) {
 	}))
 	defer apiServer.Close()
 
-	kmsServer := newFakeKMSServer(t)
+	kmsServer := newFakeKMSServer(t, nil)
 	defer kmsServer.Close()
 
 	p := newTestProducerWithKMS(apiServer.URL, kmsServer.URL)
