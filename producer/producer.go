@@ -778,33 +778,73 @@ func (p *Producer) makeAPIRequest(ctx context.Context, method, path string, body
 	return nil
 }
 
-// ListMyDatasets lists all datasets uploaded by this producer
-func (p *Producer) ListMyDatasets(ctx context.Context) ([]types.Dataset, error) {
-	var datasets []types.Dataset
+// maxListPages caps how many pages paginateAll will follow for a single
+// list call, so a server whose total_pages disagrees with reality (or lies)
+// can't make a list method loop forever.
+const maxListPages = 1000
 
-	path := fmt.Sprintf("/v1/datasets?producer_id=%s", url.QueryEscape(p.CustomerID))
+// paginateAll drives fetchPage across pages 1..N, appending each page's
+// items in order. It stops at the server-reported totalPages or at the
+// first page that comes back with zero items, whichever happens first —
+// the empty-page check is what keeps a server that misreports totalPages
+// (e.g. always claims more pages than it actually has) from ever being
+// trusted past its real data.
+func paginateAll[T any](fetchPage func(page int) (items []T, totalPages int, err error)) ([]T, error) {
+	var all []T
 
-	if err := p.makeAPIRequest(ctx, "GET", path, nil, &datasets); err != nil {
-		return nil, err
+	for page := 1; page <= maxListPages; page++ {
+		items, totalPages, err := fetchPage(page)
+		if err != nil {
+			return nil, err
+		}
+
+		all = append(all, items...)
+
+		if len(items) == 0 || page >= totalPages {
+			break
+		}
 	}
 
-	return datasets, nil
+	return all, nil
 }
 
-// GetDatasetSubscribers lists all subscribers for a specific dataset.
+// ListMyDatasets lists all datasets uploaded by this producer, following
+// every page of GET /v1/datasets' paginated response until total_pages is
+// exhausted.
+func (p *Producer) ListMyDatasets(ctx context.Context) ([]types.Dataset, error) {
+	return paginateAll(func(page int) ([]types.Dataset, int, error) {
+		path := fmt.Sprintf("/v1/datasets?producer_id=%s&page=%d&limit=100", url.QueryEscape(p.CustomerID), page)
+
+		var response struct {
+			Datasets   []types.Dataset `json:"datasets"`
+			TotalPages int             `json:"total_pages"`
+		}
+
+		if err := p.makeAPIRequest(ctx, "GET", path, nil, &response); err != nil {
+			return nil, 0, err
+		}
+
+		return response.Datasets, response.TotalPages, nil
+	})
+}
+
+// GetDatasetSubscribers lists all subscribers for a specific dataset,
+// following every page of GET /v1/subscriptions' paginated response.
 func (p *Producer) GetDatasetSubscribers(ctx context.Context, datasetID string) ([]types.Subscription, error) {
-	var response struct {
-		Subscriptions []types.Subscription `json:"subscriptions"`
-		Count         int                  `json:"count"`
-	}
+	return paginateAll(func(page int) ([]types.Subscription, int, error) {
+		path := fmt.Sprintf("/v1/subscriptions?dataset_id=%s&page=%d&limit=100", url.QueryEscape(datasetID), page)
 
-	path := fmt.Sprintf("/v1/subscriptions?dataset_id=%s", url.QueryEscape(datasetID))
+		var response struct {
+			Subscriptions []types.Subscription `json:"subscriptions"`
+			TotalPages    int                  `json:"total_pages"`
+		}
 
-	if err := p.makeAPIRequest(ctx, http.MethodGet, path, nil, &response); err != nil {
-		return nil, err
-	}
+		if err := p.makeAPIRequest(ctx, http.MethodGet, path, nil, &response); err != nil {
+			return nil, 0, err
+		}
 
-	return response.Subscriptions, nil
+		return response.Subscriptions, response.TotalPages, nil
+	})
 }
 
 // RevokeSubscription revokes a subscription.

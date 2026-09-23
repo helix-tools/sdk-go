@@ -61,6 +61,26 @@
   be caught by diffing against the other two.
 
 ### Fixed
+- **`ListMyDatasets`, `GetDatasetSubscribers`, `ListDatasets` and
+  `ListSubscriptions` decode the API's paginated response and follow every
+  page.** `GET /v1/datasets` and `GET /v1/subscriptions` both return a
+  paginated object (`{datasets|subscriptions, total_count, page, limit,
+  total_pages}`), not a bare array. `Producer.ListMyDatasets` decoded
+  straight into `[]types.Dataset`, so every call failed with "cannot
+  unmarshal object into Go value of type []types.Dataset" — observed
+  against production on 2026-09-23. `Producer.GetDatasetSubscribers`,
+  `Consumer.ListDatasets` and `Consumer.ListSubscriptions` already decoded
+  the envelope correctly but never followed `total_pages`, so any producer
+  or consumer with more than the API's default page size (20 items) got a
+  silently truncated result with no error. All four now page through the
+  full result (capped at 1000 pages, and stopping early if the server
+  returns an empty page) before returning; public signatures are
+  unchanged. `Producer.ListSubscriptionRequests`, `Producer.ListSubscribers`,
+  `Producer.ListConsumers`, `Consumer.ListSubscriptionRequests` /
+  `ListMySubscriptionRequests` and `Consumer.BrowseMarketplace` were
+  checked against their API handlers and are unaffected — their endpoints
+  either return every matching row unbounded (no pagination) or already
+  expose the pagination block to the caller by design.
 - **`UploadDataset` sends real sizes, `version` and full metadata again
   (wire-body change).** The v2.15.0 POST-first refactor (race-condition
   fix) moved the catalog-record `POST /v1/datasets` BEFORE file processing,

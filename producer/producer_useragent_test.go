@@ -31,7 +31,7 @@ func TestMakeAPIRequest_SetsUserAgent(t *testing.T) {
 		got = r.Header.Get("User-Agent")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`[]`))
+		_, _ = w.Write([]byte(`{"datasets":[],"total_count":0,"page":1,"limit":100,"total_pages":0}`))
 	}))
 	defer server.Close()
 
@@ -57,7 +57,7 @@ func TestMakeAPIRequest_UserAgentNotInSignedHeaders(t *testing.T) {
 		captured = r.Clone(r.Context())
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`[]`))
+		_, _ = w.Write([]byte(`{"datasets":[],"total_count":0,"page":1,"limit":100,"total_pages":0}`))
 	}))
 	defer server.Close()
 
