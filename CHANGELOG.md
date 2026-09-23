@@ -100,7 +100,16 @@
   followed, an omitted `page` is now treated the same as a mismatch and
   errors immediately, naming the requested page and the server's claimed
   `total_pages`; a single-page result still accepts an absent `page` field
-  unchanged.
+  unchanged. A third follow-up review found that both guards check each
+  response only against itself, so a server that changes its story between
+  requests could dodge both at once: page 1 honestly reports `{page:1,
+  total_pages:3}`, then page 2 repeats the same item while dropping
+  `total_pages` to 1 and omitting `page` — which reads as a valid
+  single-page response in isolation and was silently accepted, duplicating
+  items with no error. Pagination now locks its shape (`total_pages`, and
+  whether `page` was present) from the first response and errors the
+  moment a later response departs from either, including `total_pages`
+  simply changing between otherwise well-formed pages (e.g. `3` then `2`).
 - **`UploadDataset` sends real sizes, `version` and full metadata again
   (wire-body change).** The v2.15.0 POST-first refactor (race-condition
   fix) moved the catalog-record `POST /v1/datasets` BEFORE file processing,

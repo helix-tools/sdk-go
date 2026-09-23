@@ -297,3 +297,74 @@ verified untouched) and failed two:
    here, so nothing more needs to be pinned than "the check runs every iteration," which the
    existing round-2 `*_ServerIgnoresPageParam_ReturnsError` tests already exercise for the
    mismatched-not-omitted variant of the same "wrong on request 2" shape.
+
+# PLAN — list-pagination round 4 (last): lock pagination shape after page 1 (ClickUp 86e3d27v3,
+# same PR #28)
+
+Lane: fix/upload-sends-sizes · sdk-go. Base: HEAD of this branch (`dbcc9d8`), same PR as all three
+list-pagination rounds above. A third independent review passed item 3 (unrelated to this fix,
+verified untouched) and identified the exact gap round 3's self-attack item 2 flagged but left
+uncovered by a real test:
+
+2. Both round-2/3 checks (`respPage != nil && *respPage != page`, `respPage == nil &&
+   totalPages > 1`) evaluate ONLY the current response against itself — neither compares it
+   against what page 1 already reported. A server that answers page 1 honestly
+   (`{"datasets":[{"id":"A"}],"page":1,"total_pages":3}`) and then, on page 2, repeats item A
+   while OMITTING `page` and reporting `total_pages:1` (or `0`) passes both existing checks:
+   `respPage == nil && totalPages > 1` is false because `totalPages` on THIS response is 1, not
+   3. The response looks exactly like a legitimate single-page reply in isolation, so
+   `paginateAll` appended it and returned `[A,A]` with no error — reproduced locally before any
+   fix (`TestPREMISE_...`, deleted after confirming; see lane report for the pre-fix run).
+
+## Change
+- `producer/producer.go`, `consumer/consumer.go`: `paginateAll` now locks the pagination shape
+  from the first response — its `totalPages` value and whether `page` was present — into two
+  loop-scoped variables (`lockedTotalPages`, `lockedPagePresent`) set on `page == 1`. Every
+  response after the first is checked against that lock before the existing per-response checks
+  run: a `totalPages` that differs from page 1's errors immediately (covers both the reviewer's
+  omit-and-drop scenario and a plain `total_pages` change with `page` still present and correct,
+  e.g. `3` then `2`); a `page`-field presence that flips (present → absent or vice versa) errors
+  immediately. Both new checks return before any item from the offending response is appended, so
+  the all-or-nothing behavior of every prior guard is preserved — no duplicates ever reach the
+  caller on an error path.
+- `producer/producer_list_pagination_test.go`, `consumer/consumer_list_pagination_test.go`: added
+  `*_ServerOmitsPageAndDropsTotalPages_ReturnsError` per list method (4 total) — the reviewer's
+  exact two-request sequence — and `*_TotalPagesChangesBetweenPages_ReturnsError` per method (2
+  total, producer + consumer datasets methods) for the `page`-present-but-`total_pages`-changed
+  variant, asserting an error, zero returned items, and exactly 2 requests (page 1 succeeds, page
+  2 detects the shape change). The three existing "well-behaved 3-page server" and "single-page
+  omits `page`, still accepted" tests per package were re-run unmodified and still pass — the lock
+  only ever compares AFTER page 1 sets it, so a consistent server is never affected.
+- `CHANGELOG.md`: extended the existing list-pagination `### Fixed` entry with the shape-lock case.
+- `PLAN.md`: this section.
+
+## Self-attack
+1. **Does locking on page 1 false-positive on a legitimate multi-page server whose LAST page is
+   naturally short (fewer items than `limit`) but still reports the same `total_pages` and `page`
+   shape?** No: the lock only tracks `totalPages` and `page`-presence, never item count per page —
+   a shorter final page changes `len(items)`, not either locked field, so it passes through
+   unchanged. Covered by the existing `*_FollowsThreePages_InOrder` tests, whose last page (`{"e"}`,
+   `{"sub-4"}`) is shorter than the earlier ones and still succeeds.
+2. **Does the lock ever compare page 1 against itself and false-positive on request 1?** No: the
+   lock is SET, not checked, when `page == 1` (an `if`/`else if` chain, not a loop-invariant
+   comparison) — there is nothing to compare page 1 against yet, so the first response can never
+   trip either new check regardless of its shape. This is also why the round-3
+   `*_ServerOmitsPageWithMultiplePages_ReturnsError` tests (whose disqualifying response IS page 1)
+   still fail on their original, pre-round-4 check (`respPage == nil && totalPages > 1`) and never
+   reach the new lock logic — re-run unmodified and confirmed still green.
+3. **Could a malicious server pass the lock by matching page 1's `total_pages` and `page`-presence
+   exactly, while still re-serving page 1's items forever?** No: that's exactly the round-2 guard's
+   job (`respPage != nil && *respPage != page`), which still runs immediately after the new lock
+   checks, unchanged — a `page`-present response that keeps claiming `page:1` fails that check on
+   request 2 regardless of what the lock does. The two guards are complementary: the lock catches a
+   server that changes its SHAPE; the round-2/3 guards catch a server that keeps the shape but
+   lies about WHICH page it served.
+
+## Negative control
+`lockedTotalPages`/`lockedPagePresent` and the two `else if` branches removed, `paginateAll`
+reverted to round 3's exact form: both new tests
+(`TestListMyDatasets_ServerOmitsPageAndDropsTotalPages_ReturnsError`,
+`TestListMyDatasets_TotalPagesChangesBetweenPages_ReturnsError`) failed with "unexpectedly
+succeeded", `datasets` populated with the duplicated item(s) — reproducing exactly the
+pre-fix `[A,A]` duplication the review described. Restored; `diff` against the pre-revert file
+confirmed byte-identical restoration; full suite re-run green. Output pasted in the lane report.

@@ -798,13 +798,35 @@ const maxListPages = 1000
 // so a multi-page response missing that field means a server that can't be
 // trusted to be advancing either — accepting it silently would let a
 // page-ignoring server return the first page N times over with no error.
+//
+// The first response also locks the pagination shape for the whole call:
+// its totalPages value, and whether it carried the page field. Every later
+// response must match both, or paginateAll errors instead of appending —
+// a server that reports total_pages=3 on page 1 and then total_pages=1
+// while omitting page on page 2 would otherwise dodge the checks above
+// (each response is self-consistent on its own) and silently re-serve the
+// same page under a shape that looks like a valid single page.
 func paginateAll[T any](fetchPage func(page int) (items []T, respPage *int, totalPages int, err error)) ([]T, error) {
 	all := []T{}
+
+	var (
+		lockedTotalPages  int
+		lockedPagePresent bool
+	)
 
 	for page := 1; page <= maxListPages; page++ {
 		items, respPage, totalPages, err := fetchPage(page)
 		if err != nil {
 			return nil, err
+		}
+
+		if page == 1 {
+			lockedTotalPages = totalPages
+			lockedPagePresent = respPage != nil
+		} else if totalPages != lockedTotalPages {
+			return nil, fmt.Errorf("list pagination: server reported total_pages=%d on page 1 but total_pages=%d on page %d", lockedTotalPages, totalPages, page)
+		} else if (respPage != nil) != lockedPagePresent {
+			return nil, fmt.Errorf("list pagination: server's page field presence on page %d (present=%v) no longer matches page 1 (present=%v)", page, respPage != nil, lockedPagePresent)
 		}
 
 		switch {

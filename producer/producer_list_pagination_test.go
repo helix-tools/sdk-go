@@ -404,6 +404,115 @@ func TestListMyDatasets_SinglePageOmitsPage_Accepted(t *testing.T) {
 	}
 }
 
+// TestListMyDatasets_ServerOmitsPageAndDropsTotalPages_ReturnsError is the
+// review round-4 finding: the round-3 guard checks each response only
+// against ITSELF (respPage vs totalPages on that same response), so a
+// server that flips its story between requests can dodge both existing
+// checks at once — page 1 honestly reports {page:1, total_pages:3}, then
+// page 2 repeats the same item while omitting "page" AND dropping
+// total_pages to 1, which reads as a valid single-page response in
+// isolation. Without locking the pagination shape after page 1, this
+// silently produced [A,A] with no error. paginateAll must notice
+// total_pages changed from what page 1 promised and stop.
+func TestListMyDatasets_ServerOmitsPageAndDropsTotalPages_ReturnsError(t *testing.T) {
+	var requestCount int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&requestCount, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if n == 1 {
+			_, _ = w.Write([]byte(`{"datasets":[{"id":"A"}],"page":1,"total_pages":3}`))
+			return
+		}
+		// Repeats item A, omits "page", and reports total_pages=1 instead
+		// of the 3 it promised on page 1.
+		_, _ = w.Write([]byte(`{"datasets":[{"id":"A"}],"total_pages":1}`))
+	}))
+	defer server.Close()
+
+	p := newTestProducer(server.URL)
+
+	datasets, err := p.ListMyDatasets(context.Background())
+	if err == nil {
+		t.Fatalf("ListMyDatasets unexpectedly succeeded against a server that changes total_pages and drops \"page\" after page 1; datasets = %+v", datasets)
+	}
+	if len(datasets) != 0 {
+		t.Errorf("datasets = %+v, want no duplicated items on error", datasets)
+	}
+	if got := atomic.LoadInt32(&requestCount); got != 2 {
+		t.Errorf("request count = %d, want exactly 2 (page 1 succeeds, page 2 detects the shape change)", got)
+	}
+}
+
+// TestListMyDatasets_TotalPagesChangesBetweenPages_ReturnsError pins that
+// the locked-shape guard fires on total_pages alone, even when "page" stays
+// present and correct on every response — a server can't be trusted if it
+// changes its mind about how many pages exist partway through a call.
+func TestListMyDatasets_TotalPagesChangesBetweenPages_ReturnsError(t *testing.T) {
+	var requestCount int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&requestCount, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if n == 1 {
+			_, _ = w.Write([]byte(datasetsPageJSON([]string{"a"}, 1, 3)))
+			return
+		}
+		// page is present and correct, but total_pages dropped 3 -> 2.
+		_, _ = w.Write([]byte(datasetsPageJSON([]string{"b"}, 2, 2)))
+	}))
+	defer server.Close()
+
+	p := newTestProducer(server.URL)
+
+	datasets, err := p.ListMyDatasets(context.Background())
+	if err == nil {
+		t.Fatalf("ListMyDatasets unexpectedly succeeded against a server whose total_pages changed 3->2; datasets = %+v", datasets)
+	}
+	if len(datasets) != 0 {
+		t.Errorf("datasets = %+v, want no items on error", datasets)
+	}
+	if got := atomic.LoadInt32(&requestCount); got != 2 {
+		t.Errorf("request count = %d, want exactly 2 (page 1 succeeds, page 2 detects total_pages changed)", got)
+	}
+}
+
+// TestGetDatasetSubscribers_ServerOmitsPageAndDropsTotalPages_ReturnsError
+// is the same round-4 scenario for GetDatasetSubscribers, pinning that the
+// locked-shape guard applies to both paginateAll callers in this package.
+func TestGetDatasetSubscribers_ServerOmitsPageAndDropsTotalPages_ReturnsError(t *testing.T) {
+	var requestCount int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&requestCount, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if n == 1 {
+			body := `{"subscriptions":[{"_id":"sub-1","consumer_id":"cons-1","producer_id":"test-producer","dataset_id":"ds-1","tier":"free","status":"active"}],"total_count":3,"count":1,"page":1,"limit":100,"total_pages":3}`
+			_, _ = w.Write([]byte(body))
+			return
+		}
+		body := `{"subscriptions":[{"_id":"sub-1","consumer_id":"cons-1","producer_id":"test-producer","dataset_id":"ds-1","tier":"free","status":"active"}],"total_count":3,"count":1,"total_pages":1}`
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	p := newTestProducer(server.URL)
+
+	subs, err := p.GetDatasetSubscribers(context.Background(), "ds-1")
+	if err == nil {
+		t.Fatalf("GetDatasetSubscribers unexpectedly succeeded against a server that changes total_pages and drops \"page\" after page 1; subs = %+v", subs)
+	}
+	if len(subs) != 0 {
+		t.Errorf("subs = %+v, want no duplicated items on error", subs)
+	}
+	if got := atomic.LoadInt32(&requestCount); got != 2 {
+		t.Errorf("request count = %d, want exactly 2 (page 1 succeeds, page 2 detects the shape change)", got)
+	}
+}
+
 // TestListMyDatasets_EmptyResult_ReturnsEmptyNotNilSlice is acceptance
 // criterion 4: a successful empty list must marshal to JSON `[]`, not
 // `null`, exactly as it did before the pagination fix.
