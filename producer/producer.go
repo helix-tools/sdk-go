@@ -796,6 +796,14 @@ const maxListPages = 1000
 // of honestly reporting it) would otherwise make this loop append the same
 // items over and over until totalPages is reached — paginateAll rejects
 // that mismatch instead of silently duplicating data.
+//
+// A response that omits page entirely is only trusted on a single-page
+// result (totalPages <= 1, where there is nothing to be ambiguous about).
+// Once more than one page is being followed, an omitted page is treated
+// the same as a mismatch: the real API always echoes the page it served,
+// so a multi-page response missing that field means a server that can't be
+// trusted to be advancing either — accepting it silently would let a
+// page-ignoring server return the first page N times over with no error.
 func paginateAll[T any](fetchPage func(page int) (items []T, respPage *int, totalPages int, err error)) ([]T, error) {
 	all := []T{}
 
@@ -805,8 +813,11 @@ func paginateAll[T any](fetchPage func(page int) (items []T, respPage *int, tota
 			return nil, err
 		}
 
-		if respPage != nil && *respPage != page {
+		switch {
+		case respPage != nil && *respPage != page:
 			return nil, fmt.Errorf("list pagination: requested page %d but server returned page %d", page, *respPage)
+		case respPage == nil && totalPages > 1:
+			return nil, fmt.Errorf("list pagination: requested page %d of %d but server response omitted the page field", page, totalPages)
 		}
 
 		all = append(all, items...)

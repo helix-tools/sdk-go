@@ -193,9 +193,11 @@ correctness, unchanged by this round) and failed three:
     parameter instead of a request counter, and the test asserts the exact requested-page
     sequence (`[1,2,3]`) via a 3-page fixture — a client that re-requested page 1 would fail this
     assertion instead of being silently satisfied.
-  - The two negative-control tests were rewritten to call the public method (`ListMyDatasets` /
+  - The two bare-array-shape tests were rewritten to call the public method (`ListMyDatasets` /
     `ListDatasets`) against a bare-array response and assert an error, instead of a standalone
-    `json.Unmarshal`.
+    `json.Unmarshal`. These prove the envelope-object decode target rejects a bare array; they are
+    NOT pagination-regression controls (round 3 below renamed them and fixed this description
+    after review found them mislabeled as such).
   - New tests per list method (8 total): `*_ServerIgnoresPageParam_ReturnsError` (mock always
     reports `page=1, total_pages=3`; asserts an error, zero returned items, and exactly 2
     requests) and `*_EmptyResult_ReturnsEmptyNotNilSlice` (asserts `json.Marshal` of an empty
@@ -223,3 +225,75 @@ correctness, unchanged by this round) and failed three:
    `consumer.Dataset\b` and `Dataset{` across the whole module (not just this package): zero
    hits outside its own declaration and `ListDatasets`'s decode target. `types.Dataset` (used by
    `GetDataset`/`DownloadDataset`/producer's `ListMyDatasets`) is a separate type, untouched.
+
+# PLAN — list-pagination round 3: page-omission guard, test relabeling (ClickUp 86e3d27v3,
+# same PR #28)
+
+Lane: fix/upload-sends-sizes · sdk-go. Base: HEAD of this branch (`62b41b9`), same PR as both
+list-pagination rounds above. A second independent review passed item 4 (unrelated to this fix,
+verified untouched) and failed two:
+
+2. Round 2's page-mismatch guard (`respPage != nil && *respPage != page`) only fires when the
+   response's `page` field is PRESENT and disagrees. A response that omits `page` entirely
+   (`respPage == nil`) skips the comparison and falls straight through — so a server that both
+   ignores `?page` AND never sends `page` back bypassed the guard completely, and a 3-page-claimed
+   response returning the same single item on every request produced `[A,A,A]` with no error.
+   Confirmed against the real API's datasets and subscriptions handlers
+   (`internal/resources/datasets/types.go`, `internal/resources/subscriptions/types.go`, both
+   `Page int json:"page"`, no `omitempty`) that a genuine response from either endpoint always
+   echoes the page it served — an omitted `page` field is never a legitimate single-request
+   response once more than one page is in play.
+3. `TestListDatasets_RejectsBareArrayShape` / `TestListMyDatasets_RejectsBareArrayShape` were
+   documented and (in producer's case) named as regression negative controls, but neither one
+   depends on the pagination-following fix (`paginateAll`'s loop, the page-mismatch guard) at all
+   — they depend only on the decode target being an envelope object instead of a bare-array slice,
+   which is a separate, already-settled part of round 1. Reverting round 2/3's pagination logic
+   while keeping the envelope decode target leaves both tests green, so citing them as pagination
+   regression coverage overstates what they prove.
+
+## Change
+- `producer/producer.go`, `consumer/consumer.go`: `paginateAll`'s per-page check is now a
+  `switch`: a present-and-mismatched `page` errors exactly as round 2 left it; a response that
+  OMITS `page` while the page being followed is not the only one (`totalPages > 1`) now also
+  errors, naming the requested page and total instead of silently trusting the response. A
+  single-page result (`totalPages <= 1`) still accepts an absent `page` field unchanged — there is
+  nothing ambiguous to detect when there was only ever one page to serve.
+- `producer/producer_list_pagination_test.go`, `consumer/consumer_list_pagination_test.go`: added
+  `*_ServerOmitsPageWithMultiplePages_ReturnsError` per list method (4 total) — the reviewer's
+  exact fixture (`{"datasets":[{"id":"A"}],"total_pages":3}`, `page` absent) — asserting an error,
+  zero returned items, and exactly 1 request (the very first response is already disqualifying, so
+  there's no second request to make); and `*_SinglePageOmitsPage_Accepted` per package (2 total)
+  confirming the unchanged accept-path. Negative control run for all four error tests: with the
+  `switch`'s second case reverted, all four fail, reproducing exactly the `[A,A,A]` (or `[sub-1,
+  sub-1, sub-1]`) duplication the review described — pasted in the lane report.
+- Renamed `TestListDatasets_RejectsBareArrayShape` → `TestListDatasets_EnvelopeDecodeRejectsBareArrayShape`
+  and `TestListMyDatasets_RejectsBareArrayShape` → `TestListMyDatasets_EnvelopeDecodeRejectsBareArrayShape`,
+  rewrote their doc comments to state plainly what they prove (bare-array rejection by the
+  envelope decode target) and to explicitly disclaim pagination-regression coverage, pointing at
+  the tests that actually cover that (`*_FollowsThreePages_InOrder`, `*_StopsOnEmptyPage...`,
+  `*_ServerIgnoresPageParam_ReturnsError`, `*_ServerOmitsPageWithMultiplePages_ReturnsError`).
+  Fixed round 2's PLAN.md bullet that called them "the two negative-control tests" in a context
+  that implied pagination coverage.
+- `CHANGELOG.md`: extended the existing list-pagination `### Fixed` entry with the page-omission
+  case.
+- `PLAN.md`: this section.
+
+## Self-attack
+1. **`total_pages=1` (or `0`) with no `page` — still accepted, exactly one request?** Yes: the new
+   `case respPage == nil && totalPages > 1` only fires when `totalPages > 1`, so a single-page (or
+   `totalPages<=0`, which the existing `page >= totalPages` stop condition already treats as
+   terminal after one request regardless) response with `page` omitted falls through both `switch`
+   cases and is accepted, exactly the pre-round-3 behavior. Covered by
+   `*_SinglePageOmitsPage_Accepted`, which asserts both zero error and exactly 1 request.
+2. **A first page WITH `page` and a later page WITHOUT it — error, not duplicates?** Yes: each
+   iteration re-evaluates `respPage`/`totalPages` from that iteration's own response, so a page 1
+   response carrying a correct `page` passes through and is appended, then a page 2 response
+   omitting `page` (with `totalPages > 1`, still true) hits the new case and returns `nil, err`
+   immediately — discarding everything accumulated so far, matching the existing mismatch case's
+   all-or-nothing behavior. No new test pins this exact two-request sequence (the four new tests
+   all fail on request 1, since the reviewer's fixture omits `page` from the very first response);
+   answered by code inspection — `paginateAll`'s loop has no special-case for "later" pages, the
+   same per-iteration check that fires on request 1 in the new tests fires identically on request 2
+   here, so nothing more needs to be pinned than "the check runs every iteration," which the
+   existing round-2 `*_ServerIgnoresPageParam_ReturnsError` tests already exercise for the
+   mismatched-not-omitted variant of the same "wrong on request 2" shape.

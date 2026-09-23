@@ -144,13 +144,22 @@ func TestListMyDatasets_StopsOnEmptyPageDespiteHighTotalPages(t *testing.T) {
 	}
 }
 
-// TestListMyDatasets_RejectsBareArrayShape is the negative control for
-// criterion 1, exercised through the public method rather than a
-// standalone json.Unmarshal: a server that regresses to the pre-fix bare
+// TestListMyDatasets_EnvelopeDecodeRejectsBareArrayShape proves exactly one
+// thing: ListMyDatasets' envelope-object decode target rejects a bare JSON
 // array (what "cannot unmarshal object into Go value of type
-// []types.Dataset" looked like in production) must make ListMyDatasets
-// itself fail, not merely a hand-rolled decode in the test body.
-func TestListMyDatasets_RejectsBareArrayShape(t *testing.T) {
+// []types.Dataset" looked like in production, back when the decode target
+// was []types.Dataset itself), exercised through the public method rather
+// than a standalone json.Unmarshal. It is NOT a regression control for the
+// pagination fix (following total_pages, the page-mismatch/page-omission
+// guard) — do not cite it as covering that. Restoring an envelope decoder
+// that simply never followed total_pages (single page only) still rejects
+// this same bare-array fixture, so this test stays green even with the
+// pagination-following logic reverted; only reverting the decode TARGET
+// itself back to []types.Dataset would turn it red, and nothing in this
+// package does that anymore. The page-mismatch/page-omission guard is
+// covered by TestListMyDatasets_ServerIgnoresPageParam_ReturnsError and
+// TestListMyDatasets_ServerOmitsPageWithMultiplePages_ReturnsError.
+func TestListMyDatasets_EnvelopeDecodeRejectsBareArrayShape(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -161,7 +170,7 @@ func TestListMyDatasets_RejectsBareArrayShape(t *testing.T) {
 	p := newTestProducer(server.URL)
 
 	if _, err := p.ListMyDatasets(context.Background()); err == nil {
-		t.Fatal("ListMyDatasets unexpectedly succeeded against a bare-array response; the negative control no longer holds")
+		t.Fatal("ListMyDatasets unexpectedly succeeded against a bare-array response; the envelope-decode check no longer holds")
 	}
 }
 
@@ -294,6 +303,104 @@ func TestGetDatasetSubscribers_ServerIgnoresPageParam_ReturnsError(t *testing.T)
 	}
 	if got := atomic.LoadInt32(&requestCount); got != 2 {
 		t.Errorf("request count = %d, want exactly 2 (page 1 succeeds, page 2 detects the mismatch)", got)
+	}
+}
+
+// TestListMyDatasets_ServerOmitsPageWithMultiplePages_ReturnsError is the
+// review round-3 finding: a server whose page-mismatch check has nothing
+// to compare against because it never sends "page" at all bypassed the
+// TestListMyDatasets_ServerIgnoresPageParam_ReturnsError guard entirely
+// (respPage stayed nil, so `respPage != nil && *respPage != page` never
+// fired), so a page-ignoring server that also omits "page" made
+// paginateAll happily re-append the same item for every claimed page. The
+// real API always echoes "page" on both /v1/datasets and /v1/subscriptions
+// (internal/resources/datasets and .../subscriptions types.go, `json:"page"`
+// with no `omitempty`), so once more than one page is being followed, a
+// response missing that field is untrustworthy and must error instead of
+// being silently accepted.
+func TestListMyDatasets_ServerOmitsPageWithMultiplePages_ReturnsError(t *testing.T) {
+	var requestCount int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requestCount, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Exactly the reviewer's server: total_pages > 1, "page" absent.
+		_, _ = w.Write([]byte(`{"datasets":[{"id":"A"}],"total_pages":3}`))
+	}))
+	defer server.Close()
+
+	p := newTestProducer(server.URL)
+
+	datasets, err := p.ListMyDatasets(context.Background())
+	if err == nil {
+		t.Fatalf("ListMyDatasets unexpectedly succeeded against a server that omits \"page\" on a multi-page response; datasets = %+v", datasets)
+	}
+	if len(datasets) != 0 {
+		t.Errorf("datasets = %+v, want no duplicated items on error", datasets)
+	}
+	if got := atomic.LoadInt32(&requestCount); got != 1 {
+		t.Errorf("request count = %d, want exactly 1 (the very first response already omits \"page\" while claiming 3 pages)", got)
+	}
+}
+
+// TestGetDatasetSubscribers_ServerOmitsPageWithMultiplePages_ReturnsError
+// is the same round-3 finding for GetDatasetSubscribers, pinning that the
+// guard applies to both paginateAll callers in this package, not just
+// ListMyDatasets.
+func TestGetDatasetSubscribers_ServerOmitsPageWithMultiplePages_ReturnsError(t *testing.T) {
+	var requestCount int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requestCount, 1)
+		body := `{"subscriptions":[{"_id":"sub-1","consumer_id":"cons-1","producer_id":"test-producer","dataset_id":"ds-1","tier":"free","status":"active"}],"total_count":3,"count":1,"total_pages":3}`
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	p := newTestProducer(server.URL)
+
+	subs, err := p.GetDatasetSubscribers(context.Background(), "ds-1")
+	if err == nil {
+		t.Fatalf("GetDatasetSubscribers unexpectedly succeeded against a server that omits \"page\" on a multi-page response; subs = %+v", subs)
+	}
+	if len(subs) != 0 {
+		t.Errorf("subs = %+v, want no duplicated items on error", subs)
+	}
+	if got := atomic.LoadInt32(&requestCount); got != 1 {
+		t.Errorf("request count = %d, want exactly 1 (the very first response already omits \"page\" while claiming 3 pages)", got)
+	}
+}
+
+// TestListMyDatasets_SinglePageOmitsPage_Accepted is the companion
+// acceptance case to the two tests above: a single-page result
+// (total_pages <= 1) has nothing ambiguous to detect from an omitted
+// "page" — there is only ever one page to have served — so it must stay
+// accepted exactly as before, not start erroring because of the new guard.
+func TestListMyDatasets_SinglePageOmitsPage_Accepted(t *testing.T) {
+	var requestCount int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requestCount, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"datasets":[{"id":"ds-a","name":"a","producer_id":"test-producer"}],"total_count":1,"limit":100,"total_pages":1}`))
+	}))
+	defer server.Close()
+
+	p := newTestProducer(server.URL)
+
+	datasets, err := p.ListMyDatasets(context.Background())
+	if err != nil {
+		t.Fatalf("ListMyDatasets: %v", err)
+	}
+	if len(datasets) != 1 || datasets[0].Name != "a" {
+		t.Fatalf("datasets = %+v, want exactly [a]", datasets)
+	}
+	if got := atomic.LoadInt32(&requestCount); got != 1 {
+		t.Errorf("request count = %d, want exactly 1", got)
 	}
 }
 

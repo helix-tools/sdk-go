@@ -91,7 +91,16 @@
   JSON-re-encoding the result got `null` — empty results are non-nil again;
   (3) `Consumer.Dataset.ID` was tagged `json:"_id"` while `GET /v1/datasets`
   actually sends `id`, so every dataset returned by `Consumer.ListDatasets`
-  had an empty `ID` — fixed to `json:"id"`.
+  had an empty `ID` — fixed to `json:"id"`. A second follow-up review found
+  that the (1) mismatch guard only fires when the response's `page` field
+  is present — a response that omits `page` entirely fell through the
+  check untouched, so a server that both ignores `?page` and never echoes
+  it back could still duplicate items with no error. The real API always
+  echoes `page` on both endpoints, so once more than one page is being
+  followed, an omitted `page` is now treated the same as a mismatch and
+  errors immediately, naming the requested page and the server's claimed
+  `total_pages`; a single-page result still accepts an absent `page` field
+  unchanged.
 - **`UploadDataset` sends real sizes, `version` and full metadata again
   (wire-body change).** The v2.15.0 POST-first refactor (race-condition
   fix) moved the catalog-record `POST /v1/datasets` BEFORE file processing,
