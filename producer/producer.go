@@ -360,10 +360,18 @@ type ProcessedFileData struct {
 	Analysis     *AnalysisResult
 }
 
-// createDatasetRecord creates a dataset record in the catalog and retrieves presigned URL.
-// This is step 1 of the new POST-first upload flow.
-func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opts UploadOptions) (*CreateDatasetResponse, error) {
-	// Analyze data before compression/encryption (memory-efficient streaming).
+// createDatasetRecord creates a dataset record in the catalog and retrieves a
+// presigned upload URL. This is step 2 of the upload flow — it runs AFTER
+// processFile (step 1) so the POST body carries the real sizes, version and
+// record_count, matching what v1.3.11 sent (producer.go buildDatasetPayload,
+// pre-v2). v2.15.0 called this before processFile, so it always POSTed
+// zero/absent sizes and an empty version; the caller (UploadDataset) still
+// POSTs before any bytes reach S3, so the catalog-record-before-upload race
+// protection the original POST-first refactor introduced is unchanged.
+func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opts UploadOptions, processed *ProcessedFileData) (*CreateDatasetResponse, error) {
+	// Analyze data (memory-efficient streaming). Independent of processFile's
+	// in-memory compress/encrypt pass over the same file, so it runs here
+	// regardless of step order.
 	var analysis *AnalysisResult
 	analysisResult, err := p.analyzeData(filePath, DefaultAnalysisOptions())
 	if err != nil {
@@ -372,27 +380,48 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 		analysis = analysisResult
 	}
 
-	// Build initial metadata (sizes will be updated after processing)
+	// Build metadata, starting from the caller's own keys.
 	metadata := make(map[string]any)
 	maps.Copy(metadata, opts.Metadata)
 
-	// Record encryption/compression so the CONSUMER download knows to reverse
-	// them: Consumer.DownloadDataset reads dataset.Metadata["encryption_enabled"]
-	// and ["compression_enabled"] to decide whether to decrypt/decompress. Without
-	// these, download returns the raw encrypted+compressed bytes and the round-trip
-	// sha256 mismatches. (Found 2026-07-06 by the SDK-only E2E suite — go round-trip
-	// corruption once notifications started arriving.) Upload mandates both.
-	metadata["encryption_enabled"] = opts.Encrypt
-	metadata["compression_enabled"] = opts.Compress
+	// Sizes (original/compressed/encrypted_size_bytes) plus
+	// encryption_enabled/compression_enabled, taken from the now-completed
+	// processFile pass. Matches v1.3.11's "sizes" map verbatim (same key
+	// names) instead of the encryption_enabled/compression_enabled-only pair
+	// v2.15.0 could set before processing had run.
+	//
+	// Also record encryption/compression so the CONSUMER download knows to
+	// reverse them: Consumer.DownloadDataset reads
+	// dataset.Metadata["encryption_enabled"] and ["compression_enabled"] to
+	// decide whether to decrypt/decompress. Without these, download returns
+	// the raw encrypted+compressed bytes and the round-trip sha256 mismatches.
+	// (Found 2026-07-06 by the SDK-only E2E suite — go round-trip corruption
+	// once notifications started arriving.) Upload mandates both.
+	maps.Copy(metadata, processed.Sizes)
 
-	// Add analysis results to metadata if available
+	// file_format / encoding defaults, matching v1.3.11's buildDatasetPayload
+	// (only fill if the caller didn't already set them via Metadata).
+	if _, exists := metadata["file_format"]; !exists {
+		metadata["file_format"] = "json"
+	}
+	if _, exists := metadata["encoding"]; !exists {
+		metadata["encoding"] = "utf-8"
+	}
+
+	// record_count defaults to 0, matching v1.3.11's buildDatasetPayload,
+	// which always set it (top-level AND in metadata) instead of omitting it
+	// when analysis failed.
+	recordCount := 0
 	if analysis != nil {
+		recordCount = analysis.RecordCount
 		metadata["schema"] = analysis.Schema
 		metadata["field_emptiness"] = analysis.FieldEmptiness
 		metadata["record_count"] = analysis.RecordCount
 		if analysis.AnalysisErrors > 0 {
 			metadata["analysis_errors"] = analysis.AnalysisErrors
 		}
+	} else {
+		metadata["record_count"] = 0
 	}
 
 	// s3_key MUST be sent, dataset-NAME-keyed, matching Python/TS
@@ -411,7 +440,13 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 	}
 	s3Key := fmt.Sprintf("datasets/%s/%s", opts.DatasetName, fileName)
 
-	// Build dataset payload (without size, which is set after upload).
+	// version defaults to today's UTC date, matching v1.3.11's
+	// buildDatasetPayload (`now.Format("2006-01-02")`), computed
+	// unconditionally so a caller who never touches DatasetOverrides still
+	// gets a non-empty version instead of the "" v2.15.0 sent.
+	version := time.Now().UTC().Format("2006-01-02")
+
+	// Build dataset payload, now WITH size, version and record_count.
 	// s3_bucket_name and access_tier are also REQUIRED by the create validator
 	// (ValidateCreateDatasetRequest rejects an empty s3_bucket_name and an
 	// access_tier not in {free,premium,enterprise}); the Python/TS SDKs send them
@@ -433,10 +468,14 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 		"s3_key":         s3Key,
 		"access_tier":    "free",
 		"visibility":     "private",
+		"version":        version,
+		"record_count":   recordCount,
 		"metadata":       metadata,
 	}
 
-	// Merge dataset overrides
+	// Merge dataset overrides — a caller's explicit value (including an
+	// explicit version, even "") always wins over the computed default
+	// above, matching v1.3.11's deepMergeMaps(payload, overrideCopy).
 	if opts.DatasetOverrides != nil {
 		maps.Copy(payload, opts.DatasetOverrides)
 	}
@@ -452,7 +491,9 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 }
 
 // processFile reads, compresses, and encrypts the file data.
-// This is step 2 of the new POST-first upload flow.
+// This is step 1 of the upload flow — it runs BEFORE createDatasetRecord so
+// the real sizes are known when the POST body is built. It has no network
+// side effect other than one KMS Encrypt call; it never uploads anything.
 func (p *Producer) processFile(ctx context.Context, filePath string, opts UploadOptions) (*ProcessedFileData, error) {
 	// Validate encryption/compression requirements
 	if !opts.Encrypt {
@@ -565,11 +606,18 @@ func (p *Producer) uploadToPresignedURL(ctx context.Context, uploadURL string, d
 }
 
 // UploadDataset uploads a dataset with optional encryption and compression.
-// NEW FLOW (POST-first to prevent race conditions):
-// 1. POST to /v1/datasets to create record and get presigned URL
-// 2. Process file (compress + encrypt)
-// 3. PUT to presigned URL
-// 4. Return dataset
+// FLOW (process-before-POST, still catalog-record-before-S3-upload):
+// 1. Process file (compress + encrypt) — no upload yet, so the real sizes
+//    are known.
+// 2. POST to /v1/datasets with those sizes plus version/record_count/
+//    metadata to create the record and get a presigned URL.
+// 3. PUT the processed bytes to the presigned URL.
+// 4. GET the dataset record and return it.
+//
+// Step 2 still happens before any bytes reach S3, so the race the original
+// POST-first refactor closed (an S3 event firing before the catalog record
+// exists) stays closed. A refused POST still means zero PUTs — step 1 has no
+// side effect beyond one local compress and one KMS Encrypt call.
 //
 // NOTE: Use NewUploadOptions() to get sane defaults.
 func (p *Producer) UploadDataset(ctx context.Context, filePath string, opts UploadOptions) (*types.Dataset, error) {
@@ -599,19 +647,21 @@ func (p *Producer) UploadDataset(ctx context.Context, filePath string, opts Uplo
 		return nil, fmt.Errorf("encryption requested but KMS key not found")
 	}
 
-	// Step 1: Create dataset record and get presigned URL
-	createResp, err := p.createDatasetRecord(ctx, filePath, opts)
+	// Step 1: Process file (encrypt/compress) so the real sizes are known
+	// before the POST.
+	processedData, err := p.processFile(ctx, filePath, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 2: Create dataset record — now WITH the real sizes/version/
+	// record_count/metadata — and get a presigned URL.
+	createResp, err := p.createDatasetRecord(ctx, filePath, opts, processedData)
 	if err != nil {
 		return nil, err
 	}
 
 	fmt.Printf("✅ Dataset record created: %s\n", createResp.ID)
-
-	// Step 2: Process file (encrypt/compress)
-	processedData, err := p.processFile(ctx, filePath, opts)
-	if err != nil {
-		return nil, err
-	}
 
 	// Step 3: Upload to presigned URL
 	if err := p.uploadToPresignedURL(ctx, createResp.UploadURL, processedData.Data); err != nil {

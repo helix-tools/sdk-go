@@ -61,6 +61,29 @@
   be caught by diffing against the other two.
 
 ### Fixed
+- **`UploadDataset` sends real sizes, `version` and full metadata again
+  (wire-body change).** The v2.15.0 POST-first refactor (race-condition
+  fix) moved the catalog-record `POST /v1/datasets` BEFORE file processing,
+  so it POSTed `original_size_bytes`/`compressed_size_bytes`/
+  `encrypted_size_bytes` as `0`, `version` as `""`, and dropped `record_count`
+  (top-level), `metadata.file_format` and `metadata.encoding` entirely —
+  every field v1.3.11 sent. The API stores exactly what it receives, so
+  every daily re-upload zeroed/blanked those fields in the catalog record.
+  `UploadDataset` now runs `processFile` (compress + encrypt, no upload)
+  FIRST, then builds the `POST /v1/datasets` body from the real result —
+  sizes, a computed `version` (today's UTC date, `now.Format("2006-01-02")`,
+  matching v1.3.11's `buildDatasetPayload`), `record_count` (top-level and
+  in `metadata`, defaulting to `0` when analysis fails, matching v1.3.11
+  instead of omitting the key), and `metadata.file_format`/`.encoding`
+  (`"json"`/`"utf-8"` defaults, only filled if the caller didn't already set
+  them). The POST still happens before any bytes reach S3 — file processing
+  has no network side effect beyond one local KMS `Encrypt` call — so the
+  race the original POST-first refactor closed (an S3 event firing before
+  the catalog record exists) is unaffected. `DatasetOverrides` still wins
+  over every computed value, including an explicit `version: ""`, matching
+  v1.3.11's unconditional `deepMergeMaps(payload, overrideCopy)`.
+  `compressData`/`encryptData` themselves are unchanged (verified by diff),
+  so the on-wire compress+encrypt byte format is unchanged.
 - `InviteConsumer`'s wire body now always sends the top-level `"tier"` key
   as `"free"` when `InviteConsumerInput.Tier` is left unset, instead of
   omitting the key. This is a **wire-body change** (the JSON payload POSTed
