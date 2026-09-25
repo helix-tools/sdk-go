@@ -156,3 +156,11 @@ func TestListDatasets_FollowsPagesAndKeepsFullRecordOnEveryPage(t *testing.T) {
 		t.Fatalf("datasets = %+v, want both pages with full records", datasets)
 	}
 }
+
+// A body the record decoder rejects is an error, not a half-filled row.
+func TestListDatasetRow_MalformedBodyErrors(t *testing.T) {
+	var ds Dataset
+	if err := json.Unmarshal([]byte(`{"id": 5}`), &ds); err == nil {
+		t.Fatal("expected a type error for a numeric id")
+	}
+}
