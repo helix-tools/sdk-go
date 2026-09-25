@@ -39,6 +39,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
@@ -196,15 +197,15 @@ func ssmParamCandidates(customerID, paramName string) []string {
 		env = "production"
 	}
 
+	// Only an explicit operator override and the one deployed prefix. The
+	// /helix/... prefixes tried by earlier releases never held these
+	// parameters, and probing them made a real error on the live path
+	// indistinguishable from an error on a dead one.
 	prefixes := []string{}
 	if prefix := strings.TrimRight(os.Getenv("HELIX_SSM_CUSTOMER_PREFIX"), "/"); prefix != "" {
 		prefixes = append(prefixes, prefix)
 	}
-	prefixes = append(prefixes,
-		fmt.Sprintf("/helix-tools/%s/customers", env),
-		fmt.Sprintf("/helix/%s/customers", env),
-		"/helix/customers",
-	)
+	prefixes = append(prefixes, fmt.Sprintf("/helix-tools/%s/customers", env))
 
 	seen := map[string]struct{}{}
 	candidates := []string{}
@@ -221,26 +222,36 @@ func ssmParamCandidates(customerID, paramName string) []string {
 	return candidates
 }
 
+// getSSMParameterValue resolves the first candidate parameter that exists.
+//
+// It fails closed: only a clean "parameter does not exist" answer moves on to
+// the next candidate. Any other error (access denied, throttling, network) is
+// the real problem with THIS candidate and is returned at once, so a later
+// candidate's unrelated failure can never mask it. When every candidate is
+// missing the error says so without repeating the parameter paths.
 func getSSMParameterValue(ctx context.Context, client *ssm.Client, names []string) (string, error) {
-	var lastErr error
 	for _, name := range names {
 		resp, err := client.GetParameter(ctx, &ssm.GetParameterInput{
 			Name:           aws.String(name),
 			WithDecryption: aws.Bool(true),
 		})
-		if err == nil && resp.Parameter != nil && resp.Parameter.Value != nil {
-			return aws.ToString(resp.Parameter.Value), nil
-		}
 		if err != nil {
-			lastErr = err
-		} else {
-			lastErr = fmt.Errorf("empty SSM parameter value for %s", name)
+			var notFound *ssmtypes.ParameterNotFound
+			if errors.As(err, &notFound) {
+				continue
+			}
+
+			return "", err
 		}
+
+		if resp.Parameter == nil || resp.Parameter.Value == nil {
+			return "", fmt.Errorf("SSM parameter has no value")
+		}
+
+		return aws.ToString(resp.Parameter.Value), nil
 	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("SSM parameter not found")
-	}
-	return "", lastErr
+
+	return "", errors.New("SSM parameter not found")
 }
 
 // compressData compresses data using gzip.
