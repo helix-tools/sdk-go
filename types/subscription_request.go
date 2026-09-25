@@ -62,7 +62,10 @@ type SubscriptionRequestsResponse struct {
 	Count    int                   `json:"count"`
 }
 
-// ApproveRequestResponse is the response for approving a subscription request.
+// ApproveRequestResponse is the response for approving a subscription request:
+// the updated Request plus the Subscription the approval provisioned.
+// Subscription is nil while the request is approved_pending_payment (nothing
+// is provisioned until the consumer completes checkout).
 type ApproveRequestResponse struct {
 	Request      SubscriptionRequest `json:"request"`
 	Subscription *Subscription       `json:"subscription,omitempty"`
@@ -78,8 +81,13 @@ type CreateSubscriptionRequestInput struct {
 
 // ApproveSubscriptionRequestOptions contains options for approving a subscription request.
 type ApproveSubscriptionRequestOptions struct {
-	Notes     *string // Optional: Internal notes about the approval
-	DatasetID *string // Optional: Specific dataset ID to grant access to
+	Notes *string // Optional: Internal notes about the approval
+
+	// DatasetID is Deprecated: the API has no such field and always grants
+	// the scope of the original request, so the option is no longer sent.
+	// Passing it prints a one-time deprecation warning; a later release will
+	// remove it.
+	DatasetID *string
 
 	// PriceMonthlyCents sets the per-consumer monthly USD-cents price for
 	// THIS approval, overriding the dataset's own marketplace price for
