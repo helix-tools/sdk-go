@@ -26,10 +26,11 @@ func (e *UnauthorizedError) Error() string {
 }
 
 // KillSwitchOffError is returned when the server responds with HTTP 503
-// on an agent endpoint. The server returns 503 when the global kill-
-// switch is flipped off (HELIX_AGENTS_ENABLED=false) or when a
-// per-component dependency — registry, audit reader, MCP builder,
-// A2A service — has not been wired.
+// AND the response body marks an operator kill-switch (see
+// isKillSwitch503). The server returns that 503 when the global kill-
+// switch is flipped off (HELIX_AGENTS_ENABLED=false). A 503 that carries
+// no such marker — a load balancer, an upstream outage — is reported as
+// a ServiceUnavailableError instead.
 //
 // Callers should not retry this error in a tight loop; the kill-
 // switch flip is an operator action and typically resolves on the
@@ -44,6 +45,30 @@ func (e *KillSwitchOffError) Error() string {
 		return fmt.Sprintf("agent: kill-switch is off / agents disabled (request_id=%s)", e.RequestID)
 	}
 	return "agent: kill-switch is off / agents disabled"
+}
+
+// ServiceUnavailableError is returned for an HTTP 503 whose body does not
+// mark an operator kill-switch: a generic outage (load balancer, upstream
+// failure, dependency not wired). Unlike KillSwitchOffError it is worth
+// retrying with backoff.
+//
+// RetryAfterSeconds is parsed from the Retry-After response header; zero means
+// the server did not send one.
+type ServiceUnavailableError struct {
+	RetryAfterSeconds int
+	RequestID         string
+}
+
+// Error implements the error interface.
+func (e *ServiceUnavailableError) Error() string {
+	msg := "agent: service unavailable"
+	if e.RetryAfterSeconds > 0 {
+		msg += fmt.Sprintf(", retry after %ds", e.RetryAfterSeconds)
+	}
+	if e.RequestID != "" {
+		msg += fmt.Sprintf(" (request_id=%s)", e.RequestID)
+	}
+	return msg
 }
 
 // RateLimitedError is returned when the server responds with HTTP 429.
@@ -130,6 +155,13 @@ func IsUnauthorized(err error) bool {
 // KillSwitchOffError.
 func IsKillSwitchOff(err error) bool {
 	var target *KillSwitchOffError
+	return errors.As(err, &target)
+}
+
+// IsServiceUnavailable reports whether the error is (or wraps) a
+// ServiceUnavailableError.
+func IsServiceUnavailable(err error) bool {
+	var target *ServiceUnavailableError
 	return errors.As(err, &target)
 }
 
