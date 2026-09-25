@@ -47,8 +47,8 @@ func main() {
 		log.Fatal(err)
 	}
 
-	modulePath := goList(root, "-m", "-f", "{{.Path}}")[0]
-	pkgs := goList(root, "-f", "{{.ImportPath}}|{{.Dir}}|{{.Name}}", "./...")
+	modulePath := strings.TrimSpace(run(root, exec.Command("go", "list", "-m", "-f", "{{.Path}}")))
+	pkgs := strings.Fields(run(root, exec.Command("go", "list", "-f", "{{.ImportPath}}|{{.Dir}}|{{.Name}}", "./...")))
 
 	fset := token.NewFileSet()
 	imp := importer.ForCompiler(fset, "source", nil).(types.ImporterFrom)
@@ -68,20 +68,23 @@ func main() {
 		g.addPackage(fset, imp, importPath, pkgDir)
 	}
 
-	os.Stdout.Write(g.render())
+	if _, err := os.Stdout.Write(g.render()); err != nil {
+		log.Fatal(err)
+	}
 }
 
-func goList(dir string, args ...string) []string {
-	cmd := exec.Command("go", append([]string{"list"}, args...)...)
+// run executes cmd (built from constant arguments by the caller) in dir and
+// returns its stdout.
+func run(dir string, cmd *exec.Cmd) string {
 	cmd.Dir = dir
 	cmd.Stderr = os.Stderr
 
 	out, err := cmd.Output()
 	if err != nil {
-		log.Fatalf("go list %v: %v", args, err)
+		log.Fatalf("%s: %v", strings.Join(cmd.Args, " "), err)
 	}
 
-	return strings.Fields(strings.TrimSpace(string(out)))
+	return string(out)
 }
 
 type gen struct {
