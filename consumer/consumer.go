@@ -37,6 +37,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/aws/smithy-go/middleware"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // emptyPayloadHash is the SHA256 hash of an empty payload.
@@ -191,18 +193,18 @@ func (e *APIError) IsConflict() bool { return e.StatusCode == http.StatusConflic
 // IsRateLimited reports a 429: back off and retry.
 func (e *APIError) IsRateLimited() bool { return e.StatusCode == http.StatusTooManyRequests }
 
-// Dataset is one row of Consumer.ListDatasets: the full catalog record
-// (embedded types.Dataset — the same shape Consumer.GetDataset returns, so ID,
-// Name, ProducerID, Category, Description, Status, sizes, Marketplace and every
-// other field are available directly) plus the two metadata flags this package
-// has always exposed.
+// Dataset is one row of Consumer.ListDatasets. ID, Name and the two Metadata
+// flags are the fields this package has always exposed, unchanged in name, type
+// and meaning; Record carries the full catalog record — the same *types.Dataset
+// shape Consumer.GetDataset returns (ProducerID, Category, Description, Status,
+// sizes, Marketplace, the raw metadata map, ...) — so a listing no longer needs
+// one GetDataset call per row.
 //
-// Metadata is kept, with its original bool-flag shape, so code written against
-// the previous four-field Dataset still compiles and behaves the same; it
-// shadows the record's raw metadata map, which stays reachable as
-// Dataset.Dataset.Metadata.
+// Record is set on every row ListDatasets returns; it is nil only on a Dataset
+// built by hand.
 type Dataset struct {
-	types.Dataset
+	ID   string `json:"id"`
+	Name string `json:"name"`
 
 	// Metadata holds the two flags download handling reads, resolved exactly as
 	// DownloadDataset resolves them (resolveEncryptCompress): an explicit
@@ -213,18 +215,20 @@ type Dataset struct {
 		CompressionEnabled bool `json:"compression_enabled"`
 		EncryptionEnabled  bool `json:"encryption_enabled"`
 	} `json:"metadata"`
+
+	// Record is the full catalog record for this row.
+	Record *types.Dataset `json:"-"`
 }
 
-// UnmarshalJSON decodes the full catalog record and derives the Metadata
-// flags from it. Without it the embedded types.Dataset decoder would be
-// promoted and the flags would never be filled.
+// UnmarshalJSON decodes the full catalog record (so ID is filled from "id" or
+// "_id", like every types.Dataset) and derives the legacy fields from it.
 func (d *Dataset) UnmarshalJSON(data []byte) error {
 	var record types.Dataset
 	if err := json.Unmarshal(data, &record); err != nil {
 		return err
 	}
 
-	*d = Dataset{Dataset: record}
+	*d = Dataset{ID: record.ID, Name: record.Name, Record: &record}
 	d.Metadata.EncryptionEnabled, d.Metadata.CompressionEnabled = resolveEncryptCompress(&record)
 
 	return nil
@@ -373,9 +377,27 @@ func (c *Consumer) GetDataset(ctx context.Context, datasetID string) (*types.Dat
 func (c *Consumer) GetDownloadURL(ctx context.Context, datasetID string) (*DownloadURLInfo, error) {
 	path := fmt.Sprintf("/v1/datasets/%s/download", url.PathEscape(datasetID))
 
-	var urlInfo DownloadURLInfo
-	if err := c.makeAPIRequest(ctx, http.MethodGet, path, nil, &urlInfo); err != nil {
+	var raw json.RawMessage
+	if err := c.makeAPIRequest(ctx, http.MethodGet, path, nil, &raw); err != nil {
 		return nil, err
+	}
+
+	var urlInfo DownloadURLInfo
+	if err := json.Unmarshal(raw, &urlInfo); err != nil {
+		return nil, err
+	}
+
+	// The legacy nested dataset object is tagged "_id", but the API identifies a
+	// dataset with "id" (see types.Dataset): fall back to it.
+	if urlInfo.Dataset != nil && urlInfo.Dataset.ID == "" {
+		var alt struct {
+			Dataset struct {
+				ID string `json:"id"`
+			} `json:"dataset"`
+		}
+		if json.Unmarshal(raw, &alt) == nil {
+			urlInfo.Dataset.ID = alt.Dataset.ID
+		}
 	}
 
 	return &urlInfo, nil
@@ -1052,6 +1074,14 @@ func (c *Consumer) PollNotifications(ctx context.Context, opts PollNotifications
 
 	queueURL := aws.ToString(c.queueURL)
 
+	// The SQS serializer omits a zero WaitTimeSeconds, and an omitted value means
+	// "the queue's own default" (20 seconds for consumer queues) — i.e. a long
+	// poll. A short poll therefore has to put an explicit 0 on the wire.
+	var optFns []func(*sqs.Options)
+	if opts.ShortPoll {
+		optFns = append(optFns, forceZeroWaitTime)
+	}
+
 	// Poll SQS for messages.
 	receiveOutput, err := c.sqsClient.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
 		MaxNumberOfMessages:   opts.MaxMessages,
@@ -1059,7 +1089,7 @@ func (c *Consumer) PollNotifications(ctx context.Context, opts PollNotifications
 		QueueUrl:              aws.String(queueURL),
 		VisibilityTimeout:     opts.VisibilityTimeout,
 		WaitTimeSeconds:       opts.WaitTimeSeconds,
-	})
+	}, optFns...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to poll SQS queue: %w", err)
 	}
@@ -1158,6 +1188,47 @@ func (c *Consumer) PollNotifications(ctx context.Context, opts PollNotifications
 	}
 
 	return notifications, nil
+}
+
+// forceZeroWaitTime adds an explicit "WaitTimeSeconds": 0 to the serialized
+// ReceiveMessage request, which the generated serializer drops for a zero
+// value. It runs after serialization and before signing, so the signature
+// covers the final body.
+func forceZeroWaitTime(o *sqs.Options) {
+	o.APIOptions = append(o.APIOptions, func(stack *middleware.Stack) error {
+		return stack.Serialize.Add(middleware.SerializeMiddlewareFunc("HelixShortPoll",
+			func(ctx context.Context, in middleware.SerializeInput, next middleware.SerializeHandler) (middleware.SerializeOutput, middleware.Metadata, error) {
+				req, ok := in.Request.(*smithyhttp.Request)
+				if !ok || req.GetStream() == nil {
+					return next.HandleSerialize(ctx, in)
+				}
+
+				raw, err := io.ReadAll(req.GetStream())
+				if err != nil {
+					return middleware.SerializeOutput{}, middleware.Metadata{}, err
+				}
+
+				var body map[string]json.RawMessage
+				if err := json.Unmarshal(raw, &body); err != nil {
+					return middleware.SerializeOutput{}, middleware.Metadata{}, err
+				}
+
+				body["WaitTimeSeconds"] = json.RawMessage("0")
+
+				patched, err := json.Marshal(body)
+				if err != nil {
+					return middleware.SerializeOutput{}, middleware.Metadata{}, err
+				}
+
+				if req, err = req.SetStream(bytes.NewReader(patched)); err != nil {
+					return middleware.SerializeOutput{}, middleware.Metadata{}, err
+				}
+
+				in.Request = req
+
+				return next.HandleSerialize(ctx, in)
+			}), middleware.After)
+	})
 }
 
 // resolveQueueURL caches the per-consumer queue URL, taking it from a

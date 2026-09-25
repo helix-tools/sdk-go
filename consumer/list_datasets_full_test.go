@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -50,21 +52,28 @@ func TestListDatasets_ReturnsEveryFieldOfTheListing(t *testing.T) {
 	if ds.ID != "ds-full-1" || ds.Name != "phone-feed" {
 		t.Errorf("ID/Name = %q/%q, want ds-full-1/phone-feed", ds.ID, ds.Name)
 	}
-	if ds.ProducerID != "prod-42" || ds.Category != "telecom" || ds.Description != "Daily phone numbers" || ds.Status != "active" {
-		t.Errorf("listing lost fields: producer=%q category=%q description=%q status=%q", ds.ProducerID, ds.Category, ds.Description, ds.Status)
+	if ds.Record == nil {
+		t.Fatal("Record = nil; every listed row must carry the full catalog record")
 	}
-	if ds.SizeBytes != 4096 || ds.TotalSizeBytes != 4096 || ds.RecordCount != 1200 {
-		t.Errorf("sizes = %d/%d/%d, want 4096/4096/1200", ds.SizeBytes, ds.TotalSizeBytes, ds.RecordCount)
+	rec := ds.Record
+	if rec.ID != "ds-full-1" {
+		t.Errorf("Record.ID = %q, want ds-full-1 (from the API's id key)", rec.ID)
 	}
-	if ds.Version != "1.2.0" || len(ds.Tags) != 2 {
-		t.Errorf("version/tags = %q/%v", ds.Version, ds.Tags)
+	if rec.ProducerID != "prod-42" || rec.Category != "telecom" || rec.Description != "Daily phone numbers" || rec.Status != "active" {
+		t.Errorf("listing lost fields: producer=%q category=%q description=%q status=%q", rec.ProducerID, rec.Category, rec.Description, rec.Status)
 	}
-	if ds.Marketplace == nil || ds.Marketplace.PriceMonthlyCents == nil || *ds.Marketplace.PriceMonthlyCents != 4999 {
-		t.Errorf("marketplace = %+v, want price 4999", ds.Marketplace)
+	if rec.SizeBytes != 4096 || rec.TotalSizeBytes != 4096 || rec.RecordCount != 1200 {
+		t.Errorf("sizes = %d/%d/%d, want 4096/4096/1200", rec.SizeBytes, rec.TotalSizeBytes, rec.RecordCount)
 	}
-	// The full metadata object survives on the embedded record.
-	if got := ds.Dataset.Metadata["record_format"]; got != "ndjson" {
-		t.Errorf("Dataset.Metadata[record_format] = %v, want ndjson", got)
+	if rec.Version != "1.2.0" || len(rec.Tags) != 2 {
+		t.Errorf("version/tags = %q/%v", rec.Version, rec.Tags)
+	}
+	if rec.Marketplace == nil || rec.Marketplace.PriceMonthlyCents == nil || *rec.Marketplace.PriceMonthlyCents != 4999 {
+		t.Errorf("marketplace = %+v, want price 4999", rec.Marketplace)
+	}
+	// The full metadata object survives on the record.
+	if got := rec.Metadata["record_format"]; got != "ndjson" {
+		t.Errorf("Record.Metadata[record_format] = %v, want ndjson", got)
 	}
 }
 
@@ -97,7 +106,7 @@ func TestListDatasets_ExplicitMetadataFlagBeatsTopLevelEncryption(t *testing.T) 
 	if ds.Metadata.EncryptionEnabled {
 		t.Error("Metadata.EncryptionEnabled = true; metadata.encryption_enabled=false is explicit and must win")
 	}
-	enc, _ := resolveEncryptCompress(&ds.Dataset)
+	enc, _ := resolveEncryptCompress(ds.Record)
 	if enc != ds.Metadata.EncryptionEnabled {
 		t.Errorf("list flag %v disagrees with the download decision %v", ds.Metadata.EncryptionEnabled, enc)
 	}
@@ -130,20 +139,25 @@ func TestListDatasets_MetadataFlagsFromMetadataObject(t *testing.T) {
 }
 
 // Acceptance Q4: every page is followed AND the rows of the LAST page carry the
-// full record too (a decoder that fills only page one would go green on the
-// old id/name assertions).
+// full record too. The server answers by the REQUESTED page number (not by hit
+// count), so a client that always asked for page 1 would not go green.
 func TestListDatasets_FollowsPagesAndKeepsFullRecordOnEveryPage(t *testing.T) {
-	var hits int32
+	var mu sync.Mutex
+	var requested []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := atomic.AddInt32(&hits, 1)
+		page := r.URL.Query().Get("page")
+		mu.Lock()
+		requested = append(requested, page)
+		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		switch n {
-		case 1:
+		switch page {
+		case "1":
 			_, _ = w.Write([]byte(`{"datasets":[{"id":"p1","name":"one","producer_id":"prod-1"}],"page":1,"total_pages":2}`))
-		case 2:
+		case "2":
 			_, _ = w.Write([]byte(`{"datasets":[{"id":"p2","name":"two","producer_id":"prod-2","category":"c2"}],"page":2,"total_pages":2}`))
 		default:
-			t.Errorf("unexpected request #%d: %s", n, r.URL.String())
+			t.Errorf("unexpected page %q: %s", page, r.URL.String())
+			w.WriteHeader(http.StatusBadRequest)
 		}
 	}))
 	defer server.Close()
@@ -152,16 +166,17 @@ func TestListDatasets_FollowsPagesAndKeepsFullRecordOnEveryPage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListDatasets: %v", err)
 	}
-	if len(datasets) != 2 || datasets[1].ID != "p2" || datasets[1].ProducerID != "prod-2" || datasets[1].Category != "c2" {
+	mu.Lock()
+	defer mu.Unlock()
+	if !reflect.DeepEqual(requested, []string{"1", "2"}) {
+		t.Errorf("requested pages %v, want [1 2]", requested)
+	}
+	if len(datasets) != 2 || datasets[1].ID != "p2" || datasets[1].Record == nil ||
+		datasets[1].Record.ProducerID != "prod-2" || datasets[1].Record.Category != "c2" {
 		t.Fatalf("datasets = %+v, want both pages with full records", datasets)
 	}
-}
-
-// A body the record decoder rejects is an error, not a half-filled row.
-func TestListDatasetRow_MalformedBodyErrors(t *testing.T) {
-	var ds Dataset
-	if err := json.Unmarshal([]byte(`{"id": 5}`), &ds); err == nil {
-		t.Fatal("expected a type error for a numeric id")
+	if datasets[0].Record == nil || datasets[0].Record.ProducerID != "prod-1" {
+		t.Errorf("first row lost its record: %+v", datasets[0])
 	}
 }
 
@@ -184,5 +199,69 @@ func TestGetDataset_RefusesAnEmptyDatasetID(t *testing.T) {
 	}
 	if atomic.LoadInt32(&hits) != 0 {
 		t.Errorf("%d request(s) reached the API; an empty id must be refused client-side", hits)
+	}
+}
+
+// Source compatibility beyond selectors: callers build Dataset values with keyed
+// literals (fakes behind their own interfaces) and compare them / use them as
+// map keys. Both must keep working.
+func TestDataset_KeyedLiteralAndComparability(t *testing.T) {
+	a := Dataset{ID: "x", Name: "n"}
+	b := Dataset{ID: "x", Name: "n"}
+	if a != b {
+		t.Error("two equal Dataset values compare unequal")
+	}
+	seen := map[Dataset]bool{a: true}
+	if !seen[b] {
+		t.Error("Dataset is no longer usable as a map key")
+	}
+	a.Metadata.CompressionEnabled = true
+	if a == b {
+		t.Error("Datasets differing in Metadata compare equal")
+	}
+}
+
+// GetDownloadURL's legacy nested dataset object is tagged _id, but the API
+// identifies datasets with id: the id-only shape must not lose the identifier.
+func TestGetDownloadURL_NestedDatasetIDFromIDKey(t *testing.T) {
+	for name, tc := range map[string]struct{ body, want string }{
+		"id only":          {`{"download_url":"https://s3.example/x","dataset":{"id":"ds-1","name":"n"}}`, "ds-1"},
+		"legacy _id":       {`{"download_url":"https://s3.example/x","dataset":{"_id":"ds-2","name":"n"}}`, "ds-2"},
+		"_id wins over id": {`{"download_url":"https://s3.example/x","dataset":{"_id":"ds-3","id":"ds-x"}}`, "ds-3"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+
+			info, err := newTestConsumer(server.URL).GetDownloadURL(context.Background(), "ds-1")
+			if err != nil {
+				t.Fatalf("GetDownloadURL: %v", err)
+			}
+			if info.DownloadURL != "https://s3.example/x" || info.Dataset == nil || info.Dataset.ID != tc.want {
+				t.Errorf("info = %+v (dataset %+v), want nested dataset id %q", info, info.Dataset, tc.want)
+			}
+		})
+	}
+
+	// Without a nested dataset there is nothing to fix up.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"download_url":"https://s3.example/x"}`))
+	}))
+	defer server.Close()
+	info, err := newTestConsumer(server.URL).GetDownloadURL(context.Background(), "ds-1")
+	if err != nil || info.Dataset != nil {
+		t.Errorf("info = %+v, err = %v; want no nested dataset", info, err)
+	}
+
+	// A malformed body is an error.
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"download_url": 5}`))
+	}))
+	defer bad.Close()
+	if _, err := newTestConsumer(bad.URL).GetDownloadURL(context.Background(), "ds-1"); err == nil {
+		t.Error("expected a decode error for a numeric download_url")
 	}
 }

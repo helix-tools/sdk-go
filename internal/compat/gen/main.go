@@ -1,7 +1,8 @@
 // Command gen writes a Go program that USES every exported identifier of the
 // module's public packages — functions and methods with their exact
-// signatures, typed constants and variables, and every exported struct field
-// with its exact type. Compiling that program against a later revision proves
+// signatures, typed constants and variables, every exported struct field with
+// its exact type, a keyed composite literal of each struct, and the
+// comparability of each comparable type. Compiling that program against a later revision proves
 // no previously exported symbol was removed, renamed or re-typed
 // (internal/compat runs exactly that check).
 //
@@ -189,14 +190,28 @@ func (g *gen) addType(me string, o *types.TypeName) {
 	case *types.Struct:
 		fmt.Fprintf(&g.body, "var _ = func(v %s) {\n", ref)
 
+		var keyed []string
+
 		for i := 0; i < u.NumFields(); i++ {
 			f := u.Field(i)
 			if f.Exported() {
 				fmt.Fprintf(&g.body, "\tvar _ %s = v.%s\n", g.typeString(f.Type()), f.Name())
+				keyed = append(keyed, fmt.Sprintf("%s: *new(%s)", f.Name(), g.typeString(f.Type())))
 			}
 		}
 
 		fmt.Fprintln(&g.body, "}")
+
+		// Callers build these values with keyed literals (a promoted field
+		// cannot be a literal key) and, when the type is comparable, compare
+		// them or use them as map keys — none of which a selector check sees.
+		if len(keyed) > 0 {
+			fmt.Fprintf(&g.body, "var _ = %s{%s}\n", ref, strings.Join(keyed, ", "))
+		}
+
+		if types.Comparable(named) {
+			fmt.Fprintf(&g.body, "var _ = func(a, b %s) bool { return a == b }\n", ref)
+		}
 	case *types.Interface:
 		fmt.Fprintf(&g.body, "var _ = func(v %s) {\n", ref)
 

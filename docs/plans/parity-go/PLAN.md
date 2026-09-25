@@ -27,15 +27,15 @@ Added (nothing previously exported was removed or re-typed, except package `api`
 | --- | --- |
 | types | `Dataset.UnmarshalJSON`, `Dataset.IsPublic`, `Dataset.PricePerAccess`, `Subscription.ProducerInfo`, `ProducerInfo`, `ApproveRequestResponse.UnmarshalJSON`, `CompanyStatusPendingApproval`, `CompanyStatusRejected`, `CompanyStatusPendingOffboard`, `CompanyStatusOffboarded` |
 | producer | `Producer.ApproveSubscriptionRequestWithSubscription` |
-| consumer | `APIError` (+ `IsUnauthorized`/`IsForbidden`/`IsNotFound`/`IsConflict`/`IsRateLimited`), `Dataset.UnmarshalJSON`, `PollNotificationsOptions.VisibilityTimeout`, `PollNotificationsOptions.ShortPoll` |
+| consumer | `APIError` (+ `IsUnauthorized`/`IsForbidden`/`IsNotFound`/`IsConflict`/`IsRateLimited`), `Dataset.Record`, `Dataset.UnmarshalJSON`, `PollNotificationsOptions.VisibilityTimeout`, `PollNotificationsOptions.ShortPoll` |
 | agent | `AgentMe`, `Client.GetMe`, `ServiceUnavailableError`, `IsServiceUnavailable`, `DefaultAPIBaseURL` |
 
 Same signature, changed behaviour: `Producer.ApproveSubscriptionRequest` (returns the
 envelope's request; `Status`/`ID` now populated; errors on a body with no request),
 `Producer.UpdateDataset` / `DeleteDataset` and `Consumer.GetDataset` (empty id is a
-client-side error), `Consumer.ListDatasets` (rows carry the full record;
-`consumer.Dataset` embeds `types.Dataset` and keeps `ID`, `Name`,
-`Metadata.CompressionEnabled/EncryptionEnabled`), `Consumer.PollNotifications` /
+client-side error), `Consumer.ListDatasets` (rows carry the full record in `Record`;
+`consumer.Dataset` keeps `ID`, `Name`, `Metadata.CompressionEnabled/EncryptionEnabled`
+as declared fields — keyed literals and comparability still work), `Consumer.PollNotifications` /
 `ClearQueue` (role fallback, `VisibilityTimeout`, `ShortPoll`), `agent.NewClient`
 (empty base URL falls back to env then the production endpoint), agent 503
 classification, `producer.NewProducer` parameter lookup, and struct tags:
@@ -47,6 +47,11 @@ Deprecated (kept, compile-compatible): `ApproveSubscriptionRequestOptions.Datase
 request/response types in `types`, `DatasetMarketplace.StripeProductID/StripePriceID`.
 
 Removed from the public surface: package `api` -> `internal/api` (A-12).
+
+go.mod: `github.com/aws/smithy-go v1.24.2` moves from indirect to direct (same
+version, already in the graph): `ShortPoll` needs one serialize middleware to put an
+explicit `WaitTimeSeconds: 0` on the wire, because the generated serializer omits
+zero and SQS then applies the queue default (a 20 s long poll).
 
 ## Dispositions
 
@@ -76,6 +81,7 @@ Removed from the public surface: package `api` -> `internal/api` (A-12).
 - consumer/example_test.go
 - consumer/list_datasets_full_test.go
 - consumer/poll_parity_test.go
+- go.mod
 - docs/plans/parity-go/PLAN.md
 - internal/api/cleanup.go (moved from api/)
 - internal/api/client.go (moved from api/)

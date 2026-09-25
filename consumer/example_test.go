@@ -119,13 +119,13 @@ func Example_listAndPoll() {
 		panic(err)
 	}
 
-	// Every catalog field is on the row — no GetDataset call per dataset.
+	// Every catalog field is on the row's Record — no GetDataset call per dataset.
 	datasets, err := c.ListDatasets(ctx)
 	if err != nil {
 		panic(err)
 	}
 	for _, ds := range datasets {
-		fmt.Println(ds.ID, ds.Name, ds.ProducerID, ds.Category, ds.Status)
+		fmt.Println(ds.ID, ds.Name, ds.Record.ProducerID, ds.Record.Category, ds.Record.Status)
 	}
 
 	// Return immediately instead of long-polling, and hold each message
