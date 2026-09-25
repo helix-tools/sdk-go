@@ -128,3 +128,23 @@ func TestDataset_Decode_DeprecatedIsPublicAndPricePerAccess(t *testing.T) {
 		}
 	}
 }
+
+// Self-attack: datasets also arrive nested (marketplace browse, dataset
+// details, related datasets); those decodes go through the same normalisation.
+func TestDataset_Decode_IDInsideMarketplaceEnvelopes(t *testing.T) {
+	var browse MarketplaceBrowseResponse
+	if err := json.Unmarshal([]byte(`{"datasets":[{"id":"m1"}],"pagination":{"total_pages":1}}`), &browse); err != nil {
+		t.Fatalf("browse: %v", err)
+	}
+	if len(browse.Datasets) != 1 || browse.Datasets[0].ID != "m1" {
+		t.Errorf("browse ids = %+v", browse.Datasets)
+	}
+
+	var details DatasetDetails
+	if err := json.Unmarshal([]byte(`{"dataset":{"id":"d1"},"related_datasets":[{"id":"r1"}]}`), &details); err != nil {
+		t.Fatalf("details: %v", err)
+	}
+	if details.Dataset.ID != "d1" || len(details.RelatedDatasets) != 1 || details.RelatedDatasets[0].ID != "r1" {
+		t.Errorf("details ids = %q / %+v", details.Dataset.ID, details.RelatedDatasets)
+	}
+}
