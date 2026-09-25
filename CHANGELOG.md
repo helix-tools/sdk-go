@@ -16,9 +16,20 @@
   returns the envelope's request; a body with no request object is now an error
   rather than a zero-valued success.
 - **`consumer.ListDatasets` returns the full catalog record (A-15, B-06).**
-  `consumer.Dataset` embeds `types.Dataset`; the previous `ID`, `Name` and
-  `Metadata.CompressionEnabled` / `Metadata.EncryptionEnabled` surface keeps
-  compiling and behaving the same.
+  Each `consumer.Dataset` row now carries the full `*types.Dataset` in the new
+  `Record` field. `ID`, `Name` and `Metadata.CompressionEnabled` /
+  `Metadata.EncryptionEnabled` are unchanged in name, type and meaning, so
+  keyed literals, comparison and map-key use keep compiling.
+- **`GetDownloadURL`'s legacy nested `dataset.ID` also reads the API's `id`
+  key.**
+- **`UpdateDataset`, `DeleteDataset` and `GetDataset` refuse an empty dataset id
+  client-side** instead of calling the collection (`GetDataset("")` used to
+  decode a list body into an empty `Dataset` without error).
+- **`ShortPoll` really short-polls.** The SQS serializer drops a zero
+  `WaitTimeSeconds` and SQS then applies the queue default (a 20 s long poll),
+  so `ShortPoll` sends an explicit 0. The generated AWS SDK call needs one
+  middleware for this, so `github.com/aws/smithy-go` (already in the module
+  graph as an indirect dependency, same version) is now a direct requirement.
 - **`PollNotifications` / `ClearQueue` work when the API rejects `role=consumer`
   (A-09).** On a 400 they retry the subscription list without a role and always
   narrow to rows where this customer is the consumer, so a producer-side row's

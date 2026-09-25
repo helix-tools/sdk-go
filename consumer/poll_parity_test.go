@@ -21,9 +21,10 @@ import (
 type fakeSQS struct {
 	srv *httptest.Server
 
-	mu       sync.Mutex
-	targets  []string
-	requests []map[string]any
+	mu        sync.Mutex
+	targets   []string
+	requests  []map[string]any
+	badLength int // requests whose Content-Length disagreed with the body actually received
 }
 
 func newFakeSQS(t *testing.T) *fakeSQS {
@@ -36,6 +37,9 @@ func newFakeSQS(t *testing.T) *fakeSQS {
 		f.mu.Lock()
 		f.targets = append(f.targets, r.Header.Get("X-Amz-Target"))
 		f.requests = append(f.requests, body)
+		if r.ContentLength != int64(len(raw)) {
+			f.badLength++
+		}
 		f.mu.Unlock()
 		w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 		if strings.HasSuffix(r.Header.Get("X-Amz-Target"), "ReceiveMessage") {
@@ -82,7 +86,7 @@ func TestPollNotifications_WireOptions(t *testing.T) {
 		wantVis      float64
 		wantWait     float64 // 0 means "absent or 0" (a short poll)
 		wantMaxMsgs  float64
-		wantWaitZero bool
+		wantWaitZero bool // the key must be PRESENT on the wire and equal 0
 	}{
 		{name: "defaults", opts: PollNotificationsOptions{}, wantVis: 300, wantWait: 20, wantMaxMsgs: 10},
 		{name: "custom visibility timeout", opts: PollNotificationsOptions{VisibilityTimeout: 45}, wantVis: 45, wantWait: 20, wantMaxMsgs: 10},
@@ -90,6 +94,7 @@ func TestPollNotifications_WireOptions(t *testing.T) {
 		{name: "negative visibility timeout falls back to the default", opts: PollNotificationsOptions{VisibilityTimeout: -5}, wantVis: 300, wantWait: 20, wantMaxMsgs: 10},
 		{name: "explicit wait", opts: PollNotificationsOptions{WaitTimeSeconds: 5}, wantVis: 300, wantWait: 5, wantMaxMsgs: 10},
 		{name: "wait capped at 20", opts: PollNotificationsOptions{WaitTimeSeconds: 60}, wantVis: 300, wantWait: 20, wantMaxMsgs: 10},
+		{name: "negative wait falls back to 20", opts: PollNotificationsOptions{WaitTimeSeconds: -3}, wantVis: 300, wantWait: 20, wantMaxMsgs: 10},
 		{name: "ShortPoll returns immediately", opts: PollNotificationsOptions{ShortPoll: true}, wantVis: 300, wantWaitZero: true, wantMaxMsgs: 10},
 		{name: "ShortPoll wins over WaitTimeSeconds", opts: PollNotificationsOptions{ShortPoll: true, WaitTimeSeconds: 15}, wantVis: 300, wantWaitZero: true, wantMaxMsgs: 10},
 		{name: "max messages passed through", opts: PollNotificationsOptions{MaxMessages: 3}, wantVis: 300, wantWait: 20, wantMaxMsgs: 3},
@@ -111,10 +116,13 @@ func TestPollNotifications_WireOptions(t *testing.T) {
 			if got["VisibilityTimeout"] != tc.wantVis {
 				t.Errorf("VisibilityTimeout = %v, want %v", got["VisibilityTimeout"], tc.wantVis)
 			}
-			gotWait, _ := got["WaitTimeSeconds"].(float64)
+			gotWait, hasWait := got["WaitTimeSeconds"].(float64)
 			if tc.wantWaitZero {
-				if gotWait != 0 {
-					t.Errorf("WaitTimeSeconds = %v, want 0/absent for a short poll", got["WaitTimeSeconds"])
+				// The SQS serializer omits a zero value, and an omitted wait
+				// means "the queue default" (a 20s long poll), so a short poll
+				// must carry an EXPLICIT 0.
+				if !hasWait || gotWait != 0 {
+					t.Errorf("WaitTimeSeconds = %v (present: %v), want an explicit 0 for a short poll", got["WaitTimeSeconds"], hasWait)
 				}
 			} else if gotWait != tc.wantWait {
 				t.Errorf("WaitTimeSeconds = %v, want %v", got["WaitTimeSeconds"], tc.wantWait)
@@ -124,6 +132,12 @@ func TestPollNotifications_WireOptions(t *testing.T) {
 			}
 			if got["QueueUrl"] != queue {
 				t.Errorf("QueueUrl = %v, want %q", got["QueueUrl"], queue)
+			}
+			// A rewritten body (ShortPoll) must still be framed correctly.
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if f.badLength != 0 {
+				t.Errorf("%d request(s) had a Content-Length that disagrees with the body", f.badLength)
 			}
 		})
 	}

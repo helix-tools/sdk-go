@@ -190,12 +190,14 @@ field drifts from what's actually exported.
 
 ### Listing datasets
 
-`ListDatasets` follows every page and returns the full catalog record for each
-dataset — `ID`, `Name`, `ProducerID`, `Category`, `Description`, `Status`,
-sizes, `Marketplace` and the rest — the same fields `GetDataset` returns, so
-there is no need for a `GetDataset` call per row. `ID` is populated from the
-API's `id` key, so it can be passed straight to `GetDataset` or
-`Producer.UpdateDataset`.
+`ListDatasets` follows every page. Each row keeps the fields this package has
+always exposed (`ID`, `Name`, `Metadata.CompressionEnabled`,
+`Metadata.EncryptionEnabled`) and now also carries the full catalog record in
+`Record` — the same `*types.Dataset` that `GetDataset` returns (`ProducerID`,
+`Category`, `Description`, `Status`, sizes, `Marketplace`, the raw metadata, …)
+— so there is no need for a `GetDataset` call per row. `Record` is set on every
+row `ListDatasets` returns. `ID` is populated from the API's `id` key, so it can
+be passed straight to `GetDataset` or `Producer.UpdateDataset`.
 
 ### Polling options
 
@@ -203,7 +205,8 @@ API's `id` key, so it can be passed straight to `GetDataset` or
 (1-20, default 20), `ShortPoll` (return immediately instead of long-polling),
 `VisibilityTimeout` (seconds a received message stays hidden while you process
 it, default 300) and `AutoAcknowledge`. Go's zero value cannot express an
-explicit `WaitTimeSeconds` of 0, so `ShortPoll: true` is how you ask for it.
+explicit `WaitTimeSeconds` of 0, so `ShortPoll: true` is how you ask for a poll
+that returns immediately.
 
 ### Handling API errors
 
@@ -404,7 +407,7 @@ and not the others, by design:
 - **Credentials** are refreshed automatically in STS mode; there are no
   `forceCredentialRefresh` / `setCredentialAutoRefresh` helpers to call.
 - **`ListDatasets`** takes an optional producer id and returns `[]Dataset`
-  (the full record plus the two metadata flags).
+  (the legacy fields plus the full record in `Record`).
 
 ## Versioning & Changelog
 
