@@ -156,14 +156,43 @@ type DownloadURLInfo struct {
 	} `json:"dataset,omitempty"`
 }
 
-// Dataset represents a dataset in the catalog.
+// Dataset is one row of Consumer.ListDatasets: the full catalog record
+// (embedded types.Dataset — the same shape Consumer.GetDataset returns, so ID,
+// Name, ProducerID, Category, Description, Status, sizes, Marketplace and every
+// other field are available directly) plus the two metadata flags this package
+// has always exposed.
+//
+// Metadata is kept, with its original bool-flag shape, so code written against
+// the previous four-field Dataset still compiles and behaves the same; it
+// shadows the record's raw metadata map, which stays reachable as
+// Dataset.Dataset.Metadata.
 type Dataset struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
+	types.Dataset
+
+	// Metadata holds the two flags download handling reads. EncryptionEnabled
+	// also honours the record's top-level Encryption flag: the create endpoint
+	// promotes metadata.encryption_enabled to it and drops it from metadata.
 	Metadata struct {
 		CompressionEnabled bool `json:"compression_enabled"`
 		EncryptionEnabled  bool `json:"encryption_enabled"`
 	} `json:"metadata"`
+}
+
+// UnmarshalJSON decodes the full catalog record and derives the Metadata
+// flags from it. Without it the embedded types.Dataset decoder would be
+// promoted and the flags would never be filled.
+func (d *Dataset) UnmarshalJSON(data []byte) error {
+	var record types.Dataset
+	if err := json.Unmarshal(data, &record); err != nil {
+		return err
+	}
+
+	*d = Dataset{Dataset: record}
+	d.Metadata.CompressionEnabled, _ = record.Metadata["compression_enabled"].(bool)
+	d.Metadata.EncryptionEnabled, _ = record.Metadata["encryption_enabled"].(bool)
+	d.Metadata.EncryptionEnabled = d.Metadata.EncryptionEnabled || record.Encryption
+
+	return nil
 }
 
 // Notification represents a dataset upload notification received from SQS.
