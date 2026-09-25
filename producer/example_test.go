@@ -233,3 +233,38 @@ func Example_partnerInvite() {
 	}
 	fmt.Printf("%d partner consumer(s)\n", len(consumers))
 }
+
+// Example_approveWithSubscription backs the README's approval snippet: the API
+// answers an approval with the updated request AND the subscription it
+// provisioned.
+func Example_approveWithSubscription() {
+	ctx := context.Background()
+
+	p, err := producer.NewProducer(types.Config{
+		APIEndpoint:        "https://api-go.helix.tools",
+		AWSAccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
+		AWSSecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
+		CustomerID:         os.Getenv("HELIX_CUSTOMER_ID"),
+		Region:             "us-east-1",
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	// ApproveSubscriptionRequest returns just the request...
+	req, err := p.ApproveSubscriptionRequest(ctx, "request-id", nil)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(req.Status)
+
+	// ...ApproveSubscriptionRequestWithSubscription returns both.
+	resp, err := p.ApproveSubscriptionRequestWithSubscription(ctx, "request-id", nil)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(resp.Request.Status)
+	if resp.Subscription != nil { // nil while approved_pending_payment
+		fmt.Println(resp.Subscription.ID)
+	}
+}
