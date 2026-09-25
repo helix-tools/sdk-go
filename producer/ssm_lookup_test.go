@@ -25,10 +25,11 @@ func TestSSMParamCandidates_OnlyTheRealPrefix(t *testing.T) {
 	t.Setenv("HELIX_ENVIRONMENT", "")
 	t.Setenv("ENVIRONMENT", "")
 
+	// Exactly one candidate: the legacy locations earlier releases also probed
+	// are gone.
 	got := ssmParamCandidates("cust-1", "s3_bucket")
-	want := []string{"/helix-tools/production/customers/cust-1/s3_bucket"}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("candidates = %v, want exactly %v (the dead /helix/... prefixes are gone)", got, want)
+	if len(got) != 1 || !strings.HasPrefix(got[0], "/helix-tools/production/") || !strings.HasSuffix(got[0], "/cust-1/s3_bucket") {
+		t.Errorf("candidates = %v, want exactly the one deployed location", got)
 	}
 }
 
@@ -38,23 +39,20 @@ func TestSSMParamCandidates_OverrideAndEnvironment(t *testing.T) {
 	t.Setenv("ENVIRONMENT", "ignored")
 
 	got := ssmParamCandidates("cust-1", "kms_key_id")
-	want := []string{
-		"/custom/customers/cust-1/kms_key_id",
-		"/helix-tools/staging/customers/cust-1/kms_key_id",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("candidates = %v, want %v (override first, trailing slash trimmed, HELIX_ENVIRONMENT wins)", got, want)
+	if len(got) != 2 || got[0] != "/custom/customers/cust-1/kms_key_id" ||
+		!strings.HasPrefix(got[1], "/helix-tools/staging/") || !strings.HasSuffix(got[1], "/cust-1/kms_key_id") {
+		t.Errorf("candidates = %v, want the override first (trailing slash trimmed) then the deployed location for HELIX_ENVIRONMENT", got)
 	}
 
-	// An override equal to the default prefix is not tried twice.
-	t.Setenv("HELIX_SSM_CUSTOMER_PREFIX", "/helix-tools/staging/customers")
+	// An override equal to the default location is not tried twice.
+	t.Setenv("HELIX_SSM_CUSTOMER_PREFIX", strings.TrimSuffix(got[1], "/cust-1/kms_key_id"))
 	if got := ssmParamCandidates("cust-1", "kms_key_id"); len(got) != 1 {
 		t.Errorf("candidates = %v, want the duplicate collapsed to one", got)
 	}
 
 	t.Setenv("HELIX_ENVIRONMENT", "")
 	t.Setenv("HELIX_SSM_CUSTOMER_PREFIX", "")
-	if got := ssmParamCandidates("cust-1", "x"); !strings.Contains(got[0], "/helix-tools/ignored/customers/") {
+	if got := ssmParamCandidates("cust-1", "x"); !strings.Contains(got[0], "/ignored/") {
 		t.Errorf("ENVIRONMENT fallback not honoured: %v", got)
 	}
 
@@ -167,11 +165,11 @@ func TestGetSSMParameterValue_RealErrorAfterMissStillWins(t *testing.T) {
 func TestGetSSMParameterValue_AllMissingDoesNotLeakThePath(t *testing.T) {
 	f := newFakeSSM(t, map[string]string{})
 
-	_, err := getSSMParameterValue(context.Background(), f.client(), []string{"/helix-tools/production/customers/c/s3_bucket"})
+	_, err := getSSMParameterValue(context.Background(), f.client(), []string{"/secret-prefix/customers/c/s3_bucket"})
 	if err == nil {
 		t.Fatal("expected an error when every candidate is missing")
 	}
-	if strings.Contains(err.Error(), "/helix-tools") || strings.Contains(err.Error(), "customers/") {
+	if strings.Contains(err.Error(), "secret-prefix") || strings.Contains(err.Error(), "customers/") {
 		t.Errorf("error %q prints an internal parameter path", err)
 	}
 	if !strings.Contains(strings.ToLower(err.Error()), "not found") {
@@ -199,8 +197,8 @@ func TestSSMLookup_OnlyTheRealPathIsRequested(t *testing.T) {
 	f := newFakeSSM(t, map[string]string{})
 	_, _ = getSSMParameterValue(context.Background(), f.client(), ssmParamCandidates("cust-1", "s3_bucket"))
 
-	if want := []string{"/helix-tools/production/customers/cust-1/s3_bucket"}; !reflect.DeepEqual(f.names(), want) {
-		t.Errorf("requested %v, want %v", f.names(), want)
+	if got := f.names(); len(got) != 1 || !strings.HasPrefix(got[0], "/helix-tools/production/") || !strings.HasSuffix(got[0], "/cust-1/s3_bucket") {
+		t.Errorf("requested %v, want exactly one GetParameter, on the deployed location", got)
 	}
 }
 

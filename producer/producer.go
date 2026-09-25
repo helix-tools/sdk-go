@@ -198,7 +198,7 @@ func ssmParamCandidates(customerID, paramName string) []string {
 	}
 
 	// Only an explicit operator override and the one deployed prefix. The
-	// /helix/... prefixes tried by earlier releases never held these
+	// legacy locations earlier releases also probed never held these
 	// parameters, and probing them made a real error on the live path
 	// indistinguishable from an error on a dead one.
 	prefixes := []string{}
