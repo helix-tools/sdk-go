@@ -99,3 +99,58 @@ func TestSubscriptionRequest_MatchesSchemaFile(t *testing.T) {
 		}
 	}
 }
+
+// ApproveRequestResponse: the request half is strict, the subscription half is
+// best-effort (the approval has already happened when this is decoded).
+func TestApproveRequestResponse_Decode(t *testing.T) {
+	const request = `"request":{"_id":"req-1","status":"approved","consumer_id":"c"}`
+
+	for name, tc := range map[string]struct {
+		body       string
+		wantSubID  string // "" means Subscription must be nil
+		wantReqID  string
+		wantErr    bool
+		wantSubNil bool
+	}{
+		"both halves":              {body: `{` + request + `,"subscription":{"_id":"sub-9","consumer_id":"c","status":"active"}}`, wantSubID: "sub-9", wantReqID: "req-1"},
+		"null subscription":        {body: `{` + request + `,"subscription":null}`, wantReqID: "req-1", wantSubNil: true},
+		"missing subscription key": {body: `{` + request + `}`, wantReqID: "req-1", wantSubNil: true},
+		"empty subscription":       {body: `{` + request + `,"subscription":{}}`, wantReqID: "req-1", wantSubNil: true},
+		"string subscription":      {body: `{` + request + `,"subscription":"sub-9"}`, wantReqID: "req-1", wantSubNil: true},
+		"wrong-typed subscription": {body: `{` + request + `,"subscription":{"_id":42}}`, wantReqID: "req-1", wantSubNil: true},
+		"request wrong type":       {body: `{"request":"nope"}`, wantErr: true},
+		"not an object":            {body: `[1]`, wantErr: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var got ApproveRequestResponse
+			err := json.Unmarshal([]byte(tc.body), &got)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got %+v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if got.Request.ID != tc.wantReqID {
+				t.Errorf("Request.ID = %q, want %q", got.Request.ID, tc.wantReqID)
+			}
+			if tc.wantSubNil {
+				if got.Subscription != nil {
+					t.Errorf("Subscription = %+v, want nil", got.Subscription)
+				}
+			} else if got.Subscription == nil || got.Subscription.ID != tc.wantSubID {
+				t.Errorf("Subscription = %+v, want id %q", got.Subscription, tc.wantSubID)
+			}
+		})
+	}
+
+	// Reusing a value must not keep a stale subscription from an earlier decode.
+	var reused ApproveRequestResponse
+	_ = json.Unmarshal([]byte(`{`+request+`,"subscription":{"_id":"sub-1","consumer_id":"c"}}`), &reused)
+	_ = json.Unmarshal([]byte(`{`+request+`,"subscription":null}`), &reused)
+	if reused.Subscription != nil {
+		t.Errorf("stale Subscription survived a second decode: %+v", reused.Subscription)
+	}
+}
