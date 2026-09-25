@@ -2,6 +2,88 @@
 
 ## Unreleased
 
+### Fixed
+- **`types.Dataset.ID` is populated from the API's `id` key (B-01).** The
+  customer-facing dataset API sends `id` and never `_id`, so `Dataset.ID` was
+  empty on every GET/list/PATCH response and the README's
+  `UpdateDataset(ctx, dataset.ID, ...)` PATCHed `/v1/datasets/`. Decoding now
+  fills `ID` from `_id` when present and from `id` otherwise (`IDAlias` is
+  unchanged); `SizeBytes` falls back to `total_size_bytes`, the only size the
+  API sends.
+- **`ApproveSubscriptionRequest` decodes the real `{request, subscription}`
+  envelope (A-01).** It decoded the response into a flat `SubscriptionRequest`,
+  so `Status` and `ID` were empty even on success. It keeps its signature and
+  returns the envelope's request; a body with no request object is now an error
+  rather than a zero-valued success.
+- **`consumer.ListDatasets` returns the full catalog record (A-15, B-06).**
+  `consumer.Dataset` embeds `types.Dataset`; the previous `ID`, `Name` and
+  `Metadata.CompressionEnabled` / `Metadata.EncryptionEnabled` surface keeps
+  compiling and behaving the same.
+- **`PollNotifications` / `ClearQueue` work when the API rejects `role=consumer`
+  (A-09).** On a 400 they retry the subscription list without a role and always
+  narrow to rows where this customer is the consumer, so a producer-side row's
+  queue is never polled or purged.
+- **`NewProducer` looks up its bucket and key parameters on the real prefix
+  only and fails closed (A-21).** The two dead `/helix/...` prefixes are gone;
+  only a clean "not found" moves to the next candidate, so a real access error
+  is reported instead of being masked by a later one, and an all-missing result
+  no longer repeats parameter paths.
+- **`SubscriptionRequest` required keys are never omitted (B-08).**
+  `consumer_name`, `consumer_email` and `producer_name` lost their `omitempty`.
+- **`agent`: a 503 is a kill-switch only when its body says so (A-16).** Any
+  other 503 is the new `*agent.ServiceUnavailableError`.
+- **`agent.NewClient` with an empty base URL** falls back to
+  `HELIX_API_ENDPOINT`, then `https://api-go.helix.tools`, instead of failing
+  every call (A-16).
+- **Company onboarding link keys (D-08, decision D7).** `OnboardingInfo` reads
+  `credential_url` / `credential_url_expires_at` — the keys the API and stored
+  data use — instead of `credentials_portal_*`. The Go field names are
+  unchanged.
+
+### Added
+- `Producer.ApproveSubscriptionRequestWithSubscription` returns the whole
+  approve envelope (`types.ApproveRequestResponse`); `Subscription` is `nil`
+  while the request is `approved_pending_payment` (A-01).
+- `consumer.APIError` (with `IsUnauthorized`, `IsForbidden`, `IsNotFound`,
+  `IsConflict`, `IsRateLimited`) — non-2xx consumer responses now carry their
+  status; the message text is unchanged (A-06).
+- `consumer.PollNotificationsOptions.VisibilityTimeout` (was hard-coded to 300)
+  and `.ShortPoll` (an explicit `WaitTimeSeconds` of 0) (A-08).
+- `agent.AgentMe` and `agent.Client.GetMe`, the twelve-field `/v1/agents/me`
+  projection (B-02); `agent.ServiceUnavailableError` / `IsServiceUnavailable`
+  and `agent.DefaultAPIBaseURL` (A-16).
+- `types.CompanyStatus` gains `pending_approval`, `rejected`,
+  `pending_offboard` and `offboarded` (B-09, decision D1).
+- `types.ProducerInfo` and `Subscription.ProducerInfo` — where the producer's
+  name arrives (B-05); `Dataset.IsPublic` and `Dataset.PricePerAccess`, the two
+  deprecated schema fields (B-17).
+- `internal/compat`: a generated consumer program that uses every exported
+  symbol of the previous public API must still build against this checkout.
+
+### Deprecated
+- `ApproveSubscriptionRequestOptions.DatasetID` (A-05, decision D3): the API
+  has no such field, so it is no longer sent; passing it prints a one-time
+  warning and a later release will reject it.
+- `agent.Client.Me` — use `GetMe`; `Me` decodes the projection into the full
+  `AgentRecord`, leaving fields the server never sends at zero (B-02).
+- The admin-only company request/response types in `types`
+  (`CreateCompanyRequest`, `UpdateCompanyRequest`, `CompaniesResponse`,
+  `CreateCompanyResponse`, `InviteUserRequest`, `CompanyUsersResponse`), and
+  `DatasetMarketplace.StripeProductID` / `StripePriceID` (always nil on API
+  reads). Kept so existing code compiles; removal is for the next major
+  version (A-12, B-17).
+
+### Removed
+- Package `github.com/helix-tools/sdk-go/v2/api` moved to `internal/api` (A-12).
+  It was an integration-test harness that drove admin-only routes and imported
+  `testing` from library code, not SDK surface; no in-tree or known consumer
+  imports it. Everything else in the previous public API still compiles
+  (enforced by `internal/compat`).
+
+### Documentation
+- README: listing datasets, polling options, API errors, approval envelope,
+  agent client, and the Go-specific differences from the other SDKs (A-17).
+
 ### Added
 - **SDK identification via `User-Agent` (additive, minor).**
   Every Helix API call now identifies the SDK via
