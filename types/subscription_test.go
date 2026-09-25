@@ -856,3 +856,39 @@ func TestSubscription_UsageCountersMatchSchemaFile(t *testing.T) {
 		t.Errorf("schema last_accessed_at.format = %v, want %q", schema.Properties["last_accessed_at"]["format"], "date-time")
 	}
 }
+
+// B-05: the API's subscription rows carry producer_info (the producer's
+// company name — the only place the producer name arrives) but no SDK typed it,
+// even though the ConsumerInfo comment says it mirrors it.
+func TestSubscription_ProducerInfoRoundTrip(t *testing.T) {
+	var sub Subscription
+	if err := json.Unmarshal([]byte(subscriptionJSONWithFields(`"producer_info": {"company_name": "Acme Data Co"}`)), &sub); err != nil {
+		t.Fatalf("unmarshal Subscription: %v", err)
+	}
+	if sub.ProducerInfo == nil || sub.ProducerInfo.CompanyName != "Acme Data Co" {
+		t.Fatalf("ProducerInfo = %+v, want company_name Acme Data Co", sub.ProducerInfo)
+	}
+
+	out, err := json.Marshal(sub)
+	if err != nil {
+		t.Fatalf("marshal Subscription: %v", err)
+	}
+	got, ok := wireMap(t, out)["producer_info"].(map[string]any)
+	if !ok || got["company_name"] != "Acme Data Co" {
+		t.Errorf("re-encoded producer_info = %v, want company_name Acme Data Co", wireMap(t, out)["producer_info"])
+	}
+}
+
+func TestSubscription_ProducerInfoAbsentIsNil(t *testing.T) {
+	var sub Subscription
+	if err := json.Unmarshal([]byte(subscriptionJSONWithFields("")), &sub); err != nil {
+		t.Fatalf("unmarshal Subscription: %v", err)
+	}
+	if sub.ProducerInfo != nil {
+		t.Errorf("ProducerInfo = %+v, want nil when absent", sub.ProducerInfo)
+	}
+	out, _ := json.Marshal(sub)
+	if _, present := wireMap(t, out)["producer_info"]; present {
+		t.Errorf("nil ProducerInfo re-encoded a producer_info key: %s", out)
+	}
+}

@@ -101,3 +101,30 @@ func TestDataset_Decode_MalformedBodyErrors(t *testing.T) {
 		t.Fatal("expected a type error for a numeric id, got nil")
 	}
 }
+
+// B-17: is_public and price_per_access are on the wire and in the schema but
+// were in no SDK type. Both are deprecated server-side (visibility /
+// marketplace.price_monthly_cents supersede them) but must still decode.
+func TestDataset_Decode_DeprecatedIsPublicAndPricePerAccess(t *testing.T) {
+	var ds Dataset
+	if err := json.Unmarshal([]byte(`{"id":"a","is_public":true,"price_per_access":250}`), &ds); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !ds.IsPublic {
+		t.Error("IsPublic = false, want true (is_public)")
+	}
+	if ds.PricePerAccess != 250 {
+		t.Errorf("PricePerAccess = %d, want 250 (price_per_access)", ds.PricePerAccess)
+	}
+
+	// Absent keys stay zero and do not appear when re-encoding a fresh value.
+	out, err := json.Marshal(Dataset{ID: "b"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{"is_public", "price_per_access"} {
+		if _, present := wireMap(t, out)[key]; present {
+			t.Errorf("zero Dataset re-encoded %q; the deprecated fields must stay omitted when unset", key)
+		}
+	}
+}

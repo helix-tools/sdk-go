@@ -165,6 +165,11 @@ type Dataset struct {
 	// Marketplace pricing (schema PR #18). Optional and server-managed: nil
 	// while the marketplace_payments feature flag is off — tolerate absence.
 	Marketplace *DatasetMarketplace `json:"marketplace,omitempty"`
+	// IsPublic is Deprecated: superseded by Visibility; still sent by the API.
+	IsPublic bool `json:"is_public,omitempty"`
+	// PricePerAccess is Deprecated: the legacy per-access price in USD cents,
+	// superseded by Marketplace.PriceMonthlyCents; still sent when set.
+	PricePerAccess int64 `json:"price_per_access,omitempty"`
 }
 
 // UnmarshalJSON decodes a dataset and normalises the identifier: ID falls back
