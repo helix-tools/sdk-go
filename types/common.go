@@ -1,6 +1,8 @@
 // Package types defines common types used across the SDK.
 package types
 
+import "encoding/json"
+
 // EmptyPayloadHash is the SHA256 hash of an empty payload.
 const EmptyPayloadHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
@@ -102,7 +104,14 @@ type DatasetUpdateInput struct {
 	Metadata      map[string]any `json:"metadata,omitempty"`
 }
 
-// Dataset represents a dataset in the catalog
+// Dataset represents a dataset in the catalog.
+//
+// The customer-facing dataset API (GET, PATCH and list responses) identifies a
+// dataset with "id" and never sends "_id" (which is the stored-document key).
+// Decoding therefore fills ID from "_id" when present and from "id"
+// otherwise, so ID is populated on every real response and can be passed
+// straight to Producer.UpdateDataset / Consumer.GetDataset. IDAlias always
+// holds the raw "id" value.
 type Dataset struct {
 	ID            string        `json:"_id"`
 	IDAlias       string        `json:"id,omitempty"`
@@ -156,4 +165,30 @@ type Dataset struct {
 	// Marketplace pricing (schema PR #18). Optional and server-managed: nil
 	// while the marketplace_payments feature flag is off — tolerate absence.
 	Marketplace *DatasetMarketplace `json:"marketplace,omitempty"`
+}
+
+// UnmarshalJSON decodes a dataset and normalises the identifier: ID falls back
+// to the API's "id" key when "_id" is absent, and SizeBytes falls back to
+// total_size_bytes (the only size the customer-facing API sends) when
+// size_bytes is absent or zero. An explicit "_id" / non-zero "size_bytes"
+// always wins, so bodies that carry the stored-document shape decode as before.
+func (d *Dataset) UnmarshalJSON(data []byte) error {
+	type plain Dataset // drops this method, avoiding infinite recursion
+
+	var p plain
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+
+	if p.ID == "" {
+		p.ID = p.IDAlias
+	}
+
+	if p.SizeBytes == 0 {
+		p.SizeBytes = p.TotalSizeBytes
+	}
+
+	*d = Dataset(p)
+
+	return nil
 }

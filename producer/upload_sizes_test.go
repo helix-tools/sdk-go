@@ -419,7 +419,7 @@ func TestUploadDataset_ProcessesBeforePOST_SoRealSizesReachTheBody(t *testing.T)
 			})
 		case r.URL.Path == "/v1/datasets/ds-real-sizes" && r.Method == http.MethodGet:
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"_id":"ds-real-sizes","id":"ds-real-sizes","name":"real-sizes-test"}`))
+			_, _ = w.Write([]byte(`{"id":"ds-real-sizes","name":"real-sizes-test"}`))
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -656,7 +656,7 @@ func TestUploadDataset_ExplicitVersionOverride_EndToEnd(t *testing.T) {
 			})
 		case strings.HasPrefix(r.URL.Path, "/v1/datasets/") && r.Method == http.MethodGet:
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"_id":"ds-override-e2e","id":"ds-override-e2e"}`))
+			_, _ = w.Write([]byte(`{"id":"ds-override-e2e"}`))
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		}

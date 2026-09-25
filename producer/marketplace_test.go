@@ -358,7 +358,7 @@ func TestSetDatasetMarketplace_BothFields(t *testing.T) {
 		raw, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(raw, &gotBody)
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"_id":"dataset-1","marketplace":{"price_monthly_cents":4999}}`))
+		_, _ = w.Write([]byte(`{"id":"dataset-1","marketplace":{"price_monthly_cents":4999}}`))
 	}))
 	defer server.Close()
 
