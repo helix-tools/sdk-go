@@ -16,6 +16,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -25,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	stscreds "github.com/helix-tools/sdk-go/v2/credentials"
@@ -939,6 +941,14 @@ func (p *Producer) ListSubscriptionRequests(ctx context.Context, status string) 
 	return response.Requests, nil
 }
 
+// deprecationWriter receives one-time deprecation warnings. It is a variable
+// so tests can capture the output.
+var deprecationWriter io.Writer = os.Stderr
+
+// warnedApproveDatasetID makes the DatasetID deprecation warning fire once
+// per process instead of once per approval.
+var warnedApproveDatasetID atomic.Bool
+
 // ApproveSubscriptionRequest approves a subscription request from a consumer.
 // This creates the necessary resources (SQS queue, SNS subscription, KMS grants)
 // for the consumer to access the producer's datasets.
@@ -947,8 +957,10 @@ func (p *Producer) ListSubscriptionRequests(ctx context.Context, status string) 
 //   - requestID: The subscription request ID to approve.
 //   - opts: Optional parameters for approval:
 //   - Notes: Optional internal notes about the approval.
-//   - DatasetID: Optional specific dataset ID to grant access to
-//     (if not provided, uses the dataset from the original request).
+//   - DatasetID: Deprecated. The API has no such field and always grants
+//     the scope of the original request, so it is no longer sent; passing
+//     it prints a one-time deprecation warning and a later release will
+//     reject it.
 //   - PriceMonthlyCents: Optional per-consumer monthly USD-cents price for
 //     THIS approval (see types.ApproveSubscriptionRequestOptions for the
 //     full nil/0/positive semantics). A negative value is rejected
@@ -956,12 +968,33 @@ func (p *Producer) ListSubscriptionRequests(ctx context.Context, status string) 
 //
 // Returns the updated subscription request with status "approved" (or, when
 // PriceMonthlyCents is a positive value, "approved_pending_payment" until
-// the consumer completes checkout).
+// the consumer completes checkout). The API answers an approval with a
+// {request, subscription} envelope; this method returns the request half and
+// keeps its original signature. Use ApproveSubscriptionRequestWithSubscription
+// to also receive the provisioned subscription.
 func (p *Producer) ApproveSubscriptionRequest(ctx context.Context, requestID string, opts *types.ApproveSubscriptionRequestOptions) (*types.SubscriptionRequest, error) {
+	resp, err := p.ApproveSubscriptionRequestWithSubscription(ctx, requestID, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	return &resp.Request, nil
+}
+
+// ApproveSubscriptionRequestWithSubscription approves a subscription request
+// exactly like ApproveSubscriptionRequest but returns the API's full
+// {request, subscription} envelope: Request is the updated subscription
+// request and Subscription is the subscription that approval provisioned. It
+// is nil while the request is approved_pending_payment (nothing is
+// provisioned until the consumer completes checkout).
+//
+// A response without a request object is reported as an error rather than a
+// zero-valued success.
+func (p *Producer) ApproveSubscriptionRequestWithSubscription(ctx context.Context, requestID string, opts *types.ApproveSubscriptionRequestOptions) (*types.ApproveRequestResponse, error) {
 	path := fmt.Sprintf("/v1/subscription-requests/%s", url.PathEscape(requestID))
 
-	// Use a map to include the optional dataset_id/price_monthly_cents
-	// fields, which are not part of ApproveRejectPayload.
+	// Use a map to include the optional price_monthly_cents field, which is
+	// not part of ApproveRejectPayload.
 	payloadMap := map[string]any{
 		"action": "approve",
 	}
@@ -969,8 +1002,9 @@ func (p *Producer) ApproveSubscriptionRequest(ctx context.Context, requestID str
 		if opts.Notes != nil {
 			payloadMap["notes"] = *opts.Notes
 		}
-		if opts.DatasetID != nil {
-			payloadMap["dataset_id"] = *opts.DatasetID
+		if opts.DatasetID != nil && warnedApproveDatasetID.CompareAndSwap(false, true) {
+			fmt.Fprintln(deprecationWriter, "helix sdk-go: ApproveSubscriptionRequestOptions.DatasetID is deprecated and ignored — "+
+				"the API always grants the scope of the original request; the option will be removed in a future release")
 		}
 		if opts.PriceMonthlyCents != nil {
 			// CAREFUL: this branch is keyed on "!= nil", NOT on the pointed-to
@@ -985,9 +1019,13 @@ func (p *Producer) ApproveSubscriptionRequest(ctx context.Context, requestID str
 		}
 	}
 
-	var result types.SubscriptionRequest
+	var result types.ApproveRequestResponse
 	if err := p.makeAPIRequest(ctx, http.MethodPost, path, payloadMap, &result); err != nil {
 		return nil, err
+	}
+
+	if result.Request.ID == "" && result.Request.Status == "" {
+		return nil, errors.New("unexpected approve response: no request object in the body")
 	}
 
 	return &result, nil
