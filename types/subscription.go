@@ -41,6 +41,13 @@ type ConsumerInfo struct {
 	Email       string `json:"email,omitempty"`
 }
 
+// ProducerInfo is the server-side enrichment of the producer behind a
+// subscription (subscription.producer_info). It is where the producer's name
+// arrives on GET /v1/subscriptions: the wire has no producer_name key.
+type ProducerInfo struct {
+	CompanyName string `json:"company_name,omitempty"`
+}
+
 // DatasetInfo is the server-side enrichment of the dataset a subscription
 // points at (subscription.dataset_info). Populated by the API on read paths
 // (e.g. GET /v1/subscriptions) so a consumer can show when the dataset was
@@ -66,6 +73,9 @@ type Subscription struct {
 	Tier        string  `json:"tier"`   // SubscriptionTier — canonical write value is "free"
 	Status      string  `json:"status"` // SubscriptionStatus: "active", "paused", "cancelled", "expired"
 	SQSQueueURL *string `json:"sqs_queue_url,omitempty"`
+	// ProducerInfo is optional server-side enrichment carrying the producer's
+	// company name; absent unless the API populated it on this read path.
+	ProducerInfo *ProducerInfo `json:"producer_info,omitempty"`
 	// ConsumerInfo is optional server-side enrichment; absent unless the API
 	// populated it on this read path.
 	ConsumerInfo *ConsumerInfo `json:"consumer_info,omitempty"`
