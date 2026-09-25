@@ -16,6 +16,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -156,6 +157,40 @@ type DownloadURLInfo struct {
 	} `json:"dataset,omitempty"`
 }
 
+// APIError is returned for any non-2xx response from the Helix API. Callers
+// can branch on the status without matching message text:
+//
+//	var apiErr *consumer.APIError
+//	if errors.As(err, &apiErr) && apiErr.IsRateLimited() {
+//		// back off and retry
+//	}
+//
+// Error() keeps the historical "API request failed: <status> - <body>" text.
+type APIError struct {
+	StatusCode int
+	Body       string
+}
+
+// Error implements the error interface.
+func (e *APIError) Error() string {
+	return fmt.Sprintf("API request failed: %d - %s", e.StatusCode, e.Body)
+}
+
+// IsUnauthorized reports a 401 (bad or expired credentials).
+func (e *APIError) IsUnauthorized() bool { return e.StatusCode == http.StatusUnauthorized }
+
+// IsForbidden reports a 403 (authenticated but not permitted).
+func (e *APIError) IsForbidden() bool { return e.StatusCode == http.StatusForbidden }
+
+// IsNotFound reports a 404 (the resource does not exist or is not visible).
+func (e *APIError) IsNotFound() bool { return e.StatusCode == http.StatusNotFound }
+
+// IsConflict reports a 409 (duplicate or state conflict).
+func (e *APIError) IsConflict() bool { return e.StatusCode == http.StatusConflict }
+
+// IsRateLimited reports a 429: back off and retry.
+func (e *APIError) IsRateLimited() bool { return e.StatusCode == http.StatusTooManyRequests }
+
 // Dataset is one row of Consumer.ListDatasets: the full catalog record
 // (embedded types.Dataset — the same shape Consumer.GetDataset returns, so ID,
 // Name, ProducerID, Category, Description, Status, sizes, Marketplace and every
@@ -230,10 +265,23 @@ type PollNotificationsOptions struct {
 	MaxMessages     int32    // Maximum number of messages to retrieve (1-10, default: 10)
 	SubscriptionIDs []string // Optional list of subscription IDs to filter notifications
 
-	// Long polling wait time (0-20 seconds, default: 20)
+	// Long polling wait time (1-20 seconds). 0 means "not set" and selects
+	// the default of 20; use ShortPoll to ask for an immediate return.
 	//
 	// TODO: Get pattern from AWS SSM.
 	WaitTimeSeconds int32
+
+	// ShortPoll returns immediately with whatever is queued instead of
+	// waiting for messages (SQS WaitTimeSeconds = 0). Go's zero value cannot
+	// distinguish "unset" from an explicit 0, so this flag is how a caller
+	// asks for it; it takes precedence over WaitTimeSeconds.
+	ShortPoll bool
+
+	// VisibilityTimeout is how many seconds a received message stays hidden
+	// from other pollers before it becomes visible again if it is not
+	// acknowledged (1-43200). 0 (or a negative value) means "not set" and
+	// selects the default of 300.
+	VisibilityTimeout int32
 }
 
 // NewConsumer creates a new Consumer instance.
@@ -936,7 +984,7 @@ func (c *Consumer) makeAPIRequest(ctx context.Context, method, path string, body
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 
-		return fmt.Errorf("API request failed: %d - %s", resp.StatusCode, string(bodyBytes))
+		return &APIError{StatusCode: resp.StatusCode, Body: string(bodyBytes)}
 	}
 
 	if result != nil {
@@ -967,12 +1015,21 @@ func (c *Consumer) PollNotifications(ctx context.Context, opts PollNotifications
 		opts.MaxMessages = 10 // AWS limit.
 	}
 
-	if opts.WaitTimeSeconds == 0 {
+	switch {
+	case opts.ShortPoll:
+		opts.WaitTimeSeconds = 0
+	case opts.WaitTimeSeconds <= 0:
 		opts.WaitTimeSeconds = 20
+	case opts.WaitTimeSeconds > 20:
+		opts.WaitTimeSeconds = 20 // AWS limit.
 	}
 
-	if opts.WaitTimeSeconds > 20 {
-		opts.WaitTimeSeconds = 20 // AWS limit.
+	if opts.VisibilityTimeout <= 0 {
+		opts.VisibilityTimeout = 300
+	}
+
+	if opts.VisibilityTimeout > 43200 {
+		opts.VisibilityTimeout = 43200 // AWS limit (12 hours).
 	}
 
 	// Default AutoAcknowledge to true.
@@ -983,46 +1040,8 @@ func (c *Consumer) PollNotifications(ctx context.Context, opts PollNotifications
 	}
 
 	// Get per-consumer queue URL from active subscriptions where this customer is the consumer.
-	if c.queueURL == nil {
-		// For "both" customers, explicitly request consumer subscriptions to disambiguate.
-		// This ensures we get the queue where WE are the consumer, not producer.
-		subscriptions, err := c.ListSubscriptions(ctx, &ListSubscriptionsOptions{Role: "consumer"})
-		if err != nil {
-			return nil, fmt.Errorf("failed to get subscriptions: %w", err)
-		}
-
-		if len(subscriptions) == 0 {
-			return nil, fmt.Errorf("no active subscriptions found. Create a subscription first using CreateSubscriptionRequest()")
-		}
-
-		// Filter to only subscriptions where WE are the consumer.
-		// This handles edge cases and ensures we get the correct queue.
-		var myConsumerSubs []Subscription
-		for _, sub := range subscriptions {
-			if sub.ConsumerID == c.CustomerID {
-				myConsumerSubs = append(myConsumerSubs, sub)
-			}
-		}
-
-		if len(myConsumerSubs) == 0 {
-			return nil, fmt.Errorf("no subscriptions found where you are the consumer")
-		}
-
-		// Get queue URL from our own subscription (all consumer subscriptions share same queue).
-		var queueURL *string
-		for _, sub := range myConsumerSubs {
-			if sub.SQSQueueURL != nil {
-				queueURL = sub.SQSQueueURL
-				break
-			}
-		}
-
-		if queueURL == nil {
-			return nil, fmt.Errorf("per-consumer queue not provisioned. This may be a legacy subscription. " +
-				"Please contact support or create a new subscription to get a dedicated queue.")
-		}
-
-		c.queueURL = queueURL
+	if err := c.resolveQueueURL(ctx, "no active subscriptions found. Create a subscription first using CreateSubscriptionRequest()"); err != nil {
+		return nil, err
 	}
 
 	queueURL := aws.ToString(c.queueURL)
@@ -1032,7 +1051,7 @@ func (c *Consumer) PollNotifications(ctx context.Context, opts PollNotifications
 		MaxNumberOfMessages:   opts.MaxMessages,
 		MessageAttributeNames: []string{"All"},
 		QueueUrl:              aws.String(queueURL),
-		VisibilityTimeout:     300,
+		VisibilityTimeout:     opts.VisibilityTimeout,
 		WaitTimeSeconds:       opts.WaitTimeSeconds,
 	})
 	if err != nil {
@@ -1133,6 +1152,70 @@ func (c *Consumer) PollNotifications(ctx context.Context, opts PollNotifications
 	}
 
 	return notifications, nil
+}
+
+// resolveQueueURL caches the per-consumer queue URL, taking it from a
+// subscription where THIS customer is the consumer. noSubscriptions is the
+// error text for a customer with no subscriptions at all (it differs per
+// caller).
+//
+// The list is requested with role=consumer to disambiguate "both" customers.
+// The API answers 400 when that role does not match the credential's customer
+// type (or the type is unknown), so on a 400 — and only a 400 — the list is
+// requested again without a role. The rows are filtered to
+// consumer_id == this customer either way: the API sends sqs_queue_url on
+// producer-side rows too, and those queues are not ours to poll or purge.
+func (c *Consumer) resolveQueueURL(ctx context.Context, noSubscriptions string) error {
+	if c.queueURL != nil {
+		return nil
+	}
+
+	subscriptions, err := c.ListSubscriptions(ctx, &ListSubscriptionsOptions{Role: "consumer"})
+	if err != nil {
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+			return fmt.Errorf("failed to get subscriptions: %w", err)
+		}
+
+		if subscriptions, err = c.ListSubscriptions(ctx, nil); err != nil {
+			return fmt.Errorf("failed to get subscriptions: %w", err)
+		}
+	}
+
+	if len(subscriptions) == 0 {
+		return errors.New(noSubscriptions)
+	}
+
+	var queueURL *string
+
+	haveConsumerSub := false
+
+	for _, sub := range subscriptions {
+		if sub.ConsumerID != c.CustomerID {
+			continue
+		}
+
+		haveConsumerSub = true
+
+		if sub.SQSQueueURL != nil {
+			queueURL = sub.SQSQueueURL
+
+			break
+		}
+	}
+
+	if !haveConsumerSub {
+		return errors.New("no subscriptions found where you are the consumer")
+	}
+
+	if queueURL == nil {
+		return errors.New("per-consumer queue not provisioned. This may be a legacy subscription. " +
+			"Please contact support or create a new subscription to get a dedicated queue.")
+	}
+
+	c.queueURL = queueURL
+
+	return nil
 }
 
 // DeleteNotification deletes a notification message from the SQS queue after processing.
@@ -1238,43 +1321,8 @@ func (c *Consumer) GetSubscription(ctx context.Context, subscriptionID string) (
 // Calling this method more frequently will result in an error.
 func (c *Consumer) ClearQueue(ctx context.Context) error {
 	// Initialize queue URL if not already set.
-	if c.queueURL == nil {
-		subscriptions, err := c.ListSubscriptions(ctx, &ListSubscriptionsOptions{Role: "consumer"})
-		if err != nil {
-			return fmt.Errorf("failed to get subscriptions: %w", err)
-		}
-
-		if len(subscriptions) == 0 {
-			return fmt.Errorf("no active subscriptions found. Cannot determine queue URL")
-		}
-
-		// Filter to only subscriptions where WE are the consumer
-		var myConsumerSubs []Subscription
-		for _, sub := range subscriptions {
-			if sub.ConsumerID == c.CustomerID {
-				myConsumerSubs = append(myConsumerSubs, sub)
-			}
-		}
-
-		if len(myConsumerSubs) == 0 {
-			return fmt.Errorf("no subscriptions found where you are the consumer")
-		}
-
-		// Get queue URL from our own subscription
-		var queueURL *string
-		for _, sub := range myConsumerSubs {
-			if sub.SQSQueueURL != nil {
-				queueURL = sub.SQSQueueURL
-				break
-			}
-		}
-
-		if queueURL == nil {
-			return fmt.Errorf("per-consumer queue not provisioned. This may be a legacy subscription. " +
-				"Please contact support or create a new subscription to get a dedicated queue.")
-		}
-
-		c.queueURL = queueURL
+	if err := c.resolveQueueURL(ctx, "no active subscriptions found. Cannot determine queue URL"); err != nil {
+		return err
 	}
 
 	queueURL := aws.ToString(c.queueURL)
