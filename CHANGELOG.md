@@ -23,11 +23,11 @@
   (A-09).** On a 400 they retry the subscription list without a role and always
   narrow to rows where this customer is the consumer, so a producer-side row's
   queue is never polled or purged.
-- **`NewProducer` looks up its bucket and key parameters on the real prefix
-  only and fails closed (A-21).** The two dead `/helix/...` prefixes are gone;
-  only a clean "not found" moves to the next candidate, so a real access error
-  is reported instead of being masked by a later one, and an all-missing result
-  no longer repeats parameter paths.
+- **`NewProducer` looks up its bucket and key parameters only where they are
+  stored and fails closed (A-21).** The legacy locations that never held them
+  are no longer probed; only a clean "not found" moves on to the next
+  candidate, so a real access error is reported instead of being masked by a
+  later one, and an all-missing result no longer repeats parameter paths.
 - **`SubscriptionRequest` required keys are never omitted (B-08).**
   `consumer_name`, `consumer_email` and `producer_name` lost their `omitempty`.
 - **`agent`: a 503 is a kill-switch only when its body says so (A-16).** Any
