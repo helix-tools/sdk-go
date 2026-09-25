@@ -65,8 +65,11 @@ func TestSubscriptionRequestStatusConstants(t *testing.T) {
 	}
 }
 
-// TestCompanyStatusConstants pins the canonical 8-value CompanyStatus set,
-// matching the Go API source of truth (audit P3 #5).
+// TestCompanyStatusConstants pins the canonical 12-value CompanyStatus set:
+// the 8 provisioning-lifecycle values plus the 4 self-service onboarding
+// values (pending_approval, rejected, pending_offboard, offboarded) the API
+// allowlist accepts and live companies carry (parity audit B-09, decision D1:
+// company.schema.json absorbs customer.schema.json's enum).
 func TestCompanyStatusConstants(t *testing.T) {
 	cases := map[CompanyStatus]string{
 		CompanyStatusProvisioning:       "provisioning",
@@ -77,13 +80,24 @@ func TestCompanyStatusConstants(t *testing.T) {
 		CompanyStatusOnboardingFailed:   "onboarding_failed",
 		CompanyStatusDeprovisioning:     "deprovisioning",
 		CompanyStatusDecommissionFailed: "decommission_failed",
+		CompanyStatusPendingApproval:    "pending_approval",
+		CompanyStatusRejected:           "rejected",
+		CompanyStatusPendingOffboard:    "pending_offboard",
+		CompanyStatusOffboarded:         "offboarded",
 	}
-	if len(cases) != 8 {
-		t.Fatalf("expected exactly 8 canonical company statuses, got %d", len(cases))
+	if len(cases) != 12 {
+		t.Fatalf("expected exactly 12 canonical company statuses, got %d", len(cases))
 	}
 	for got, want := range cases {
 		if got != want {
 			t.Errorf("CompanyStatus const = %q, want %q", got, want)
+		}
+	}
+
+	// "cancelled" is forbidden by the API allowlist and must not be a constant.
+	for got := range cases {
+		if got == "cancelled" {
+			t.Error("cancelled must not be a canonical company status")
 		}
 	}
 }
