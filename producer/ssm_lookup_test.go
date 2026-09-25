@@ -72,7 +72,7 @@ type fakeSSM struct {
 	requested []string
 }
 
-// script maps a requested Name to "found:<value>", "notfound" or "denied".
+// script maps a requested Name to "found:<value>", "novalue", "notfound" or "denied".
 func newFakeSSM(t *testing.T, script map[string]string) *fakeSSM {
 	t.Helper()
 	f := &fakeSSM{}
@@ -89,6 +89,8 @@ func newFakeSSM(t *testing.T, script map[string]string) *fakeSSM {
 		switch {
 		case strings.HasPrefix(action, "found:"):
 			_, _ = w.Write([]byte(`{"Parameter":{"Name":"` + req.Name + `","Value":"` + strings.TrimPrefix(action, "found:") + `"}}`))
+		case action == "novalue":
+			_, _ = w.Write([]byte(`{"Parameter":{"Name":"` + req.Name + `"}}`))
 		case action == "denied":
 			w.Header().Set("X-Amzn-ErrorType", "AccessDeniedException")
 			w.WriteHeader(http.StatusBadRequest)
@@ -199,5 +201,18 @@ func TestSSMLookup_OnlyTheRealPathIsRequested(t *testing.T) {
 
 	if want := []string{"/helix-tools/production/customers/cust-1/s3_bucket"}; !reflect.DeepEqual(f.names(), want) {
 		t.Errorf("requested %v, want %v", f.names(), want)
+	}
+}
+
+// A parameter that exists but carries no value is an error, not a silent "".
+func TestGetSSMParameterValue_ParameterWithoutValueIsAnError(t *testing.T) {
+	f := newFakeSSM(t, map[string]string{"/a/p": "novalue", "/b/p": "found:never-reached"})
+
+	got, err := getSSMParameterValue(context.Background(), f.client(), []string{"/a/p", "/b/p"})
+	if err == nil || got != "" {
+		t.Fatalf("got %q, %v; want an error for a value-less parameter", got, err)
+	}
+	if len(f.names()) != 1 {
+		t.Errorf("requested %v; a value-less parameter must stop the search", f.names())
 	}
 }

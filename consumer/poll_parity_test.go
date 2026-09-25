@@ -325,3 +325,75 @@ func TestMakeAPIRequest_ReturnsTypedAPIError(t *testing.T) {
 		})
 	}
 }
+
+// The three "cannot resolve a queue" outcomes keep their historical messages,
+// per caller, and never touch SQS.
+func TestQueueDiscovery_NoQueueOutcomes(t *testing.T) {
+	notProvisioned := `{"_id":"sub-c","consumer_id":"test-customer","producer_id":"prod-1","dataset_id":"ds-1","tier":"free","status":"active"}`
+
+	for _, tc := range []struct {
+		name        string
+		rows        string
+		wantPoll    string
+		wantClear   string
+		roleRejects bool
+	}{
+		{name: "no subscriptions", rows: "", wantPoll: "no active subscriptions found. Create a subscription first", wantClear: "no active subscriptions found. Cannot determine queue URL"},
+		{name: "queue not provisioned", rows: notProvisioned, wantPoll: "per-consumer queue not provisioned", wantClear: "per-consumer queue not provisioned"},
+		{name: "not provisioned after the role fallback", rows: notProvisioned, roleRejects: true, wantPoll: "per-consumer queue not provisioned", wantClear: "per-consumer queue not provisioned"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status := 0
+			if tc.roleRejects {
+				status = http.StatusBadRequest
+			}
+			api := newSubsAPI(t, status, tc.rows)
+			f := newFakeSQS(t)
+
+			c := newTestConsumer(api.srv.URL)
+			f.attach(c)
+			if _, err := c.PollNotifications(context.Background(), PollNotificationsOptions{ShortPoll: true}); err == nil || !strings.Contains(err.Error(), tc.wantPoll) {
+				t.Errorf("PollNotifications err = %v, want it to contain %q", err, tc.wantPoll)
+			}
+
+			c = newTestConsumer(api.srv.URL)
+			f.attach(c)
+			if err := c.ClearQueue(context.Background()); err == nil || !strings.Contains(err.Error(), tc.wantClear) {
+				t.Errorf("ClearQueue err = %v, want it to contain %q", err, tc.wantClear)
+			}
+
+			if f.count() != 0 {
+				t.Errorf("SQS was called %d time(s); it must not be touched when no queue resolves", f.count())
+			}
+		})
+	}
+}
+
+// If the retry without a role fails too, that failure — not the original 400 —
+// is what the caller sees, still wrapped so errors.As finds the status.
+func TestQueueDiscovery_FallbackListFailureSurfaces(t *testing.T) {
+	var hits int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if r.URL.Query().Get("role") == "consumer" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"boom"}`))
+	}))
+	defer server.Close()
+
+	f := newFakeSQS(t)
+	c := newTestConsumer(server.URL)
+	f.attach(c)
+
+	_, err := c.PollNotifications(context.Background(), PollNotificationsOptions{ShortPoll: true})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("err = %v, want the 500 from the retry", err)
+	}
+	if hits != 2 {
+		t.Errorf("subscription requests = %d, want the role=consumer attempt plus one retry", hits)
+	}
+}
