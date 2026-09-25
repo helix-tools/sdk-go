@@ -213,3 +213,36 @@ func TestApproveSubscriptionRequest_NoWarningWithoutDatasetID(t *testing.T) {
 		t.Errorf("unexpected warning: %q", buf.String())
 	}
 }
+
+// Self-attack (a): an approval is a non-idempotent side effect that has ALREADY
+// happened by the time the response is decoded, so a subscription half the SDK
+// cannot decode (a bare id string, wrong-typed keys) must not turn it into an
+// error — the caller would retry and hit a conflict. The request half is what
+// both methods promise; the subscription is best-effort.
+func TestApproveSubscriptionRequest_UndecodableSubscriptionHalfIsNotAnError(t *testing.T) {
+	for name, sub := range map[string]string{
+		"bare id string":   `"sub-9"`,
+		"wrong-typed keys": `{"_id": 42, "created_at": {"unexpected": true}}`,
+		"array":            `[1,2,3]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := `{"request":{"_id":"req-1","status":"approved"},"subscription":` + sub + `}`
+			server := approveServer(t, body, nil, nil)
+			defer server.Close()
+			p := newTestProducer(server.URL)
+
+			got, err := p.ApproveSubscriptionRequest(context.Background(), "req-1", nil)
+			if err != nil || got.Status != "approved" || got.ID != "req-1" {
+				t.Fatalf("ApproveSubscriptionRequest = %+v, %v; want the approved request", got, err)
+			}
+
+			both, err := p.ApproveSubscriptionRequestWithSubscription(context.Background(), "req-1", nil)
+			if err != nil {
+				t.Fatalf("ApproveSubscriptionRequestWithSubscription: %v", err)
+			}
+			if both.Request.Status != "approved" || both.Subscription != nil {
+				t.Errorf("got %+v; want the request and a nil subscription", both)
+			}
+		})
+	}
+}

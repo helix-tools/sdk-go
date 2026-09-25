@@ -164,3 +164,25 @@ func TestListDatasetRow_MalformedBodyErrors(t *testing.T) {
 		t.Fatal("expected a type error for a numeric id")
 	}
 }
+
+// Self-attack (c): GetDataset("") would GET /v1/datasets/ — the COLLECTION —
+// and decode a list body into an empty Dataset without any error. Refuse it
+// before a request is sent.
+func TestGetDataset_RefusesAnEmptyDatasetID(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		_, _ = w.Write([]byte(`{"datasets":[]}`))
+	}))
+	defer server.Close()
+
+	for _, id := range []string{"", "  "} {
+		ds, err := newTestConsumer(server.URL).GetDataset(context.Background(), id)
+		if err == nil || ds != nil {
+			t.Errorf("GetDataset(%q) = %+v, %v; want an error and no dataset", id, ds, err)
+		}
+	}
+	if atomic.LoadInt32(&hits) != 0 {
+		t.Errorf("%d request(s) reached the API; an empty id must be refused client-side", hits)
+	}
+}

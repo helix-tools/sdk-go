@@ -93,6 +93,8 @@ func TestPollNotifications_WireOptions(t *testing.T) {
 		{name: "ShortPoll returns immediately", opts: PollNotificationsOptions{ShortPoll: true}, wantVis: 300, wantWaitZero: true, wantMaxMsgs: 10},
 		{name: "ShortPoll wins over WaitTimeSeconds", opts: PollNotificationsOptions{ShortPoll: true, WaitTimeSeconds: 15}, wantVis: 300, wantWaitZero: true, wantMaxMsgs: 10},
 		{name: "max messages passed through", opts: PollNotificationsOptions{MaxMessages: 3}, wantVis: 300, wantWait: 20, wantMaxMsgs: 3},
+		{name: "negative max messages falls back to 10", opts: PollNotificationsOptions{MaxMessages: -4}, wantVis: 300, wantWait: 20, wantMaxMsgs: 10},
+		{name: "max messages capped at 10", opts: PollNotificationsOptions{MaxMessages: 50}, wantVis: 300, wantWait: 20, wantMaxMsgs: 10},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -2,6 +2,7 @@ package producer
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -64,5 +65,36 @@ func TestUpdateDataset_UsesIDFromIDOnlyListResponse(t *testing.T) {
 	}
 	if updated.ID != "ds-wire-7" {
 		t.Errorf("updated.ID = %q, want ds-wire-7 (PATCH response is id-only too)", updated.ID)
+	}
+}
+
+// Self-attack (c): the B-01 failure class is "an empty dataset id turns a
+// per-dataset call into a call on the COLLECTION" (PATCH/DELETE /v1/datasets/).
+// Those calls must fail locally, before any request is sent.
+func TestDatasetCalls_RefuseAnEmptyDatasetID(t *testing.T) {
+	var hits int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+	p := newTestProducer(server.URL)
+
+	for _, id := range []string{"", "   "} {
+		if _, err := p.UpdateDataset(context.Background(), id, types.DatasetUpdateInput{}); err == nil {
+			t.Errorf("UpdateDataset(%q) succeeded; want a validation error", id)
+		} else {
+			var verr *ValidationError
+			if !errors.As(err, &verr) || verr.Field != "dataset_id" {
+				t.Errorf("UpdateDataset(%q) err = %v, want *ValidationError on dataset_id", id, err)
+			}
+		}
+		if err := p.DeleteDataset(context.Background(), id); err == nil {
+			t.Errorf("DeleteDataset(%q) succeeded; want a validation error", id)
+		}
+	}
+	if hits != 0 {
+		t.Errorf("%d request(s) reached the API; an empty id must be refused client-side", hits)
 	}
 }
