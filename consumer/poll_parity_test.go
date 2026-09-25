@@ -10,9 +10,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/aws/smithy-go/middleware"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // fakeSQS answers the two SQS actions PollNotifications/ClearQueue issue and
@@ -411,5 +414,88 @@ func TestQueueDiscovery_FallbackListFailureSurfaces(t *testing.T) {
 	}
 	if hits != 2 {
 		t.Errorf("subscription requests = %d, want the role=consumer attempt plus one retry", hits)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// The ShortPoll serialize middleware, driven directly.
+// ----------------------------------------------------------------------------
+
+func TestWithZeroWaitTime(t *testing.T) {
+	t.Run("adds the key and keeps the rest", func(t *testing.T) {
+		out, err := withZeroWaitTime(strings.NewReader(`{"QueueUrl":"q","MaxNumberOfMessages":3}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		_ = json.Unmarshal(out, &got)
+		if got["WaitTimeSeconds"] != float64(0) || got["QueueUrl"] != "q" || got["MaxNumberOfMessages"] != float64(3) {
+			t.Errorf("body = %s", out)
+		}
+	})
+	t.Run("replaces an existing wait", func(t *testing.T) {
+		out, err := withZeroWaitTime(strings.NewReader(`{"WaitTimeSeconds":20}`))
+		if err != nil || !strings.Contains(string(out), `"WaitTimeSeconds":0`) || strings.Contains(string(out), "20") {
+			t.Errorf("body = %s, err = %v", out, err)
+		}
+	})
+	t.Run("non-object body is an error", func(t *testing.T) {
+		if _, err := withZeroWaitTime(strings.NewReader(`[1,2]`)); err == nil {
+			t.Error("expected an error for a JSON array")
+		}
+		if _, err := withZeroWaitTime(strings.NewReader(``)); err == nil {
+			t.Error("expected an error for an empty body")
+		}
+	})
+	t.Run("read failure is an error", func(t *testing.T) {
+		if _, err := withZeroWaitTime(iotest.ErrReader(errors.New("boom"))); err == nil {
+			t.Error("expected the read error")
+		}
+	})
+}
+
+func TestZeroWaitSerialize_PassThroughAndErrors(t *testing.T) {
+	var forwarded int
+	next := middleware.SerializeHandlerFunc(func(ctx context.Context, in middleware.SerializeInput) (middleware.SerializeOutput, middleware.Metadata, error) {
+		forwarded++
+		return middleware.SerializeOutput{Result: in.Request}, middleware.Metadata{}, nil
+	})
+
+	// A request that is not an HTTP request is left alone.
+	if _, _, err := zeroWaitSerialize(context.Background(), middleware.SerializeInput{Request: "not-http"}, next); err != nil {
+		t.Fatalf("non-http request: %v", err)
+	}
+	// So is one with no body.
+	if _, _, err := zeroWaitSerialize(context.Background(), middleware.SerializeInput{Request: smithyhttp.NewStackRequest()}, next); err != nil {
+		t.Fatalf("bodyless request: %v", err)
+	}
+	if forwarded != 2 {
+		t.Errorf("next handler called %d times, want 2 (both pass through untouched)", forwarded)
+	}
+
+	// A body that is not a JSON object stops the request instead of sending garbage.
+	bad, err := smithyhttp.NewStackRequest().(*smithyhttp.Request).SetStream(strings.NewReader(`not json`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := zeroWaitSerialize(context.Background(), middleware.SerializeInput{Request: bad}, next); err == nil {
+		t.Error("expected an error for a non-JSON body")
+	}
+	if forwarded != 2 {
+		t.Error("the handler must not run after a body error")
+	}
+
+	// A JSON body is rewritten and forwarded.
+	good, err := smithyhttp.NewStackRequest().(*smithyhttp.Request).SetStream(strings.NewReader(`{"QueueUrl":"q"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := zeroWaitSerialize(context.Background(), middleware.SerializeInput{Request: good}, next)
+	if err != nil {
+		t.Fatalf("json body: %v", err)
+	}
+	body, _ := io.ReadAll(out.Result.(*smithyhttp.Request).GetStream())
+	if !strings.Contains(string(body), `"WaitTimeSeconds":0`) || !strings.Contains(string(body), `"QueueUrl":"q"`) {
+		t.Errorf("forwarded body = %s", body)
 	}
 }

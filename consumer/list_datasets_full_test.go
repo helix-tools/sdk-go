@@ -3,6 +3,7 @@ package consumer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -263,5 +264,28 @@ func TestGetDownloadURL_NestedDatasetIDFromIDKey(t *testing.T) {
 	defer bad.Close()
 	if _, err := newTestConsumer(bad.URL).GetDownloadURL(context.Background(), "ds-1"); err == nil {
 		t.Error("expected a decode error for a numeric download_url")
+	}
+}
+
+// A body the record decoder rejects is an error, not a half-filled row.
+func TestListDatasetRow_MalformedBodyErrors(t *testing.T) {
+	var ds Dataset
+	if err := json.Unmarshal([]byte(`{"id": 5}`), &ds); err == nil {
+		t.Fatal("expected a type error for a numeric id")
+	}
+}
+
+// A failing GET surfaces as the typed error, with no half-built info.
+func TestGetDownloadURL_APIErrorSurfaces(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"no such dataset"}`))
+	}))
+	defer server.Close()
+
+	info, err := newTestConsumer(server.URL).GetDownloadURL(context.Background(), "ds-1")
+	var apiErr *APIError
+	if info != nil || !errors.As(err, &apiErr) || !apiErr.IsNotFound() {
+		t.Errorf("GetDownloadURL = %+v, %v; want nil and a 404 *APIError", info, err)
 	}
 }

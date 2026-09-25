@@ -1196,39 +1196,49 @@ func (c *Consumer) PollNotifications(ctx context.Context, opts PollNotifications
 // covers the final body.
 func forceZeroWaitTime(o *sqs.Options) {
 	o.APIOptions = append(o.APIOptions, func(stack *middleware.Stack) error {
-		return stack.Serialize.Add(middleware.SerializeMiddlewareFunc("HelixShortPoll",
-			func(ctx context.Context, in middleware.SerializeInput, next middleware.SerializeHandler) (middleware.SerializeOutput, middleware.Metadata, error) {
-				req, ok := in.Request.(*smithyhttp.Request)
-				if !ok || req.GetStream() == nil {
-					return next.HandleSerialize(ctx, in)
-				}
-
-				raw, err := io.ReadAll(req.GetStream())
-				if err != nil {
-					return middleware.SerializeOutput{}, middleware.Metadata{}, err
-				}
-
-				var body map[string]json.RawMessage
-				if err := json.Unmarshal(raw, &body); err != nil {
-					return middleware.SerializeOutput{}, middleware.Metadata{}, err
-				}
-
-				body["WaitTimeSeconds"] = json.RawMessage("0")
-
-				patched, err := json.Marshal(body)
-				if err != nil {
-					return middleware.SerializeOutput{}, middleware.Metadata{}, err
-				}
-
-				if req, err = req.SetStream(bytes.NewReader(patched)); err != nil {
-					return middleware.SerializeOutput{}, middleware.Metadata{}, err
-				}
-
-				in.Request = req
-
-				return next.HandleSerialize(ctx, in)
-			}), middleware.After)
+		return stack.Serialize.Add(middleware.SerializeMiddlewareFunc("HelixShortPoll", zeroWaitSerialize), middleware.After)
 	})
+}
+
+// zeroWaitSerialize is the serialize-step middleware behind forceZeroWaitTime.
+func zeroWaitSerialize(ctx context.Context, in middleware.SerializeInput, next middleware.SerializeHandler) (middleware.SerializeOutput, middleware.Metadata, error) {
+	req, ok := in.Request.(*smithyhttp.Request)
+	if !ok || req.GetStream() == nil {
+		return next.HandleSerialize(ctx, in)
+	}
+
+	patched, err := withZeroWaitTime(req.GetStream())
+	if err != nil {
+		return middleware.SerializeOutput{}, middleware.Metadata{}, err
+	}
+
+	// A bytes.Reader is seekable, so SetStream's only failure mode (a Seek
+	// error) cannot occur; the error is still propagated rather than dropped.
+	if req, err = req.SetStream(bytes.NewReader(patched)); err != nil {
+		return middleware.SerializeOutput{}, middleware.Metadata{}, err
+	}
+
+	in.Request = req
+
+	return next.HandleSerialize(ctx, in)
+}
+
+// withZeroWaitTime reads a serialized JSON request body and returns it with
+// "WaitTimeSeconds" set to 0; every other key is preserved.
+func withZeroWaitTime(body io.Reader) ([]byte, error) {
+	raw, err := io.ReadAll(body)
+	if err != nil {
+		return nil, err
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+
+	fields["WaitTimeSeconds"] = json.RawMessage("0")
+
+	return json.Marshal(fields)
 }
 
 // resolveQueueURL caches the per-consumer queue URL, taking it from a
