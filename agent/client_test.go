@@ -729,8 +729,13 @@ func TestNewClient_EmptyTokenErrors(t *testing.T) {
 	}
 }
 
-func TestNewClient_EmptyBaseURLErrors(t *testing.T) {
-	c := NewClient("", "jwt")
+// An empty base URL no longer fails every call: it falls back to
+// HELIX_API_ENDPOINT and then the production endpoint (A-16; see
+// TestNewClient_EmptyBaseURLFallsBackToEnvThenDefault). The remaining
+// fail-fast guard is a base URL that is empty after that fallback, which can
+// only be produced by constructing the struct by hand.
+func TestDo_EmptyResolvedBaseURLErrors(t *testing.T) {
+	c := &Client{token: "jwt"}
 	_, err := c.Me(context.Background())
 	if err == nil {
 		t.Fatal("err=nil, want error on empty baseURL")
