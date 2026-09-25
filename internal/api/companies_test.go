@@ -27,7 +27,7 @@ func TestCompanies(t *testing.T) {
 	var createdCompanyID string
 
 	t.Run("List_Companies", func(t *testing.T) {
-		var resp types.CompaniesResponse
+		var resp CompaniesResponse
 
 		err := client.Get(ctx, "/v1/companies", &resp)
 		if err != nil {
@@ -44,7 +44,7 @@ func TestCompanies(t *testing.T) {
 	t.Run("Create_Company", func(t *testing.T) {
 		req := NewTestConsumerCompany(testID)
 
-		var resp types.CreateCompanyResponse
+		var resp CreateCompanyResponse
 
 		err := client.Post(ctx, "/v1/companies", req, &resp)
 		if err != nil {
@@ -95,7 +95,7 @@ func TestCompanies(t *testing.T) {
 		}
 
 		newName := TestPrefix + "UpdatedCompany_" + testID
-		req := types.UpdateCompanyRequest{
+		req := UpdateCompanyRequest{
 			CompanyName: &newName,
 		}
 
@@ -118,7 +118,7 @@ func TestCompanies(t *testing.T) {
 			t.Skip("no company created")
 		}
 
-		var resp types.CompanyUsersResponse
+		var resp CompanyUsersResponse
 
 		err := client.Get(ctx, "/v1/companies/"+createdCompanyID+"/users", &resp)
 		if err != nil {
@@ -187,12 +187,12 @@ func TestCompanyValidation(t *testing.T) {
 	client := NewTestClient(t, cfg, cfg.ProducerCredentials)
 
 	t.Run("Create_Company_MissingName", func(t *testing.T) {
-		req := types.CreateCompanyRequest{
+		req := CreateCompanyRequest{
 			BusinessEmail: "test@example.com",
 			CustomerType:  "consumer",
 		}
 
-		var resp types.CreateCompanyResponse
+		var resp CreateCompanyResponse
 
 		err := client.Post(ctx, "/v1/companies", req, &resp)
 		if err == nil {
@@ -205,13 +205,13 @@ func TestCompanyValidation(t *testing.T) {
 	})
 
 	t.Run("Create_Company_InvalidType", func(t *testing.T) {
-		req := types.CreateCompanyRequest{
+		req := CreateCompanyRequest{
 			CompanyName:   "Test Company",
 			BusinessEmail: "test@example.com",
 			CustomerType:  "invalid_type",
 		}
 
-		var resp types.CreateCompanyResponse
+		var resp CreateCompanyResponse
 
 		err := client.Post(ctx, "/v1/companies", req, &resp)
 		if err == nil {

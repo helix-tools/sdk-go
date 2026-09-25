@@ -22,28 +22,28 @@ test-unit:
 #   HELIX_TEST_PRODUCER_ID, HELIX_TEST_PRODUCER_AWS_ACCESS_KEY_ID, HELIX_TEST_PRODUCER_AWS_SECRET_ACCESS_KEY
 #   HELIX_TEST_CONSUMER_ID, HELIX_TEST_CONSUMER_AWS_ACCESS_KEY_ID, HELIX_TEST_CONSUMER_AWS_SECRET_ACCESS_KEY
 test-integration:
-	go test ./api/... -v -timeout 5m
+	go test ./internal/api/... -v -timeout 5m
 
 # Run integration tests against local API
 test-integration-local:
-	HELIX_TEST_BASE_URL="http://localhost:8080" go test ./api/... -v -timeout 5m
+	HELIX_TEST_BASE_URL="http://localhost:8080" go test ./internal/api/... -v -timeout 5m
 
 # Run integration tests against production API
 test-integration-prod:
-	HELIX_TEST_BASE_URL="https://api-go.helix.tools" go test ./api/... -v -timeout 5m
+	HELIX_TEST_BASE_URL="https://api-go.helix.tools" go test ./internal/api/... -v -timeout 5m
 
 # Run specific test suite
 test-companies:
-	go test ./api/... -v -run TestCompanies -timeout 5m
+	go test ./internal/api/... -v -run TestCompanies -timeout 5m
 
 test-datasets:
-	go test ./api/... -v -run TestDatasets -timeout 5m
+	go test ./internal/api/... -v -run TestDatasets -timeout 5m
 
 test-subscription-requests:
-	go test ./api/... -v -run TestSubscriptionRequests -timeout 5m
+	go test ./internal/api/... -v -run TestSubscriptionRequests -timeout 5m
 
 test-subscriptions:
-	go test ./api/... -v -run TestSubscriptions -timeout 5m
+	go test ./internal/api/... -v -run TestSubscriptions -timeout 5m
 
 # Run linting
 lint:
