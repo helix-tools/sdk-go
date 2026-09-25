@@ -87,6 +87,22 @@ func TestListDatasets_KeepsLegacyMetadataFlags(t *testing.T) {
 	}
 }
 
+// An explicit metadata flag beats the top-level one, exactly as
+// DownloadDataset (resolveEncryptCompress) resolves it.
+func TestListDatasets_ExplicitMetadataFlagBeatsTopLevelEncryption(t *testing.T) {
+	var ds Dataset
+	if err := json.Unmarshal([]byte(`{"id":"x","encryption":true,"metadata":{"encryption_enabled":false}}`), &ds); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if ds.Metadata.EncryptionEnabled {
+		t.Error("Metadata.EncryptionEnabled = true; metadata.encryption_enabled=false is explicit and must win")
+	}
+	enc, _ := resolveEncryptCompress(&ds.Dataset)
+	if enc != ds.Metadata.EncryptionEnabled {
+		t.Errorf("list flag %v disagrees with the download decision %v", ds.Metadata.EncryptionEnabled, enc)
+	}
+}
+
 func TestListDatasets_MetadataFlagsFromMetadataObject(t *testing.T) {
 	var ds Dataset
 	if err := json.Unmarshal([]byte(`{"id":"x","metadata":{"compression_enabled":false,"encryption_enabled":true}}`), &ds); err != nil {

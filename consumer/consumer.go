@@ -204,9 +204,11 @@ func (e *APIError) IsRateLimited() bool { return e.StatusCode == http.StatusTooM
 type Dataset struct {
 	types.Dataset
 
-	// Metadata holds the two flags download handling reads. EncryptionEnabled
-	// also honours the record's top-level Encryption flag: the create endpoint
-	// promotes metadata.encryption_enabled to it and drops it from metadata.
+	// Metadata holds the two flags download handling reads, resolved exactly as
+	// DownloadDataset resolves them (resolveEncryptCompress): an explicit
+	// metadata.encryption_enabled wins, otherwise the record's top-level
+	// Encryption flag applies — the create endpoint promotes the flag to it and
+	// drops it from metadata.
 	Metadata struct {
 		CompressionEnabled bool `json:"compression_enabled"`
 		EncryptionEnabled  bool `json:"encryption_enabled"`
@@ -223,9 +225,7 @@ func (d *Dataset) UnmarshalJSON(data []byte) error {
 	}
 
 	*d = Dataset{Dataset: record}
-	d.Metadata.CompressionEnabled, _ = record.Metadata["compression_enabled"].(bool)
-	d.Metadata.EncryptionEnabled, _ = record.Metadata["encryption_enabled"].(bool)
-	d.Metadata.EncryptionEnabled = d.Metadata.EncryptionEnabled || record.Encryption
+	d.Metadata.EncryptionEnabled, d.Metadata.CompressionEnabled = resolveEncryptCompress(&record)
 
 	return nil
 }
