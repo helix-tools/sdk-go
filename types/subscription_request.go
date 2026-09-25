@@ -17,10 +17,10 @@ type SubscriptionRequest struct {
 	ID            string  `json:"_id"`
 	RequestID     string  `json:"request_id"`
 	ConsumerID    string  `json:"consumer_id"`
-	ConsumerName  string  `json:"consumer_name,omitempty"`
-	ConsumerEmail string  `json:"consumer_email,omitempty"`
+	ConsumerName  string  `json:"consumer_name"`
+	ConsumerEmail string  `json:"consumer_email"`
 	ProducerID    string  `json:"producer_id"`
-	ProducerName  string  `json:"producer_name,omitempty"`
+	ProducerName  string  `json:"producer_name"`
 	DatasetID     *string `json:"dataset_id,omitempty"` // Null for all-datasets access
 	Tier          string  `json:"tier"`                 // SubscriptionTier — canonical write value is "free"
 	Message       *string `json:"message,omitempty"`
