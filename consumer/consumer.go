@@ -353,6 +353,12 @@ func NewConsumer(cfg types.Config) (*Consumer, error) {
 
 // GetDataset retrieves metadata for a specific dataset.
 func (c *Consumer) GetDataset(ctx context.Context, datasetID string) (*types.Dataset, error) {
+	// An empty id would GET /v1/datasets/ — the collection — and decode its
+	// list body into an empty Dataset without any error.
+	if strings.TrimSpace(datasetID) == "" {
+		return nil, errors.New("dataset id is required")
+	}
+
 	path := fmt.Sprintf("/v1/datasets/%s", url.PathEscape(datasetID))
 
 	var dataset types.Dataset
@@ -1007,7 +1013,7 @@ func (c *Consumer) makeAPIRequest(ctx context.Context, method, path string, body
 // Set opts.AutoAcknowledge to false if you need manual control over message deletion.
 func (c *Consumer) PollNotifications(ctx context.Context, opts PollNotificationsOptions) ([]Notification, error) {
 	// Apply defaults
-	if opts.MaxMessages == 0 {
+	if opts.MaxMessages <= 0 {
 		opts.MaxMessages = 10
 	}
 

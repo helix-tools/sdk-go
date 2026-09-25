@@ -1042,6 +1042,16 @@ func (p *Producer) ApproveSubscriptionRequestWithSubscription(ctx context.Contex
 	return &result, nil
 }
 
+// requireDatasetID refuses an empty dataset id before a request is built: an
+// empty id turns PATCH/DELETE /v1/datasets/{id} into a call on the collection.
+func requireDatasetID(datasetID string) error {
+	if strings.TrimSpace(datasetID) == "" {
+		return &ValidationError{Field: "dataset_id", Message: "is required"}
+	}
+
+	return nil
+}
+
 // UpdateDataset updates an existing dataset's metadata.
 // This is a public API for producers to update dataset information without re-uploading data.
 //
@@ -1051,6 +1061,10 @@ func (p *Producer) ApproveSubscriptionRequestWithSubscription(ctx context.Contex
 //
 // Returns the updated dataset.
 func (p *Producer) UpdateDataset(ctx context.Context, datasetID string, input types.DatasetUpdateInput) (*types.Dataset, error) {
+	if err := requireDatasetID(datasetID); err != nil {
+		return nil, err
+	}
+
 	path := fmt.Sprintf("/v1/datasets/%s", url.PathEscape(datasetID))
 
 	var result types.Dataset
@@ -1106,5 +1120,9 @@ func (p *Producer) RejectSubscriptionRequest(ctx context.Context, requestID stri
 //
 // Returns an error if the deletion fails.
 func (p *Producer) DeleteDataset(ctx context.Context, datasetID string) error {
+	if err := requireDatasetID(datasetID); err != nil {
+		return err
+	}
+
 	return p.makeAPIRequest(ctx, "DELETE", fmt.Sprintf("/v1/datasets/%s", url.PathEscape(datasetID)), nil, nil)
 }

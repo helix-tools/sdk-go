@@ -1,5 +1,7 @@
 package types
 
+import "encoding/json"
+
 // SubscriptionRequestStatus is the canonical lifecycle state of a
 // subscription request. Canonical contract values: pending, approved,
 // rejected.
@@ -69,6 +71,31 @@ type SubscriptionRequestsResponse struct {
 type ApproveRequestResponse struct {
 	Request      SubscriptionRequest `json:"request"`
 	Subscription *Subscription       `json:"subscription,omitempty"`
+}
+
+// UnmarshalJSON decodes the request strictly and the subscription on a
+// best-effort basis. By the time this runs the approval has already happened
+// on the server, so a subscription payload this SDK cannot decode (null, a bare
+// id, unexpected types) leaves Subscription nil instead of turning a completed
+// approval into an error the caller would retry.
+func (r *ApproveRequestResponse) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Request      SubscriptionRequest `json:"request"`
+		Subscription json.RawMessage     `json:"subscription"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	r.Request = raw.Request
+	r.Subscription = nil
+
+	var sub Subscription
+	if len(raw.Subscription) > 0 && json.Unmarshal(raw.Subscription, &sub) == nil && (sub.ID != "" || sub.ConsumerID != "") {
+		r.Subscription = &sub
+	}
+
+	return nil
 }
 
 // CreateSubscriptionRequestInput is the input for Consumer.CreateSubscriptionRequest.
