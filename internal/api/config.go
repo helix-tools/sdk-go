@@ -2,6 +2,10 @@
 //
 // It includes a test HTTP client with AWS SigV4 authentication, configuration
 // loading, and cleanup utilities for managing test resources.
+//
+// It lives under internal/ on purpose: it drives admin-only routes (company
+// fixtures and cleanup) and imports package testing, neither of which belongs
+// in the public SDK surface. It is not importable from outside this module.
 package api
 
 import (
@@ -137,10 +141,8 @@ func (c TestConfig) RequireTestDatasetID(t *testing.T) {
 	}
 }
 
-// LoadCredentialsFromSSM loads customer credentials from AWS SSM Parameter Store.
-// It uses the AWS helix profile and fetches:
-//   - /helix/production/customers/{customerID}/aws_access_key_id
-//   - /helix/production/customers/{customerID}/aws_secret_access_key
+// LoadCredentialsFromSSM loads a test customer's access key pair from the
+// secure parameter store, using the AWS helix profile. Test harness only.
 func LoadCredentialsFromSSM(ctx context.Context, customerID string) (Credentials, error) {
 	// Load AWS config with helix profile.
 	awsCfg, err := config.LoadDefaultConfig(ctx,

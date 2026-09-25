@@ -12,7 +12,7 @@
 
 ```
 sdk/go/
-├── api/                    # Integration test package
+├── internal/api/           # Integration test package (internal: not importable)
 │   ├── client.go           # HTTP client with AWS SigV4 auth
 │   ├── config.go           # Test configuration loader
 │   ├── cleanup.go          # Test resource cleanup utilities
@@ -180,7 +180,7 @@ Format: `{producer_id}-{slugified_name}` (no timestamp, enables upsert)
 
 ---
 
-## api/ Package (Integration Tests)
+## internal/api/ Package (Integration Tests)
 
 ### Client
 ```go
@@ -346,8 +346,8 @@ Last analyzed: 2025-02-09
 | types/company.go | ~130 |
 | types/subscription.go | ~50 |
 | types/subscription_request.go | ~55 |
-| api/client.go | ~180 |
-| api/config.go | ~150 |
+| internal/api/client.go | ~180 |
+| internal/api/config.go | ~150 |
 
 ---
 
@@ -497,7 +497,7 @@ import (
 - `types/` - Shared types used across packages
 - `producer/` - Producer client and related functionality
 - `consumer/` - Consumer client and related functionality
-- `api/` - Integration test utilities
+- `internal/api/` - Integration test utilities (internal, not part of the public SDK)
 - `test/` - E2E test entry points
 
 #### Export Patterns
