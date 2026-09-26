@@ -26,7 +26,7 @@ const modulePath = "github.com/helix-tools/sdk-go/v2"
 // own test suite, or a consumer using a `replace` directive to a local
 // checkout. Kept in lockstep with the latest module version tag as a
 // best-effort default, mirroring consumer.SDKVersion.
-const fallbackVersion = "2.15.0"
+const fallbackVersion = "2.17.0"
 
 // disallowedVersionChars matches any run of characters that can't
 // appear in the value's version segment per the wire contract
