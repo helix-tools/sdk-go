@@ -25,6 +25,8 @@ type objectTransport struct {
 	object     []byte // bytes stored behind the presigned URL
 	claimLarge bool   // advertise a >100 MB body so the streaming path runs
 	kmsCalls   atomic.Int32
+	kmsDenied  bool   // KMS answers Decrypt with AccessDenied
+	kmsKey     []byte // data key KMS returns; nil = the valid 32-byte test key
 }
 
 func (o *objectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -33,7 +35,20 @@ func (o *objectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	switch {
 	case req.Header.Get("X-Amz-Target") == kmsDecryptTarget:
 		o.kmsCalls.Add(1)
-		body = kmsDecryptBody()
+		switch {
+		case o.kmsDenied:
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Status:     "400 Bad Request",
+				Header:     http.Header{"X-Amzn-Errortype": []string{"AccessDeniedException"}},
+				Body:       io.NopCloser(strings.NewReader(`{"__type":"AccessDeniedException","message":"denied"}`)),
+				Request:    req,
+			}, nil
+		case o.kmsKey != nil:
+			body = kmsDecryptBodyFor(o.kmsKey)
+		default:
+			body = kmsDecryptBody()
+		}
 	case req.URL.Path == "/object":
 		return &http.Response{
 			StatusCode:    http.StatusOK,
@@ -260,6 +275,47 @@ func TestDownloadOutcome_RefusedObject_ReportsCategory(t *testing.T) {
 			p := callbackPayload(f)
 			if p["status"] != "error" || p["error_category"] != tc.wantCategory {
 				t.Fatalf("callback = status %v category %v, want error / %s", p["status"], p["error_category"], tc.wantCategory)
+			}
+		})
+	}
+}
+
+// TestDownloadDataset_KeyServiceFailuresAreErrors: when KMS refuses to unwrap
+// the data key, or hands back a key that cannot decrypt, the download fails —
+// it never falls back to returning the stored bytes.
+func TestDownloadDataset_KeyServiceFailuresAreErrors(t *testing.T) {
+	cases := []struct {
+		name    string
+		tr      *objectTransport
+		wantMsg string
+	}{
+		{
+			"KMS denies the request",
+			&objectTransport{record: recordFlagsFalse, object: encryptedObject([]byte("rows\n")), kmsDenied: true},
+			"KMS decrypt failed",
+		},
+		{
+			"KMS returns a key of the wrong size",
+			&objectTransport{record: recordFlagsFalse, object: encryptedObject([]byte("rows\n")), kmsKey: []byte("short")},
+			"invalid key size",
+		},
+		{
+			"KMS returns a different valid key",
+			&objectTransport{record: recordFlagsFalse, object: encryptedObject([]byte("rows\n")), kmsKey: []byte("ffffffffffffffffffffffffffffffff")},
+			"AES-GCM decrypt failed",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := filepath.Join(t.TempDir(), "out.ndjson")
+
+			err := tc.tr.consumer().DownloadDataset(context.Background(), "ds-1", out)
+			if err == nil || !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Fatalf("error = %v, want it to contain %q", err, tc.wantMsg)
+			}
+			if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
+				t.Fatalf("output file exists after a failed decryption (stat err = %v)", statErr)
 			}
 		})
 	}
