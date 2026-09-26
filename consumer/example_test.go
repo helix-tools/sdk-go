@@ -9,6 +9,7 @@ package consumer_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -100,4 +101,42 @@ func Example_marketplace() {
 		panic(err)
 	}
 	fmt.Println("open this URL to complete checkout:", checkoutURL)
+}
+
+// Example_listAndPoll backs the README's "Listing datasets", "Polling
+// options" and "Handling API errors" snippets.
+func Example_listAndPoll() {
+	ctx := context.Background()
+
+	c, err := consumer.NewConsumer(types.Config{
+		APIEndpoint:        "https://api-go.helix.tools",
+		AWSAccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
+		AWSSecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
+		CustomerID:         os.Getenv("HELIX_CUSTOMER_ID"),
+		Region:             "us-east-1",
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	// Every catalog field is on the row's Record — no GetDataset call per dataset.
+	datasets, err := c.ListDatasets(ctx)
+	if err != nil {
+		panic(err)
+	}
+	for _, ds := range datasets {
+		fmt.Println(ds.ID, ds.Name, ds.Record.ProducerID, ds.Record.Category, ds.Record.Status)
+	}
+
+	// Return immediately instead of long-polling, and hold each message
+	// for two minutes while it is processed.
+	if _, err := c.PollNotifications(ctx, consumer.PollNotificationsOptions{
+		ShortPoll:         true,
+		VisibilityTimeout: 120,
+	}); err != nil {
+		var apiErr *consumer.APIError
+		if errors.As(err, &apiErr) && apiErr.IsRateLimited() {
+			fmt.Println("rate limited — back off and retry")
+		}
+	}
 }

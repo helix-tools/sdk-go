@@ -90,6 +90,28 @@ type AgentRecord struct {
 	UpdatedAt            time.Time       `json:"updated_at"`
 }
 
+// AgentMe is the body of GET /v1/agents/me: a pruned registry record. The
+// server deliberately omits policy-internal fields — version, rate_limit,
+// forbidden_operations, jwks_uri, mcp_servers and the rest of AgentRecord —
+// so this type declares only the twelve keys it sends and never fabricates a
+// zero Version.
+//
+// Mirrors agents-api.MeResponse and the Python SDK's AgentMe.
+type AgentMe struct {
+	AgentID                string    `json:"agent_id"`
+	DisplayName            string    `json:"display_name"`
+	ActorClass             string    `json:"actor_class"`
+	OwnerOrgID             string    `json:"owner_org_id"`
+	TrustTier              string    `json:"trust_tier"`
+	Status                 string    `json:"status"`
+	AllowedCustomers       []string  `json:"allowed_customers"`
+	AllowedOperations      []string  `json:"allowed_operations"`
+	DefaultTokenTTLSeconds int       `json:"default_token_ttl_seconds"`
+	WebhookURL             string    `json:"webhook_url,omitempty"`
+	CreatedAt              time.Time `json:"created_at"`
+	UpdatedAt              time.Time `json:"updated_at"`
+}
+
 // RegistryPeer is the minimal peer-discovery shape returned from
 // GET /v1/agents/registry — just enough to know a peer exists, with
 // no sensitive config fields leaked.

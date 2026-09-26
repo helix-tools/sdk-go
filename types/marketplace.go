@@ -32,9 +32,11 @@ type DatasetMarketplace struct {
 	PriceMonthlyCents *int `json:"price_monthly_cents,omitempty"`
 	// Currency is the ISO 4217 code, lowercase (Stripe convention). USD only in v1.
 	Currency string `json:"currency,omitempty"`
-	// StripeProductID is server-managed; null/absent until synced to Stripe.
+	// StripeProductID is Deprecated: payment-provider identifiers are withheld
+	// from customer-facing responses, so this is always nil on API reads.
 	StripeProductID *string `json:"stripe_product_id,omitempty"`
-	// StripePriceID is server-managed; null/absent until synced to Stripe.
+	// StripePriceID is Deprecated: payment-provider identifiers are withheld
+	// from customer-facing responses, so this is always nil on API reads.
 	StripePriceID *string `json:"stripe_price_id,omitempty"`
 	// Listed is server-managed: whether the dataset is listed (visible/subscribable).
 	Listed *bool `json:"listed,omitempty"`

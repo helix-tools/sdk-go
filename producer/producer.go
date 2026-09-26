@@ -16,6 +16,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -25,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	stscreds "github.com/helix-tools/sdk-go/v2/credentials"
@@ -37,6 +39,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
@@ -72,7 +75,12 @@ func (e *APIError) IsConflict() bool {
 // UploadOptions contains options for uploading datasets.
 //
 // NOTE: Use NewUploadOptions() to get sane defaults.
-// NOTE: Encryption and compression are required.
+// NOTE: Encryption and compression are required: every upload is gzip-compressed
+// and then encrypted, and no option turns either off. Encrypt and Compress stay
+// on this struct so existing callers keep compiling, but UploadDataset returns
+// an error — before any network call — when either is false, when the KMS key is
+// missing, or when Metadata / DatasetOverrides try to switch the record's
+// encryption_enabled / compression_enabled flags off.
 type UploadOptions struct {
 	Category         string
 	Compress         bool
@@ -157,14 +165,11 @@ func NewProducer(cfg types.Config) (*Producer, error) {
 		return nil, fmt.Errorf("S3 bucket not found for producer %s: %w", cfg.CustomerID, err)
 	}
 
-	// Get KMS key ID.
-	kmsKeyID := ""
-	kmsParamCandidates := ssmParamCandidates(cfg.CustomerID, "kms_key_id")
-	kmsValue, err := getSSMParameterValue(context.Background(), ssmClient, kmsParamCandidates)
+	// Get KMS key ID. Without one the Producer is still built (non-upload calls
+	// work) but every UploadDataset call fails: encryption is never skipped.
+	kmsKeyID, err := resolveKMSKeyID(context.Background(), ssmClient, cfg.CustomerID)
 	if err != nil {
-		fmt.Printf("Warning: KMS key not found, encryption will be disabled: %v\n", err)
-	} else {
-		kmsKeyID = kmsValue
+		fmt.Printf("Warning: %v\n", err)
 	}
 
 	return &Producer{
@@ -181,6 +186,17 @@ func NewProducer(cfg types.Config) (*Producer, error) {
 	}, nil
 }
 
+// resolveKMSKeyID reads the producer's KMS key id from SSM. It returns an empty
+// key and an error that says plainly what a missing key means: uploads fail.
+func resolveKMSKeyID(ctx context.Context, client *ssm.Client, customerID string) (string, error) {
+	keyID, err := getSSMParameterValue(ctx, client, ssmParamCandidates(customerID, "kms_key_id"))
+	if err != nil {
+		return "", fmt.Errorf("KMS key not found, uploads will fail until one is configured: %w", err)
+	}
+
+	return keyID, nil
+}
+
 func ssmParamCandidates(customerID, paramName string) []string {
 	if customerID == "" || paramName == "" {
 		return nil
@@ -194,15 +210,15 @@ func ssmParamCandidates(customerID, paramName string) []string {
 		env = "production"
 	}
 
+	// Only an explicit operator override and the one deployed prefix. The
+	// legacy locations earlier releases also probed never held these
+	// parameters, and probing them made a real error on the live path
+	// indistinguishable from an error on a dead one.
 	prefixes := []string{}
 	if prefix := strings.TrimRight(os.Getenv("HELIX_SSM_CUSTOMER_PREFIX"), "/"); prefix != "" {
 		prefixes = append(prefixes, prefix)
 	}
-	prefixes = append(prefixes,
-		fmt.Sprintf("/helix-tools/%s/customers", env),
-		fmt.Sprintf("/helix/%s/customers", env),
-		"/helix/customers",
-	)
+	prefixes = append(prefixes, fmt.Sprintf("/helix-tools/%s/customers", env))
 
 	seen := map[string]struct{}{}
 	candidates := []string{}
@@ -219,26 +235,36 @@ func ssmParamCandidates(customerID, paramName string) []string {
 	return candidates
 }
 
+// getSSMParameterValue resolves the first candidate parameter that exists.
+//
+// It fails closed: only a clean "parameter does not exist" answer moves on to
+// the next candidate. Any other error (access denied, throttling, network) is
+// the real problem with THIS candidate and is returned at once, so a later
+// candidate's unrelated failure can never mask it. When every candidate is
+// missing the error says so without repeating the parameter paths.
 func getSSMParameterValue(ctx context.Context, client *ssm.Client, names []string) (string, error) {
-	var lastErr error
 	for _, name := range names {
 		resp, err := client.GetParameter(ctx, &ssm.GetParameterInput{
 			Name:           aws.String(name),
 			WithDecryption: aws.Bool(true),
 		})
-		if err == nil && resp.Parameter != nil && resp.Parameter.Value != nil {
-			return aws.ToString(resp.Parameter.Value), nil
-		}
 		if err != nil {
-			lastErr = err
-		} else {
-			lastErr = fmt.Errorf("empty SSM parameter value for %s", name)
+			var notFound *ssmtypes.ParameterNotFound
+			if errors.As(err, &notFound) {
+				continue
+			}
+
+			return "", err
 		}
+
+		if resp.Parameter == nil || resp.Parameter.Value == nil {
+			return "", fmt.Errorf("SSM parameter has no value")
+		}
+
+		return aws.ToString(resp.Parameter.Value), nil
 	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("SSM parameter not found")
-	}
-	return "", lastErr
+
+	return "", errors.New("SSM parameter not found")
 }
 
 // compressData compresses data using gzip.
@@ -269,6 +295,10 @@ func (p *Producer) compressData(data []byte, level int) ([]byte, error) {
 func (p *Producer) encryptData(ctx context.Context, data []byte) ([]byte, error) {
 	if p.KMSKeyID == "" {
 		return nil, fmt.Errorf("KMS key not configured, cannot encrypt data")
+	}
+
+	if p.kmsClient == nil {
+		return nil, errors.New("KMS client is not configured; cannot encrypt data")
 	}
 
 	// Generate random data key and IV.
@@ -434,11 +464,7 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 	// wrong name (or not at all). Go always compresses, so the file is
 	// `data.ndjson.gz`. (Found 2026-07-06 by the SDK-only E2E suite: go uploads
 	// landed under datasets/<customer_id>/ while py/ts used datasets/<name>/.)
-	fileName := "data.ndjson"
-	if opts.Compress {
-		fileName += ".gz"
-	}
-	s3Key := fmt.Sprintf("datasets/%s/%s", opts.DatasetName, fileName)
+	s3Key := fmt.Sprintf("datasets/%s/data.ndjson.gz", opts.DatasetName)
 
 	// version defaults to today's UTC date, matching v1.3.11's
 	// buildDatasetPayload (`now.Format("2006-01-02")`), computed
@@ -465,8 +491,7 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 	// which zeroed production total_size_bytes. len(processed.Data) is the
 	// exact byte length of the object about to be PUT to S3 (compressed,
 	// then encrypted — both mandatory), so it always matches
-	// metadata.encrypted_size_bytes today and would match
-	// metadata.compressed_size_bytes if a compress-only mode is ever added.
+	// metadata.encrypted_size_bytes.
 	payload := map[string]any{
 		"name":           opts.DatasetName,
 		"description":    opts.Description,
@@ -490,6 +515,19 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 		maps.Copy(payload, opts.DatasetOverrides)
 	}
 
+	// A "metadata" override REPLACES the computed metadata wholesale, which
+	// would drop the two flags that tell every consumer this dataset is
+	// encrypted and compressed. They are pinned after the merge, so the record
+	// carries them whatever the overrides did (UploadDataset has already
+	// refused overrides that try to set them to anything but true).
+	pinnedMetadata, err := metadataObject(payload["metadata"])
+	if err != nil {
+		return nil, err
+	}
+	pinnedMetadata["encryption_enabled"] = true
+	pinnedMetadata["compression_enabled"] = true
+	payload["metadata"] = pinnedMetadata
+
 	// POST to /v1/datasets to create record and get presigned URL
 	var response CreateDatasetResponse
 	err = p.makeAPIRequest(ctx, "POST", "/v1/datasets", payload, &response)
@@ -504,18 +542,13 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 // This is step 1 of the upload flow — it runs BEFORE createDatasetRecord so
 // the real sizes are known when the POST body is built. It has no network
 // side effect other than one KMS Encrypt call; it never uploads anything.
+//
+// It is the single enforcement point for the upload invariant (see
+// validateUploadOptions): a call that would skip compression or encryption
+// fails here, before the file is read or anything reaches the network.
 func (p *Producer) processFile(ctx context.Context, filePath string, opts UploadOptions) (*ProcessedFileData, error) {
-	// Validate encryption/compression requirements
-	if !opts.Encrypt {
-		return nil, fmt.Errorf("encryption is required for dataset uploads")
-	}
-
-	if !opts.Compress {
-		return nil, fmt.Errorf("compression is required for dataset uploads")
-	}
-
-	if opts.Encrypt && p.KMSKeyID == "" {
-		return nil, fmt.Errorf("encryption requested but KMS key not found")
+	if err := p.validateUploadOptions(opts); err != nil {
+		return nil, err
 	}
 
 	safeFilePath, err := cleanContainedPath(filePath)
@@ -536,51 +569,138 @@ func (p *Producer) processFile(ctx context.Context, filePath string, opts Upload
 		return nil, fmt.Errorf("file is empty: %s (no data to upload)", filePath)
 	}
 
-	// Track sizes for metadata
-	sizes := map[string]any{
-		"original_size_bytes":   originalSize,
-		"compressed_size_bytes": originalSize,
-		"encrypted_size_bytes":  originalSize,
-		"encryption_enabled":    opts.Encrypt,
-		"compression_enabled":   opts.Compress,
-	}
-
 	// Step 1: Compress FIRST
-	if opts.Compress {
-		fmt.Printf("📦 Compressing %d bytes with gzip (level %d)...\n", len(data), opts.CompressionLevel)
+	fmt.Printf("📦 Compressing %d bytes with gzip (level %d)...\n", len(data), opts.CompressionLevel)
 
-		compressed, err := p.compressData(data, opts.CompressionLevel)
-		if err != nil {
-			return nil, fmt.Errorf("compression failed: %w", err)
-		}
-
-		data = compressed
-		sizes["compressed_size_bytes"] = int64(len(data))
-
-		compressionRatio := (1 - float64(len(data))/float64(originalSize)) * 100
-		fmt.Printf("Compressed: %d bytes (%.1f%% reduction)\n", len(data), compressionRatio)
+	compressed, err := p.compressData(data, opts.CompressionLevel)
+	if err != nil {
+		return nil, fmt.Errorf("compression failed: %w", err)
 	}
+
+	compressedSize := int64(len(compressed))
+	compressionRatio := (1 - float64(compressedSize)/float64(originalSize)) * 100
+	fmt.Printf("Compressed: %d bytes (%.1f%% reduction)\n", compressedSize, compressionRatio)
 
 	// Step 2: Encrypt SECOND
-	if opts.Encrypt {
-		fmt.Printf("🔒 Encrypting %d bytes with KMS key...\n", len(data))
+	fmt.Printf("🔒 Encrypting %d bytes with KMS key...\n", compressedSize)
 
-		encrypted, err := p.encryptData(ctx, data)
-		if err != nil {
-			return nil, fmt.Errorf("encryption failed: %w", err)
-		}
-
-		data = encrypted
-		sizes["encrypted_size_bytes"] = int64(len(data))
-
-		fmt.Printf("Encrypted: %d bytes\n", len(data))
+	encrypted, err := p.encryptData(ctx, compressed)
+	if err != nil {
+		return nil, fmt.Errorf("encryption failed: %w", err)
 	}
 
+	fmt.Printf("Encrypted: %d bytes\n", len(encrypted))
+
 	return &ProcessedFileData{
-		Data:         data,
+		Data:         encrypted,
 		OriginalSize: originalSize,
-		Sizes:        sizes,
+		Sizes: map[string]any{
+			"original_size_bytes":   originalSize,
+			"compressed_size_bytes": compressedSize,
+			"encrypted_size_bytes":  int64(len(encrypted)),
+			"encryption_enabled":    true,
+			"compression_enabled":   true,
+		},
 	}, nil
+}
+
+// flagKeysThatMustStayOn are the record fields that say a dataset is
+// encrypted / compressed. Nothing a caller passes may set them to anything
+// but true.
+var flagKeysThatMustStayOn = []string{"encryption", "encryption_enabled", "compression", "compression_enabled"}
+
+// validateUploadOptions enforces the upload invariant: every upload is
+// gzip-compressed and then encrypted, and no option turns either off. It runs
+// before the file is read and before any network call (KMS included), and it
+// refuses:
+//   - Encrypt or Compress set to false,
+//   - a Producer without a KMS key,
+//   - Metadata or DatasetOverrides — top-level or under "metadata" — that set
+//     one of the record's encryption/compression flags to anything but true,
+//     or that give "metadata" as something other than an object.
+func (p *Producer) validateUploadOptions(opts UploadOptions) error {
+	if !opts.Encrypt {
+		return errors.New("encryption is required for dataset uploads: UploadOptions.Encrypt cannot be false")
+	}
+
+	if !opts.Compress {
+		return errors.New("compression is required for dataset uploads: UploadOptions.Compress cannot be false")
+	}
+
+	if p.KMSKeyID == "" {
+		return errors.New("encryption requested but KMS key not found")
+	}
+
+	if err := rejectDisabledFlags("UploadOptions.Metadata", opts.Metadata); err != nil {
+		return err
+	}
+
+	if err := rejectDisabledFlags("UploadOptions.DatasetOverrides", opts.DatasetOverrides); err != nil {
+		return err
+	}
+
+	if raw, present := opts.DatasetOverrides["metadata"]; present {
+		metadata, err := metadataObject(raw)
+		if err != nil {
+			return err
+		}
+
+		return rejectDisabledFlags(`UploadOptions.DatasetOverrides["metadata"]`, metadata)
+	}
+
+	return nil
+}
+
+// rejectDisabledFlags fails when m carries one of flagKeysThatMustStayOn with
+// any value other than the boolean true (false, "false", 0, null, ...). A key
+// that only differs from a flag's name by case or surrounding whitespace
+// ("Encryption_Enabled", "compression_enabled ") is refused whatever its value:
+// a JSON decoder that folds case would treat it as the flag itself, so it is
+// never a way to say something else about it.
+func rejectDisabledFlags(where string, m map[string]any) error {
+	for key, value := range m {
+		for _, flag := range flagKeysThatMustStayOn {
+			if !strings.EqualFold(strings.TrimSpace(key), flag) {
+				continue
+			}
+
+			if key != flag {
+				return fmt.Errorf("%s: key %q is a variant spelling of %q; use exactly %q — every upload is encrypted and compressed", where, key, flag, flag)
+			}
+
+			if value != true {
+				return fmt.Errorf("%s: %q cannot be disabled — every upload is encrypted and compressed (got %v)", where, key, value)
+			}
+		}
+	}
+
+	return nil
+}
+
+// metadataObject returns a private copy of v as a JSON object. nil is an empty
+// object; anything that is not an object (a string, a number, a list) is an
+// error. A typed map or a struct is read through its JSON form, so the flags
+// cannot hide inside a type the caller chose.
+func metadataObject(v any) (map[string]any, error) {
+	if m, ok := v.(map[string]any); ok {
+		return maps.Clone(m), nil
+	}
+
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf(`"metadata" must be an object: %w`, err)
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf(`"metadata" must be an object: %w`, err)
+	}
+
+	if m == nil {
+		m = map[string]any{}
+	}
+
+	return m, nil
 }
 
 // uploadToPresignedURL uploads the processed data to the presigned URL.
@@ -615,7 +735,7 @@ func (p *Producer) uploadToPresignedURL(ctx context.Context, uploadURL string, d
 	return nil
 }
 
-// UploadDataset uploads a dataset with optional encryption and compression.
+// UploadDataset uploads a dataset, always gzip-compressed and then encrypted.
 // FLOW (process-before-POST, still catalog-record-before-S3-upload):
 // 1. Process file (compress + encrypt) — no upload yet, so the real sizes
 //    are known.
@@ -644,21 +764,9 @@ func (p *Producer) UploadDataset(ctx context.Context, filePath string, opts Uplo
 		opts.CompressionLevel = 6
 	}
 
-	// Validate encryption capability
-	if !opts.Encrypt {
-		return nil, fmt.Errorf("encryption is required for dataset uploads")
-	}
-
-	if !opts.Compress {
-		return nil, fmt.Errorf("compression is required for dataset uploads")
-	}
-
-	if opts.Encrypt && p.KMSKeyID == "" {
-		return nil, fmt.Errorf("encryption requested but KMS key not found")
-	}
-
-	// Step 1: Process file (encrypt/compress) so the real sizes are known
-	// before the POST.
+	// Step 1: Process file (compress + encrypt) so the real sizes are known
+	// before the POST. processFile refuses — before reading the file or making
+	// any network call — every option combination that would skip either step.
 	processedData, err := p.processFile(ctx, filePath, opts)
 	if err != nil {
 		return nil, err
@@ -939,6 +1047,14 @@ func (p *Producer) ListSubscriptionRequests(ctx context.Context, status string) 
 	return response.Requests, nil
 }
 
+// deprecationWriter receives one-time deprecation warnings. It is a variable
+// so tests can capture the output.
+var deprecationWriter io.Writer = os.Stderr
+
+// warnedApproveDatasetID makes the DatasetID deprecation warning fire once
+// per process instead of once per approval.
+var warnedApproveDatasetID atomic.Bool
+
 // ApproveSubscriptionRequest approves a subscription request from a consumer.
 // This creates the necessary resources (SQS queue, SNS subscription, KMS grants)
 // for the consumer to access the producer's datasets.
@@ -947,8 +1063,10 @@ func (p *Producer) ListSubscriptionRequests(ctx context.Context, status string) 
 //   - requestID: The subscription request ID to approve.
 //   - opts: Optional parameters for approval:
 //   - Notes: Optional internal notes about the approval.
-//   - DatasetID: Optional specific dataset ID to grant access to
-//     (if not provided, uses the dataset from the original request).
+//   - DatasetID: Deprecated. The API has no such field and always grants
+//     the scope of the original request, so it is no longer sent; passing
+//     it prints a one-time deprecation warning and a later release will
+//     reject it.
 //   - PriceMonthlyCents: Optional per-consumer monthly USD-cents price for
 //     THIS approval (see types.ApproveSubscriptionRequestOptions for the
 //     full nil/0/positive semantics). A negative value is rejected
@@ -956,12 +1074,33 @@ func (p *Producer) ListSubscriptionRequests(ctx context.Context, status string) 
 //
 // Returns the updated subscription request with status "approved" (or, when
 // PriceMonthlyCents is a positive value, "approved_pending_payment" until
-// the consumer completes checkout).
+// the consumer completes checkout). The API answers an approval with a
+// {request, subscription} envelope; this method returns the request half and
+// keeps its original signature. Use ApproveSubscriptionRequestWithSubscription
+// to also receive the provisioned subscription.
 func (p *Producer) ApproveSubscriptionRequest(ctx context.Context, requestID string, opts *types.ApproveSubscriptionRequestOptions) (*types.SubscriptionRequest, error) {
+	resp, err := p.ApproveSubscriptionRequestWithSubscription(ctx, requestID, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	return &resp.Request, nil
+}
+
+// ApproveSubscriptionRequestWithSubscription approves a subscription request
+// exactly like ApproveSubscriptionRequest but returns the API's full
+// {request, subscription} envelope: Request is the updated subscription
+// request and Subscription is the subscription that approval provisioned. It
+// is nil while the request is approved_pending_payment (nothing is
+// provisioned until the consumer completes checkout).
+//
+// A response without a request object is reported as an error rather than a
+// zero-valued success.
+func (p *Producer) ApproveSubscriptionRequestWithSubscription(ctx context.Context, requestID string, opts *types.ApproveSubscriptionRequestOptions) (*types.ApproveRequestResponse, error) {
 	path := fmt.Sprintf("/v1/subscription-requests/%s", url.PathEscape(requestID))
 
-	// Use a map to include the optional dataset_id/price_monthly_cents
-	// fields, which are not part of ApproveRejectPayload.
+	// Use a map to include the optional price_monthly_cents field, which is
+	// not part of ApproveRejectPayload.
 	payloadMap := map[string]any{
 		"action": "approve",
 	}
@@ -969,8 +1108,9 @@ func (p *Producer) ApproveSubscriptionRequest(ctx context.Context, requestID str
 		if opts.Notes != nil {
 			payloadMap["notes"] = *opts.Notes
 		}
-		if opts.DatasetID != nil {
-			payloadMap["dataset_id"] = *opts.DatasetID
+		if opts.DatasetID != nil && warnedApproveDatasetID.CompareAndSwap(false, true) {
+			fmt.Fprintln(deprecationWriter, "helix sdk-go: ApproveSubscriptionRequestOptions.DatasetID is deprecated and ignored — "+
+				"the API always grants the scope of the original request; the option will be removed in a future release")
 		}
 		if opts.PriceMonthlyCents != nil {
 			// CAREFUL: this branch is keyed on "!= nil", NOT on the pointed-to
@@ -985,12 +1125,26 @@ func (p *Producer) ApproveSubscriptionRequest(ctx context.Context, requestID str
 		}
 	}
 
-	var result types.SubscriptionRequest
+	var result types.ApproveRequestResponse
 	if err := p.makeAPIRequest(ctx, http.MethodPost, path, payloadMap, &result); err != nil {
 		return nil, err
 	}
 
+	if result.Request.ID == "" && result.Request.Status == "" {
+		return nil, errors.New("unexpected approve response: no request object in the body")
+	}
+
 	return &result, nil
+}
+
+// requireDatasetID refuses an empty dataset id before a request is built: an
+// empty id turns PATCH/DELETE /v1/datasets/{id} into a call on the collection.
+func requireDatasetID(datasetID string) error {
+	if strings.TrimSpace(datasetID) == "" {
+		return &ValidationError{Field: "dataset_id", Message: "is required"}
+	}
+
+	return nil
 }
 
 // UpdateDataset updates an existing dataset's metadata.
@@ -1002,6 +1156,10 @@ func (p *Producer) ApproveSubscriptionRequest(ctx context.Context, requestID str
 //
 // Returns the updated dataset.
 func (p *Producer) UpdateDataset(ctx context.Context, datasetID string, input types.DatasetUpdateInput) (*types.Dataset, error) {
+	if err := requireDatasetID(datasetID); err != nil {
+		return nil, err
+	}
+
 	path := fmt.Sprintf("/v1/datasets/%s", url.PathEscape(datasetID))
 
 	var result types.Dataset
@@ -1057,5 +1215,9 @@ func (p *Producer) RejectSubscriptionRequest(ctx context.Context, requestID stri
 //
 // Returns an error if the deletion fails.
 func (p *Producer) DeleteDataset(ctx context.Context, datasetID string) error {
+	if err := requireDatasetID(datasetID); err != nil {
+		return err
+	}
+
 	return p.makeAPIRequest(ctx, "DELETE", fmt.Sprintf("/v1/datasets/%s", url.PathEscape(datasetID)), nil, nil)
 }

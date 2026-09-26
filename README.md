@@ -103,8 +103,9 @@ func main() {
 		log.Fatalf("producer: %v", err)
 	}
 
-	// Encryption and compression are required — NewUploadOptions sets
-	// sane defaults for both.
+	// Every upload is compressed and encrypted. NewUploadOptions sets both;
+	// setting Encrypt or Compress to false makes UploadDataset return an
+	// error before anything is read or sent.
 	opts := producer.NewUploadOptions("customer-records")
 
 	dataset, err := p.UploadDataset(ctx, "./data/customers.json", opts)
@@ -171,8 +172,9 @@ func main() {
 	}
 
 	for _, n := range notifications {
-		// DownloadDataset decrypts and decompresses before writing, so the
-		// output is always plaintext — never name it .gz.
+		// DownloadDataset always decrypts and decompresses before writing, so
+		// the output is plaintext — never name it .gz. An object that is not
+		// encrypted and compressed is an error, not a pass-through.
 		outputPath := "./" + n.DatasetName + ".ndjson"
 		if err := c.DownloadDataset(ctx, n.DatasetID, outputPath); err != nil {
 			log.Printf("download %s: %v", n.DatasetID, err)
@@ -187,6 +189,42 @@ Both snippets above are compiled (not merely eyeballed) against the
 current API by `producer/example_test.go` and `consumer/example_test.go`
 — `go vet ./...` / `go test ./...` fail if any constructor, method name, or
 field drifts from what's actually exported.
+
+### Listing datasets
+
+`ListDatasets` follows every page. Each row keeps the fields this package has
+always exposed (`ID`, `Name`, `Metadata.CompressionEnabled`,
+`Metadata.EncryptionEnabled`) and now also carries the full catalog record in
+`Record` — the same `*types.Dataset` that `GetDataset` returns (`ProducerID`,
+`Category`, `Description`, `Status`, sizes, `Marketplace`, the raw metadata, …)
+— so there is no need for a `GetDataset` call per row. `Record` is set on every
+row `ListDatasets` returns. `ID` is populated from the API's `id` key, so it can
+be passed straight to `GetDataset` or `Producer.UpdateDataset`.
+
+### Polling options
+
+`PollNotificationsOptions` accepts `MaxMessages` (1-10), `WaitTimeSeconds`
+(1-20, default 20), `ShortPoll` (return immediately instead of long-polling),
+`VisibilityTimeout` (seconds a received message stays hidden while you process
+it, default 300) and `AutoAcknowledge`. Go's zero value cannot express an
+explicit `WaitTimeSeconds` of 0, so `ShortPoll: true` is how you ask for a poll
+that returns immediately.
+
+### Handling API errors
+
+A non-2xx response is a `*consumer.APIError` carrying the HTTP status, so you
+can branch without matching message text:
+
+```go
+var apiErr *consumer.APIError
+if errors.As(err, &apiErr) && apiErr.IsRateLimited() {
+	// back off and retry
+}
+```
+
+`IsUnauthorized`, `IsForbidden`, `IsNotFound`, `IsConflict` and
+`IsRateLimited` cover the common cases; `StatusCode` and `Body` hold the rest.
+`producer.APIError` is the producer-side equivalent.
 
 ## Marketplace
 
@@ -254,6 +292,16 @@ _, err = p.ApproveSubscriptionRequest(ctx, requestID, &types.ApproveSubscription
 // dataset's own listed price.
 _, err = p.ApproveSubscriptionRequest(ctx, requestID, nil)
 ```
+
+`ApproveSubscriptionRequest` returns the updated request (`Status` is
+`approved`, or `approved_pending_payment` for a positive price). To also get
+the subscription the approval provisioned, call
+`ApproveSubscriptionRequestWithSubscription`, which returns both; its
+`Subscription` is `nil` while the request is `approved_pending_payment`.
+
+`ApproveSubscriptionRequestOptions.DatasetID` is deprecated and ignored: an
+approval always grants the scope of the original request. Passing it prints a
+one-time warning, and it will be removed in a later release.
 
 ## Partner Invites
 
@@ -335,6 +383,37 @@ if status.CanPriceDatasets {
 // dashboard (403 until onboarding is complete)
 dashboard, err := p.CreateConnectLoginLink(ctx)
 ```
+
+## Agent client
+
+`agent.NewClient(baseURL, token)` talks to the agent-callable surface. An empty
+`baseURL` falls back to the `HELIX_API_ENDPOINT` environment variable and then
+to `https://api-go.helix.tools`. `GetMe` returns the twelve-field `AgentMe`
+projection the server actually sends (`Me` still works but is deprecated: it
+decodes into the full `AgentRecord`, leaving fields the server never sends at
+zero). A 503 is `*agent.KillSwitchOffError` only when the response marks an
+operator kill-switch; any other 503 is `*agent.ServiceUnavailableError`, which
+is worth retrying with backoff.
+
+## Differences from the other SDKs
+
+The three SDKs share the same wire contract; a few conveniences exist in one
+and not the others, by design:
+
+- **`DownloadDataset`** always decrypts and decompresses before writing, so
+  there are no auto-decrypt / auto-decompress flags and no progress callback
+  in Go. Wrap the call in your own progress reporting if you need it. An object
+  that is not encrypted and compressed fails the download. The other SDKs keep
+  their option names but reject turning either step off.
+- **`UploadOptions.Encrypt` / `Compress`** exist for source compatibility only:
+  false is an error, as it is in the other SDKs.
+- **Direct subscription** (`subscribe_to_dataset`) and **`update_dataset_data`**
+  are Python-only. In Go, request access with `CreateSubscriptionRequest` and
+  replace data with `UploadDataset`.
+- **Credentials** are refreshed automatically in STS mode; there are no
+  `forceCredentialRefresh` / `setCredentialAutoRefresh` helpers to call.
+- **`ListDatasets`** takes an optional producer id and returns `[]Dataset`
+  (the legacy fields plus the full record in `Record`).
 
 ## Versioning & Changelog
 
