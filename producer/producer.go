@@ -652,11 +652,25 @@ func (p *Producer) validateUploadOptions(opts UploadOptions) error {
 }
 
 // rejectDisabledFlags fails when m carries one of flagKeysThatMustStayOn with
-// any value other than the boolean true (false, "false", 0, null, ...).
+// any value other than the boolean true (false, "false", 0, null, ...). A key
+// that only differs from a flag's name by case or surrounding whitespace
+// ("Encryption_Enabled", "compression_enabled ") is refused whatever its value:
+// a JSON decoder that folds case would treat it as the flag itself, so it is
+// never a way to say something else about it.
 func rejectDisabledFlags(where string, m map[string]any) error {
-	for _, key := range flagKeysThatMustStayOn {
-		if value, present := m[key]; present && value != true {
-			return fmt.Errorf("%s: %q cannot be disabled — every upload is encrypted and compressed (got %v)", where, key, value)
+	for key, value := range m {
+		for _, flag := range flagKeysThatMustStayOn {
+			if !strings.EqualFold(strings.TrimSpace(key), flag) {
+				continue
+			}
+
+			if key != flag {
+				return fmt.Errorf("%s: key %q is a variant spelling of %q; use exactly %q — every upload is encrypted and compressed", where, key, flag, flag)
+			}
+
+			if value != true {
+				return fmt.Errorf("%s: %q cannot be disabled — every upload is encrypted and compressed (got %v)", where, key, value)
+			}
 		}
 	}
 

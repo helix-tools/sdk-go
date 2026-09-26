@@ -167,6 +167,8 @@ func TestDownloadDataset_RejectsObjectNotEncryptedAndCompressed(t *testing.T) {
 		{"envelope with a zero-length wrapped key", zeroKeyLen, errNotEncrypted, "", 0},
 		{"envelope cut short", truncated, errNotEncrypted, "", 0},
 		{"encrypted but never compressed", sealEnvelope(plaintext), errNotCompressed, "", 1},
+		{"encrypted gzip cut short", sealEnvelope(gzipBytes(plaintext)[:20]), nil, "unexpected EOF", 1},
+		{"encrypted gzip with garbage after it", sealEnvelope(append(gzipBytes(plaintext), []byte("trailing garbage")...)), nil, "decompression failed", 1},
 		{"ciphertext tampered with", tampered, nil, "AES-GCM decrypt failed", 1},
 	}
 
@@ -316,6 +318,29 @@ func TestDownloadDataset_KeyServiceFailuresAreErrors(t *testing.T) {
 			}
 			if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
 				t.Fatalf("output file exists after a failed decryption (stat err = %v)", statErr)
+			}
+		})
+	}
+}
+
+// TestDownloadDataset_RefusedObjectLeavesExistingFileAlone: a refused download
+// must not truncate or replace a file that is already at the output path — the
+// caller's previous good copy survives a bad object.
+func TestDownloadDataset_RefusedObjectLeavesExistingFileAlone(t *testing.T) {
+	for _, path := range downloadPaths {
+		t.Run(path.name, func(t *testing.T) {
+			tr := &objectTransport{record: recordFlagsFalse, object: []byte(`{"not":"encrypted"}`), claimLarge: path.claimLarge}
+			out := filepath.Join(t.TempDir(), "out.ndjson")
+			if err := os.WriteFile(out, []byte("previous good copy"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := tr.consumer().DownloadDataset(context.Background(), "ds-1", out); err == nil {
+				t.Fatal("DownloadDataset must refuse the object")
+			}
+			got, err := os.ReadFile(out)
+			if err != nil || string(got) != "previous good copy" {
+				t.Fatalf("existing output = %q, %v; want it untouched", got, err)
 			}
 		})
 	}
