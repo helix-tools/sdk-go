@@ -75,7 +75,12 @@ func (e *APIError) IsConflict() bool {
 // UploadOptions contains options for uploading datasets.
 //
 // NOTE: Use NewUploadOptions() to get sane defaults.
-// NOTE: Encryption and compression are required.
+// NOTE: Encryption and compression are required: every upload is gzip-compressed
+// and then encrypted, and no option turns either off. Encrypt and Compress stay
+// on this struct so existing callers keep compiling, but UploadDataset returns
+// an error — before any network call — when either is false, when the KMS key is
+// missing, or when Metadata / DatasetOverrides try to switch the record's
+// encryption_enabled / compression_enabled flags off.
 type UploadOptions struct {
 	Category         string
 	Compress         bool
@@ -160,14 +165,11 @@ func NewProducer(cfg types.Config) (*Producer, error) {
 		return nil, fmt.Errorf("S3 bucket not found for producer %s: %w", cfg.CustomerID, err)
 	}
 
-	// Get KMS key ID.
-	kmsKeyID := ""
-	kmsParamCandidates := ssmParamCandidates(cfg.CustomerID, "kms_key_id")
-	kmsValue, err := getSSMParameterValue(context.Background(), ssmClient, kmsParamCandidates)
+	// Get KMS key ID. Without one the Producer is still built (non-upload calls
+	// work) but every UploadDataset call fails: encryption is never skipped.
+	kmsKeyID, err := resolveKMSKeyID(context.Background(), ssmClient, cfg.CustomerID)
 	if err != nil {
-		fmt.Printf("Warning: KMS key not found, encryption will be disabled: %v\n", err)
-	} else {
-		kmsKeyID = kmsValue
+		fmt.Printf("Warning: %v\n", err)
 	}
 
 	return &Producer{
@@ -182,6 +184,17 @@ func NewProducer(cfg types.Config) (*Producer, error) {
 		kmsClient:  kms.NewFromConfig(awsCfg),
 		s3Client:   s3.NewFromConfig(awsCfg),
 	}, nil
+}
+
+// resolveKMSKeyID reads the producer's KMS key id from SSM. It returns an empty
+// key and an error that says plainly what a missing key means: uploads fail.
+func resolveKMSKeyID(ctx context.Context, client *ssm.Client, customerID string) (string, error) {
+	keyID, err := getSSMParameterValue(ctx, client, ssmParamCandidates(customerID, "kms_key_id"))
+	if err != nil {
+		return "", fmt.Errorf("KMS key not found, uploads will fail until one is configured: %w", err)
+	}
+
+	return keyID, nil
 }
 
 func ssmParamCandidates(customerID, paramName string) []string {
@@ -282,6 +295,10 @@ func (p *Producer) compressData(data []byte, level int) ([]byte, error) {
 func (p *Producer) encryptData(ctx context.Context, data []byte) ([]byte, error) {
 	if p.KMSKeyID == "" {
 		return nil, fmt.Errorf("KMS key not configured, cannot encrypt data")
+	}
+
+	if p.kmsClient == nil {
+		return nil, errors.New("KMS client is not configured; cannot encrypt data")
 	}
 
 	// Generate random data key and IV.
@@ -447,11 +464,7 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 	// wrong name (or not at all). Go always compresses, so the file is
 	// `data.ndjson.gz`. (Found 2026-07-06 by the SDK-only E2E suite: go uploads
 	// landed under datasets/<customer_id>/ while py/ts used datasets/<name>/.)
-	fileName := "data.ndjson"
-	if opts.Compress {
-		fileName += ".gz"
-	}
-	s3Key := fmt.Sprintf("datasets/%s/%s", opts.DatasetName, fileName)
+	s3Key := fmt.Sprintf("datasets/%s/data.ndjson.gz", opts.DatasetName)
 
 	// version defaults to today's UTC date, matching v1.3.11's
 	// buildDatasetPayload (`now.Format("2006-01-02")`), computed
@@ -478,8 +491,7 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 	// which zeroed production total_size_bytes. len(processed.Data) is the
 	// exact byte length of the object about to be PUT to S3 (compressed,
 	// then encrypted — both mandatory), so it always matches
-	// metadata.encrypted_size_bytes today and would match
-	// metadata.compressed_size_bytes if a compress-only mode is ever added.
+	// metadata.encrypted_size_bytes.
 	payload := map[string]any{
 		"name":           opts.DatasetName,
 		"description":    opts.Description,
@@ -503,6 +515,19 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 		maps.Copy(payload, opts.DatasetOverrides)
 	}
 
+	// A "metadata" override REPLACES the computed metadata wholesale, which
+	// would drop the two flags that tell every consumer this dataset is
+	// encrypted and compressed. They are pinned after the merge, so the record
+	// carries them whatever the overrides did (UploadDataset has already
+	// refused overrides that try to set them to anything but true).
+	pinnedMetadata, err := metadataObject(payload["metadata"])
+	if err != nil {
+		return nil, err
+	}
+	pinnedMetadata["encryption_enabled"] = true
+	pinnedMetadata["compression_enabled"] = true
+	payload["metadata"] = pinnedMetadata
+
 	// POST to /v1/datasets to create record and get presigned URL
 	var response CreateDatasetResponse
 	err = p.makeAPIRequest(ctx, "POST", "/v1/datasets", payload, &response)
@@ -517,18 +542,13 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 // This is step 1 of the upload flow — it runs BEFORE createDatasetRecord so
 // the real sizes are known when the POST body is built. It has no network
 // side effect other than one KMS Encrypt call; it never uploads anything.
+//
+// It is the single enforcement point for the upload invariant (see
+// validateUploadOptions): a call that would skip compression or encryption
+// fails here, before the file is read or anything reaches the network.
 func (p *Producer) processFile(ctx context.Context, filePath string, opts UploadOptions) (*ProcessedFileData, error) {
-	// Validate encryption/compression requirements
-	if !opts.Encrypt {
-		return nil, fmt.Errorf("encryption is required for dataset uploads")
-	}
-
-	if !opts.Compress {
-		return nil, fmt.Errorf("compression is required for dataset uploads")
-	}
-
-	if opts.Encrypt && p.KMSKeyID == "" {
-		return nil, fmt.Errorf("encryption requested but KMS key not found")
+	if err := p.validateUploadOptions(opts); err != nil {
+		return nil, err
 	}
 
 	safeFilePath, err := cleanContainedPath(filePath)
@@ -549,51 +569,124 @@ func (p *Producer) processFile(ctx context.Context, filePath string, opts Upload
 		return nil, fmt.Errorf("file is empty: %s (no data to upload)", filePath)
 	}
 
-	// Track sizes for metadata
-	sizes := map[string]any{
-		"original_size_bytes":   originalSize,
-		"compressed_size_bytes": originalSize,
-		"encrypted_size_bytes":  originalSize,
-		"encryption_enabled":    opts.Encrypt,
-		"compression_enabled":   opts.Compress,
-	}
-
 	// Step 1: Compress FIRST
-	if opts.Compress {
-		fmt.Printf("📦 Compressing %d bytes with gzip (level %d)...\n", len(data), opts.CompressionLevel)
+	fmt.Printf("📦 Compressing %d bytes with gzip (level %d)...\n", len(data), opts.CompressionLevel)
 
-		compressed, err := p.compressData(data, opts.CompressionLevel)
-		if err != nil {
-			return nil, fmt.Errorf("compression failed: %w", err)
-		}
-
-		data = compressed
-		sizes["compressed_size_bytes"] = int64(len(data))
-
-		compressionRatio := (1 - float64(len(data))/float64(originalSize)) * 100
-		fmt.Printf("Compressed: %d bytes (%.1f%% reduction)\n", len(data), compressionRatio)
+	compressed, err := p.compressData(data, opts.CompressionLevel)
+	if err != nil {
+		return nil, fmt.Errorf("compression failed: %w", err)
 	}
+
+	compressedSize := int64(len(compressed))
+	compressionRatio := (1 - float64(compressedSize)/float64(originalSize)) * 100
+	fmt.Printf("Compressed: %d bytes (%.1f%% reduction)\n", compressedSize, compressionRatio)
 
 	// Step 2: Encrypt SECOND
-	if opts.Encrypt {
-		fmt.Printf("🔒 Encrypting %d bytes with KMS key...\n", len(data))
+	fmt.Printf("🔒 Encrypting %d bytes with KMS key...\n", compressedSize)
 
-		encrypted, err := p.encryptData(ctx, data)
-		if err != nil {
-			return nil, fmt.Errorf("encryption failed: %w", err)
-		}
-
-		data = encrypted
-		sizes["encrypted_size_bytes"] = int64(len(data))
-
-		fmt.Printf("Encrypted: %d bytes\n", len(data))
+	encrypted, err := p.encryptData(ctx, compressed)
+	if err != nil {
+		return nil, fmt.Errorf("encryption failed: %w", err)
 	}
 
+	fmt.Printf("Encrypted: %d bytes\n", len(encrypted))
+
 	return &ProcessedFileData{
-		Data:         data,
+		Data:         encrypted,
 		OriginalSize: originalSize,
-		Sizes:        sizes,
+		Sizes: map[string]any{
+			"original_size_bytes":   originalSize,
+			"compressed_size_bytes": compressedSize,
+			"encrypted_size_bytes":  int64(len(encrypted)),
+			"encryption_enabled":    true,
+			"compression_enabled":   true,
+		},
 	}, nil
+}
+
+// flagKeysThatMustStayOn are the record fields that say a dataset is
+// encrypted / compressed. Nothing a caller passes may set them to anything
+// but true.
+var flagKeysThatMustStayOn = []string{"encryption", "encryption_enabled", "compression", "compression_enabled"}
+
+// validateUploadOptions enforces the upload invariant: every upload is
+// gzip-compressed and then encrypted, and no option turns either off. It runs
+// before the file is read and before any network call (KMS included), and it
+// refuses:
+//   - Encrypt or Compress set to false,
+//   - a Producer without a KMS key,
+//   - Metadata or DatasetOverrides — top-level or under "metadata" — that set
+//     one of the record's encryption/compression flags to anything but true,
+//     or that give "metadata" as something other than an object.
+func (p *Producer) validateUploadOptions(opts UploadOptions) error {
+	if !opts.Encrypt {
+		return errors.New("encryption is required for dataset uploads: UploadOptions.Encrypt cannot be false")
+	}
+
+	if !opts.Compress {
+		return errors.New("compression is required for dataset uploads: UploadOptions.Compress cannot be false")
+	}
+
+	if p.KMSKeyID == "" {
+		return errors.New("encryption requested but KMS key not found")
+	}
+
+	if err := rejectDisabledFlags("UploadOptions.Metadata", opts.Metadata); err != nil {
+		return err
+	}
+
+	if err := rejectDisabledFlags("UploadOptions.DatasetOverrides", opts.DatasetOverrides); err != nil {
+		return err
+	}
+
+	if raw, present := opts.DatasetOverrides["metadata"]; present {
+		metadata, err := metadataObject(raw)
+		if err != nil {
+			return err
+		}
+
+		return rejectDisabledFlags(`UploadOptions.DatasetOverrides["metadata"]`, metadata)
+	}
+
+	return nil
+}
+
+// rejectDisabledFlags fails when m carries one of flagKeysThatMustStayOn with
+// any value other than the boolean true (false, "false", 0, null, ...).
+func rejectDisabledFlags(where string, m map[string]any) error {
+	for _, key := range flagKeysThatMustStayOn {
+		if value, present := m[key]; present && value != true {
+			return fmt.Errorf("%s: %q cannot be disabled — every upload is encrypted and compressed (got %v)", where, key, value)
+		}
+	}
+
+	return nil
+}
+
+// metadataObject returns a private copy of v as a JSON object. nil is an empty
+// object; anything that is not an object (a string, a number, a list) is an
+// error. A typed map or a struct is read through its JSON form, so the flags
+// cannot hide inside a type the caller chose.
+func metadataObject(v any) (map[string]any, error) {
+	if m, ok := v.(map[string]any); ok {
+		return maps.Clone(m), nil
+	}
+
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf(`"metadata" must be an object: %w`, err)
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf(`"metadata" must be an object: %w`, err)
+	}
+
+	if m == nil {
+		m = map[string]any{}
+	}
+
+	return m, nil
 }
 
 // uploadToPresignedURL uploads the processed data to the presigned URL.
@@ -628,7 +721,7 @@ func (p *Producer) uploadToPresignedURL(ctx context.Context, uploadURL string, d
 	return nil
 }
 
-// UploadDataset uploads a dataset with optional encryption and compression.
+// UploadDataset uploads a dataset, always gzip-compressed and then encrypted.
 // FLOW (process-before-POST, still catalog-record-before-S3-upload):
 // 1. Process file (compress + encrypt) — no upload yet, so the real sizes
 //    are known.
@@ -657,21 +750,9 @@ func (p *Producer) UploadDataset(ctx context.Context, filePath string, opts Uplo
 		opts.CompressionLevel = 6
 	}
 
-	// Validate encryption capability
-	if !opts.Encrypt {
-		return nil, fmt.Errorf("encryption is required for dataset uploads")
-	}
-
-	if !opts.Compress {
-		return nil, fmt.Errorf("compression is required for dataset uploads")
-	}
-
-	if opts.Encrypt && p.KMSKeyID == "" {
-		return nil, fmt.Errorf("encryption requested but KMS key not found")
-	}
-
-	// Step 1: Process file (encrypt/compress) so the real sizes are known
-	// before the POST.
+	// Step 1: Process file (compress + encrypt) so the real sizes are known
+	// before the POST. processFile refuses — before reading the file or making
+	// any network call — every option combination that would skip either step.
 	processedData, err := p.processFile(ctx, filePath, opts)
 	if err != nil {
 		return nil, err
