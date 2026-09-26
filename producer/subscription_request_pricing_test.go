@@ -42,7 +42,7 @@ func TestApproveSubscriptionRequest_PriceZeroIsSent(t *testing.T) {
 		_ = json.Unmarshal(raw, &gotBody)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"_id":"req-1","status":"approved","price_monthly_cents":0}`))
+		_, _ = w.Write([]byte(`{"request":{"_id":"req-1","status":"approved","price_monthly_cents":0},"subscription":{"_id":"sub-1","status":"active"}}`))
 	}))
 	defer server.Close()
 
@@ -88,7 +88,7 @@ func TestApproveSubscriptionRequest_PriceNilOmitted(t *testing.T) {
 			_ = json.Unmarshal(raw, &gotBody)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"_id":"req-1","status":"approved"}`))
+			_, _ = w.Write([]byte(`{"request":{"_id":"req-1","status":"approved"},"subscription":{"_id":"sub-1","status":"active"}}`))
 		}))
 		defer server.Close()
 
@@ -111,7 +111,7 @@ func TestApproveSubscriptionRequest_PriceNilOmitted(t *testing.T) {
 			_ = json.Unmarshal(raw, &gotBody)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"_id":"req-1","status":"approved"}`))
+			_, _ = w.Write([]byte(`{"request":{"_id":"req-1","status":"approved"},"subscription":{"_id":"sub-1","status":"active"}}`))
 		}))
 		defer server.Close()
 
@@ -132,8 +132,9 @@ func TestApproveSubscriptionRequest_PriceNilOmitted(t *testing.T) {
 }
 
 // TestApproveSubscriptionRequest_PricePositiveSent pins that a positive
-// price is sent as-is, alongside notes/dataset_id, and that the response's
-// approved_pending_payment status round-trips.
+// price is sent as-is, alongside notes, and that the response's
+// approved_pending_payment status round-trips. The deprecated DatasetID option
+// (D3) is passed too and must NOT reach the wire.
 func TestApproveSubscriptionRequest_PricePositiveSent(t *testing.T) {
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -141,7 +142,7 @@ func TestApproveSubscriptionRequest_PricePositiveSent(t *testing.T) {
 		_ = json.Unmarshal(raw, &gotBody)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"_id":"req-1","status":"approved_pending_payment","price_monthly_cents":1000}`))
+		_, _ = w.Write([]byte(`{"request":{"_id":"req-1","status":"approved_pending_payment","price_monthly_cents":1000},"subscription":null}`))
 	}))
 	defer server.Close()
 
@@ -164,8 +165,8 @@ func TestApproveSubscriptionRequest_PricePositiveSent(t *testing.T) {
 	if gotBody["notes"] != notes {
 		t.Errorf("body notes = %v, want %q", gotBody["notes"], notes)
 	}
-	if gotBody["dataset_id"] != datasetID {
-		t.Errorf("body dataset_id = %v, want %q", gotBody["dataset_id"], datasetID)
+	if _, present := gotBody["dataset_id"]; present {
+		t.Errorf("body dataset_id = %v, want it absent (deprecated option, ignored by the API)", gotBody["dataset_id"])
 	}
 	if result.Status != "approved_pending_payment" {
 		t.Errorf("status = %q, want approved_pending_payment", result.Status)

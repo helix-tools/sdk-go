@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +21,14 @@ import (
 // attribute traffic to a specific SDK build. Computed once — see
 // useragent.String().
 var userAgent = useragent.String()
+
+// DefaultAPIBaseURL is the production API endpoint NewClient falls back to
+// when neither an explicit base URL nor HELIX_API_ENDPOINT is set.
+const DefaultAPIBaseURL = "https://api-go.helix.tools"
+
+// apiEndpointEnv names the environment variable NewClient consults when the
+// base URL argument is empty. The Python SDK reads the same variable.
+const apiEndpointEnv = "HELIX_API_ENDPOINT"
 
 // defaultTimeout is the per-request HTTP timeout applied when the
 // caller doesn't supply one via WithHTTPClient. Chosen to be longer
@@ -70,10 +79,12 @@ func WithUserAgent(ua string) Option {
 // NewClient constructs a Client pointed at apiBaseURL using the
 // provided bearer token for every call.
 //
-// apiBaseURL must NOT end with a trailing slash — callers typically
-// pass "https://api-go.helix.tools" in production. The base URL is
-// used as-is for all endpoints; redirections are followed by the
-// standard HTTP client.
+// apiBaseURL should not end with a trailing slash (one is trimmed if
+// present) — callers typically pass "https://api-go.helix.tools" in
+// production. When apiBaseURL is empty, the HELIX_API_ENDPOINT
+// environment variable is used, and failing that DefaultAPIBaseURL. The
+// base URL is used as-is for all endpoints; redirections are followed by
+// the standard HTTP client.
 //
 // token is a JWT v2 (HS256 for internal agents, RS256 for external
 // agents). The client never inspects the token — verification and
@@ -83,8 +94,16 @@ func WithUserAgent(ua string) Option {
 // request bodies and sets User-Agent to the canonical SDK string
 // unless overridden via WithUserAgent.
 func NewClient(apiBaseURL, token string, opts ...Option) *Client {
+	apiBaseURL = strings.TrimSpace(apiBaseURL)
+	if apiBaseURL == "" {
+		apiBaseURL = strings.TrimSpace(os.Getenv(apiEndpointEnv))
+	}
+	if apiBaseURL == "" {
+		apiBaseURL = DefaultAPIBaseURL
+	}
+
 	c := &Client{
-		apiBaseURL: strings.TrimRight(strings.TrimSpace(apiBaseURL), "/"),
+		apiBaseURL: strings.TrimRight(apiBaseURL, "/"),
 		token:      strings.TrimSpace(token),
 		httpClient: &http.Client{Timeout: defaultTimeout},
 		userAgent:  userAgent,
@@ -174,7 +193,13 @@ func (c *Client) do(ctx context.Context, method, path string, body any, result a
 	case http.StatusUnauthorized:
 		return &UnauthorizedError{RequestID: requestID}
 	case http.StatusServiceUnavailable:
-		return &KillSwitchOffError{RequestID: requestID}
+		if isKillSwitch503(rawBody) {
+			return &KillSwitchOffError{RequestID: requestID}
+		}
+		return &ServiceUnavailableError{
+			RetryAfterSeconds: parseRetryAfter(resp.Header.Get("Retry-After")),
+			RequestID:         requestID,
+		}
 	case http.StatusTooManyRequests:
 		return &RateLimitedError{
 			RetryAfterSeconds: parseRetryAfter(resp.Header.Get("Retry-After")),
@@ -206,6 +231,67 @@ func (c *Client) do(ctx context.Context, method, path string, body any, result a
 		}
 	}
 	return apiErr
+}
+
+// killSwitchCodes are the machine codes the API uses, as a flat "error"
+// string or a nested error.code, when the operator has disabled the agent
+// surface.
+var killSwitchCodes = map[string]bool{
+	"agent_kill_switch": true,
+	"agents_disabled":   true,
+	"kill_switch":       true,
+}
+
+// killSwitchPhrases are message fragments (matched case-insensitively) the
+// kill-switch middleware emits.
+var killSwitchPhrases = []string{
+	"kill-switch",
+	"kill_switch",
+	"agent_kill_switch",
+	"agents_disabled",
+	"agent surface is disabled",
+	"agents are disabled",
+}
+
+func mentionsKillSwitch(text string) bool {
+	lowered := strings.ToLower(text)
+	for _, phrase := range killSwitchPhrases {
+		if strings.Contains(lowered, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+// isKillSwitch503 reports whether a 503 body marks the operator kill-switch,
+// as opposed to a generic outage. It mirrors the Python SDK's classification:
+// a structured code (flat error string or error.code), a kill-switch phrase in
+// error.message or the top-level message, or — for non-JSON bodies and as a
+// last resort — a phrase anywhere in the raw text.
+func isKillSwitch503(rawBody []byte) bool {
+	var body struct {
+		Error   json.RawMessage `json:"error"`
+		Message string          `json:"message"`
+	}
+	if json.Unmarshal(rawBody, &body) == nil {
+		var flat string
+		if json.Unmarshal(body.Error, &flat) == nil && killSwitchCodes[flat] {
+			return true
+		}
+		var nested struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(body.Error, &nested) == nil {
+			if killSwitchCodes[nested.Code] || mentionsKillSwitch(nested.Message) {
+				return true
+			}
+		}
+		if mentionsKillSwitch(body.Message) {
+			return true
+		}
+	}
+	return mentionsKillSwitch(string(rawBody))
 }
 
 // parseRetryAfter parses the Retry-After header. The header may be
@@ -252,9 +338,27 @@ func firstNonEmpty(values ...string) string {
 // Public API
 // ============================================================
 
+// GetMe returns the caller's registry record as the server projects it: the
+// twelve-field AgentMe, pruned of everything policy-internal (version,
+// rate-limit configuration, forbidden operations, ...). It never invents the
+// pruned fields.
+//
+// GET /v1/agents/me
+func (c *Client) GetMe(ctx context.Context) (*AgentMe, error) {
+	var out AgentMe
+	if err := c.do(ctx, http.MethodGet, "/v1/agents/me", nil, &out, ""); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // Me returns the caller's registry record, pruned of fields the
 // server considers policy-internal (rate-limit configuration,
 // forbidden-operations list). Those fields arrive as zero values.
+//
+// Deprecated: Me decodes the projection into the full AgentRecord, so
+// Version, RateLimit and the other pruned fields read as zero values that were
+// never sent. Use GetMe, which returns the AgentMe type.
 //
 // GET /v1/agents/me
 func (c *Client) Me(ctx context.Context) (*AgentRecord, error) {

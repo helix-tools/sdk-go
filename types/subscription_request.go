@@ -1,5 +1,7 @@
 package types
 
+import "encoding/json"
+
 // SubscriptionRequestStatus is the canonical lifecycle state of a
 // subscription request. Canonical contract values: pending, approved,
 // rejected.
@@ -17,10 +19,10 @@ type SubscriptionRequest struct {
 	ID            string  `json:"_id"`
 	RequestID     string  `json:"request_id"`
 	ConsumerID    string  `json:"consumer_id"`
-	ConsumerName  string  `json:"consumer_name,omitempty"`
-	ConsumerEmail string  `json:"consumer_email,omitempty"`
+	ConsumerName  string  `json:"consumer_name"`
+	ConsumerEmail string  `json:"consumer_email"`
 	ProducerID    string  `json:"producer_id"`
-	ProducerName  string  `json:"producer_name,omitempty"`
+	ProducerName  string  `json:"producer_name"`
 	DatasetID     *string `json:"dataset_id,omitempty"` // Null for all-datasets access
 	Tier          string  `json:"tier"`                 // SubscriptionTier — canonical write value is "free"
 	Message       *string `json:"message,omitempty"`
@@ -62,10 +64,38 @@ type SubscriptionRequestsResponse struct {
 	Count    int                   `json:"count"`
 }
 
-// ApproveRequestResponse is the response for approving a subscription request.
+// ApproveRequestResponse is the response for approving a subscription request:
+// the updated Request plus the Subscription the approval provisioned.
+// Subscription is nil while the request is approved_pending_payment (nothing
+// is provisioned until the consumer completes checkout).
 type ApproveRequestResponse struct {
 	Request      SubscriptionRequest `json:"request"`
 	Subscription *Subscription       `json:"subscription,omitempty"`
+}
+
+// UnmarshalJSON decodes the request strictly and the subscription on a
+// best-effort basis. By the time this runs the approval has already happened
+// on the server, so a subscription payload this SDK cannot decode (null, a bare
+// id, unexpected types) leaves Subscription nil instead of turning a completed
+// approval into an error the caller would retry.
+func (r *ApproveRequestResponse) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Request      SubscriptionRequest `json:"request"`
+		Subscription json.RawMessage     `json:"subscription"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	r.Request = raw.Request
+	r.Subscription = nil
+
+	var sub Subscription
+	if len(raw.Subscription) > 0 && json.Unmarshal(raw.Subscription, &sub) == nil && (sub.ID != "" || sub.ConsumerID != "") {
+		r.Subscription = &sub
+	}
+
+	return nil
 }
 
 // CreateSubscriptionRequestInput is the input for Consumer.CreateSubscriptionRequest.
@@ -78,8 +108,13 @@ type CreateSubscriptionRequestInput struct {
 
 // ApproveSubscriptionRequestOptions contains options for approving a subscription request.
 type ApproveSubscriptionRequestOptions struct {
-	Notes     *string // Optional: Internal notes about the approval
-	DatasetID *string // Optional: Specific dataset ID to grant access to
+	Notes *string // Optional: Internal notes about the approval
+
+	// DatasetID is Deprecated: the API has no such field and always grants
+	// the scope of the original request, so the option is no longer sent.
+	// Passing it prints a one-time deprecation warning; a later release will
+	// remove it.
+	DatasetID *string
 
 	// PriceMonthlyCents sets the per-consumer monthly USD-cents price for
 	// THIS approval, overriding the dataset's own marketplace price for

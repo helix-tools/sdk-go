@@ -419,7 +419,7 @@ func TestUploadDataset_ProcessesBeforePOST_SoRealSizesReachTheBody(t *testing.T)
 			})
 		case r.URL.Path == "/v1/datasets/ds-real-sizes" && r.Method == http.MethodGet:
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"_id":"ds-real-sizes","id":"ds-real-sizes","name":"real-sizes-test"}`))
+			_, _ = w.Write([]byte(`{"id":"ds-real-sizes","name":"real-sizes-test"}`))
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -547,17 +547,14 @@ func TestUploadDataset_ProcessesBeforePOST_SoRealSizesReachTheBody(t *testing.T)
 	}
 }
 
-// TestCreateDatasetRecord_SizeBytesTopLevel_CompressOnly is chunk A(2) of the
-// size_bytes fix: UploadDataset itself hard-requires Encrypt=true
-// (processFile refuses Encrypt=false), so a real compress-only upload can
-// never reach createDatasetRecord through the public entry point. This test
-// exercises createDatasetRecord directly with a processed result shaped like
-// a compress-only pass (encryption_enabled=false, Data holding only the
-// compressed bytes) to prove size_bytes tracks len(processed.Data) — the
-// exact bytes that would be PUT to S3 — rather than being hardwired to the
-// encrypted-size case, so the field stays correct if compress-only is ever
-// allowed.
-func TestCreateDatasetRecord_SizeBytesTopLevel_CompressOnly(t *testing.T) {
+// TestCreateDatasetRecord_SizeBytesTopLevel_TracksProcessedBytes is chunk A(2)
+// of the size_bytes fix: top-level size_bytes is len(processed.Data) — the
+// exact bytes PUT to S3 — not a value derived from another field. The result
+// here is deliberately NOT shaped like the encrypted case (Data is shorter than
+// encrypted_size_bytes says), so the assertion only passes if size_bytes really
+// follows the bytes. (Every real upload is compressed AND encrypted; there is no
+// compress-only mode, see TestUploadDataset_CannotDisableEncryptionOrCompression.)
+func TestCreateDatasetRecord_SizeBytesTopLevel_TracksProcessedBytes(t *testing.T) {
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
@@ -570,20 +567,20 @@ func TestCreateDatasetRecord_SizeBytesTopLevel_CompressOnly(t *testing.T) {
 	p := newTestProducer(server.URL)
 	dataFile := writeNDJSON(t, 5)
 
-	compressedOnlyBytes := []byte("compressed-only-payload-bytes")
+	processedBytes := []byte("compressed-only-payload-bytes")
 	processed := &ProcessedFileData{
 		OriginalSize: 100,
-		Data:         compressedOnlyBytes,
+		Data:         processedBytes,
 		Sizes: map[string]any{
 			"original_size_bytes":   int64(100),
-			"compressed_size_bytes": int64(len(compressedOnlyBytes)),
+			"compressed_size_bytes": int64(len(processedBytes)),
 			"encrypted_size_bytes":  int64(100),
-			"encryption_enabled":    false,
+			"encryption_enabled":    true,
 			"compression_enabled":   true,
 		},
 	}
 
-	opts := NewUploadOptions("compress-only-size-bytes-test")
+	opts := NewUploadOptions("size-bytes-tracks-processed-test")
 	if _, err := p.createDatasetRecord(context.Background(), dataFile, opts, processed); err != nil {
 		t.Fatalf("createDatasetRecord returned error: %v", err)
 	}
@@ -595,12 +592,12 @@ func TestCreateDatasetRecord_SizeBytesTopLevel_CompressOnly(t *testing.T) {
 	if sizeBytes <= 0 {
 		t.Errorf("top-level size_bytes = %v, want > 0", sizeBytes)
 	}
-	if int(sizeBytes) != len(compressedOnlyBytes) {
-		t.Errorf("top-level size_bytes = %v, want exactly %d (len of processed.Data, the bytes that would be PUT to S3 in a compress-only upload)", sizeBytes, len(compressedOnlyBytes))
+	if int(sizeBytes) != len(processedBytes) {
+		t.Errorf("top-level size_bytes = %v, want exactly %d (len of processed.Data, the bytes that would be PUT to S3)", sizeBytes, len(processedBytes))
 	}
 	md := gotBody["metadata"].(map[string]any)
 	if md["compressed_size_bytes"] != sizeBytes {
-		t.Errorf("top-level size_bytes = %v, want it to equal metadata.compressed_size_bytes = %v (Compress-only contract)", sizeBytes, md["compressed_size_bytes"])
+		t.Errorf("top-level size_bytes = %v, want it to equal metadata.compressed_size_bytes = %v (size_bytes follows the bytes PUT to S3)", sizeBytes, md["compressed_size_bytes"])
 	}
 }
 
@@ -656,7 +653,7 @@ func TestUploadDataset_ExplicitVersionOverride_EndToEnd(t *testing.T) {
 			})
 		case strings.HasPrefix(r.URL.Path, "/v1/datasets/") && r.Method == http.MethodGet:
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"_id":"ds-override-e2e","id":"ds-override-e2e"}`))
+			_, _ = w.Write([]byte(`{"id":"ds-override-e2e"}`))
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		}

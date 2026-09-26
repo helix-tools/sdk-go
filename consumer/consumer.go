@@ -16,6 +16,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -36,6 +37,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/aws/smithy-go/middleware"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // emptyPayloadHash is the SHA256 hash of an empty payload.
@@ -81,6 +84,19 @@ const (
 	ErrorCategoryDiskWrite      ErrorCategory = "disk_write"
 	ErrorCategoryUnknown        ErrorCategory = "unknown"
 )
+
+// errNotEncrypted and errNotCompressed mark a downloaded object that does not
+// have the shape every upload produces (gzip, then the encryption envelope).
+// A download never passes such an object through: it is an error.
+var (
+	errNotEncrypted  = errors.New("object is not in the encrypted format every upload produces; refusing to return it unencrypted")
+	errNotCompressed = errors.New("object is not gzip-compressed; refusing to return it uncompressed")
+)
+
+// maxWrappedKeyLen bounds the wrapped-data-key length an object's header may
+// declare. It is the KMS Decrypt CiphertextBlob limit; a larger value cannot
+// be a real envelope.
+const maxWrappedKeyLen = 6144
 
 // errorMessageMaxChars caps error_message before sending so a stack trace
 // can't blow the server-side 500-char limit.
@@ -156,14 +172,79 @@ type DownloadURLInfo struct {
 	} `json:"dataset,omitempty"`
 }
 
-// Dataset represents a dataset in the catalog.
+// APIError is returned for any non-2xx response from the Helix API. Callers
+// can branch on the status without matching message text:
+//
+//	var apiErr *consumer.APIError
+//	if errors.As(err, &apiErr) && apiErr.IsRateLimited() {
+//		// back off and retry
+//	}
+//
+// Error() keeps the historical "API request failed: <status> - <body>" text.
+type APIError struct {
+	StatusCode int
+	Body       string
+}
+
+// Error implements the error interface.
+func (e *APIError) Error() string {
+	return fmt.Sprintf("API request failed: %d - %s", e.StatusCode, e.Body)
+}
+
+// IsUnauthorized reports a 401 (bad or expired credentials).
+func (e *APIError) IsUnauthorized() bool { return e.StatusCode == http.StatusUnauthorized }
+
+// IsForbidden reports a 403 (authenticated but not permitted).
+func (e *APIError) IsForbidden() bool { return e.StatusCode == http.StatusForbidden }
+
+// IsNotFound reports a 404 (the resource does not exist or is not visible).
+func (e *APIError) IsNotFound() bool { return e.StatusCode == http.StatusNotFound }
+
+// IsConflict reports a 409 (duplicate or state conflict).
+func (e *APIError) IsConflict() bool { return e.StatusCode == http.StatusConflict }
+
+// IsRateLimited reports a 429: back off and retry.
+func (e *APIError) IsRateLimited() bool { return e.StatusCode == http.StatusTooManyRequests }
+
+// Dataset is one row of Consumer.ListDatasets. ID, Name and the two Metadata
+// flags are the fields this package has always exposed, unchanged in name, type
+// and meaning; Record carries the full catalog record — the same *types.Dataset
+// shape Consumer.GetDataset returns (ProducerID, Category, Description, Status,
+// sizes, Marketplace, the raw metadata map, ...) — so a listing no longer needs
+// one GetDataset call per row.
+//
+// Record is set on every row ListDatasets returns; it is nil only on a Dataset
+// built by hand.
 type Dataset struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+
+	// Metadata holds the two flags download handling reads, resolved exactly as
+	// DownloadDataset resolves them (resolveEncryptCompress): an explicit
+	// metadata.encryption_enabled wins, otherwise the record's top-level
+	// Encryption flag applies — the create endpoint promotes the flag to it and
+	// drops it from metadata.
 	Metadata struct {
 		CompressionEnabled bool `json:"compression_enabled"`
 		EncryptionEnabled  bool `json:"encryption_enabled"`
 	} `json:"metadata"`
+
+	// Record is the full catalog record for this row.
+	Record *types.Dataset `json:"-"`
+}
+
+// UnmarshalJSON decodes the full catalog record (so ID is filled from "id" or
+// "_id", like every types.Dataset) and derives the legacy fields from it.
+func (d *Dataset) UnmarshalJSON(data []byte) error {
+	var record types.Dataset
+	if err := json.Unmarshal(data, &record); err != nil {
+		return err
+	}
+
+	*d = Dataset{ID: record.ID, Name: record.Name, Record: &record}
+	d.Metadata.EncryptionEnabled, d.Metadata.CompressionEnabled = resolveEncryptCompress(&record)
+
+	return nil
 }
 
 // Notification represents a dataset upload notification received from SQS.
@@ -201,10 +282,23 @@ type PollNotificationsOptions struct {
 	MaxMessages     int32    // Maximum number of messages to retrieve (1-10, default: 10)
 	SubscriptionIDs []string // Optional list of subscription IDs to filter notifications
 
-	// Long polling wait time (0-20 seconds, default: 20)
+	// Long polling wait time (1-20 seconds). 0 means "not set" and selects
+	// the default of 20; use ShortPoll to ask for an immediate return.
 	//
 	// TODO: Get pattern from AWS SSM.
 	WaitTimeSeconds int32
+
+	// ShortPoll returns immediately with whatever is queued instead of
+	// waiting for messages (SQS WaitTimeSeconds = 0). Go's zero value cannot
+	// distinguish "unset" from an explicit 0, so this flag is how a caller
+	// asks for it; it takes precedence over WaitTimeSeconds.
+	ShortPoll bool
+
+	// VisibilityTimeout is how many seconds a received message stays hidden
+	// from other pollers before it becomes visible again if it is not
+	// acknowledged (1-43200). 0 (or a negative value) means "not set" and
+	// selects the default of 300.
+	VisibilityTimeout int32
 }
 
 // NewConsumer creates a new Consumer instance.
@@ -276,6 +370,12 @@ func NewConsumer(cfg types.Config) (*Consumer, error) {
 
 // GetDataset retrieves metadata for a specific dataset.
 func (c *Consumer) GetDataset(ctx context.Context, datasetID string) (*types.Dataset, error) {
+	// An empty id would GET /v1/datasets/ — the collection — and decode its
+	// list body into an empty Dataset without any error.
+	if strings.TrimSpace(datasetID) == "" {
+		return nil, errors.New("dataset id is required")
+	}
+
 	path := fmt.Sprintf("/v1/datasets/%s", url.PathEscape(datasetID))
 
 	var dataset types.Dataset
@@ -290,9 +390,27 @@ func (c *Consumer) GetDataset(ctx context.Context, datasetID string) (*types.Dat
 func (c *Consumer) GetDownloadURL(ctx context.Context, datasetID string) (*DownloadURLInfo, error) {
 	path := fmt.Sprintf("/v1/datasets/%s/download", url.PathEscape(datasetID))
 
-	var urlInfo DownloadURLInfo
-	if err := c.makeAPIRequest(ctx, http.MethodGet, path, nil, &urlInfo); err != nil {
+	var raw json.RawMessage
+	if err := c.makeAPIRequest(ctx, http.MethodGet, path, nil, &raw); err != nil {
 		return nil, err
+	}
+
+	var urlInfo DownloadURLInfo
+	if err := json.Unmarshal(raw, &urlInfo); err != nil {
+		return nil, err
+	}
+
+	// The legacy nested dataset object is tagged "_id", but the API identifies a
+	// dataset with "id" (see types.Dataset): fall back to it.
+	if urlInfo.Dataset != nil && urlInfo.Dataset.ID == "" {
+		var alt struct {
+			Dataset struct {
+				ID string `json:"id"`
+			} `json:"dataset"`
+		}
+		if json.Unmarshal(raw, &alt) == nil {
+			urlInfo.Dataset.ID = alt.Dataset.ID
+		}
 	}
 
 	return &urlInfo, nil
@@ -391,18 +509,17 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 	// 1. Metadata fetch (BEFORE signed-url fetch — matches TS order so a
 	// metadata failure has no event_id captured yet and the callback
 	// becomes a no-op).
+	//
+	// Every upload is compressed and encrypted, so every download is decrypted
+	// and decompressed: the record's flags are NOT consulted (a record that
+	// claims otherwise is never a licence to return raw bytes). The fetch stays
+	// so an unknown or forbidden dataset fails here, as metadata_fetch, before
+	// a signed URL is issued.
 	phase = ErrorCategoryMetadataFetch
-	dataset, err := c.GetDataset(ctx, datasetID)
-	if err != nil {
+	if _, err := c.GetDataset(ctx, datasetID); err != nil {
 		errorMessage = err.Error()
 		return fmt.Errorf("failed to get dataset metadata: %w", err)
 	}
-
-	// Decide whether to decrypt/decompress (see resolveEncryptCompress).
-	isEncrypted, isCompressed := resolveEncryptCompress(dataset)
-
-	fmt.Printf("   Compressed: %v\n", isCompressed)
-	fmt.Printf("   Encrypted: %v\n", isEncrypted)
 
 	// 2. Signed-URL fetch.
 	phase = ErrorCategorySignedURLFetch
@@ -478,34 +595,12 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 			return fmt.Errorf("failed to read temp file: %w", rerr)
 		}
 
-		if isEncrypted {
-			phase = ErrorCategoryKMSDecrypt
-			fmt.Printf("Decrypting %d bytes with KMS...\n", len(data))
-			data, err = c.decryptData(ctx, data)
-			if err != nil {
-				errorMessage = err.Error()
-				return fmt.Errorf("decryption failed: %w", err)
-			}
-			fmt.Printf("Decrypted to %d bytes\n", len(data))
-			bytesDownloaded = int64(len(data))
+		data, phase, err = c.decryptAndDecompress(ctx, data)
+		if err != nil {
+			errorMessage = err.Error()
+			return err
 		}
-
-		if isCompressed {
-			phase = ErrorCategoryDecompress
-			fmt.Printf("Decompressing %d bytes...\n", len(data))
-			data, err = c.decompressData(data)
-			if err != nil {
-				errorMessage = err.Error()
-				return fmt.Errorf("decompression failed: %w", err)
-			}
-			decompressedGB := float64(len(data)) / (1024 * 1024 * 1024)
-			if decompressedGB > 1 {
-				fmt.Printf("Decompressed to %.2f GB\n", decompressedGB)
-			} else {
-				fmt.Printf("Decompressed to %d bytes\n", len(data))
-			}
-			bytesDownloaded = int64(len(data))
-		}
+		bytesDownloaded = int64(len(data))
 
 		phase = ErrorCategoryDiskWrite
 		if werr := writeFileWithinRoot(safeOutputPath, data); werr != nil {
@@ -526,34 +621,12 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 	fmt.Printf("Downloaded %d bytes\n", len(data))
 	bytesDownloaded = int64(len(data))
 
-	if isEncrypted {
-		phase = ErrorCategoryKMSDecrypt
-		fmt.Printf("Decrypting %d bytes with KMS...\n", len(data))
-		data, err = c.decryptData(ctx, data)
-		if err != nil {
-			errorMessage = err.Error()
-			return fmt.Errorf("decryption failed: %w", err)
-		}
-		fmt.Printf("Decrypted to %d bytes\n", len(data))
-		bytesDownloaded = int64(len(data))
+	data, phase, err = c.decryptAndDecompress(ctx, data)
+	if err != nil {
+		errorMessage = err.Error()
+		return err
 	}
-
-	if isCompressed {
-		phase = ErrorCategoryDecompress
-		fmt.Printf("Decompressing %d bytes...\n", len(data))
-		data, err = c.decompressData(data)
-		if err != nil {
-			errorMessage = err.Error()
-			return fmt.Errorf("decompression failed: %w", err)
-		}
-		decompressedGB := float64(len(data)) / (1024 * 1024 * 1024)
-		if decompressedGB > 1 {
-			fmt.Printf("Decompressed to %.2f GB\n", decompressedGB)
-		} else {
-			fmt.Printf("Decompressed to %d bytes\n", len(data))
-		}
-		bytesDownloaded = int64(len(data))
-	}
+	bytesDownloaded = int64(len(data))
 
 	phase = ErrorCategoryDiskWrite
 	if err := writeFileWithinRoot(safeOutputPath, data); err != nil {
@@ -563,6 +636,34 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 	fmt.Printf("Saved to %s\n", safeOutputPath)
 
 	return nil
+}
+
+// decryptAndDecompress reverses what every upload does — gzip, then encrypt —
+// and is the only way DownloadDataset turns a stored object into dataset
+// bytes: there is no option to skip either step. An object that is not
+// encrypted, or not compressed, is an error, never a pass-through. On failure
+// it reports the pipeline phase that failed, for the outcome callback.
+func (c *Consumer) decryptAndDecompress(ctx context.Context, data []byte) ([]byte, ErrorCategory, error) {
+	fmt.Printf("Decrypting %d bytes with KMS...\n", len(data))
+	decrypted, err := c.decryptData(ctx, data)
+	if err != nil {
+		return nil, ErrorCategoryKMSDecrypt, fmt.Errorf("decryption failed: %w", err)
+	}
+	fmt.Printf("Decrypted to %d bytes\n", len(decrypted))
+
+	fmt.Printf("Decompressing %d bytes...\n", len(decrypted))
+	decompressed, err := c.decompressData(decrypted)
+	if err != nil {
+		return nil, ErrorCategoryDecompress, fmt.Errorf("decompression failed: %w", err)
+	}
+	decompressedGB := float64(len(decompressed)) / (1024 * 1024 * 1024)
+	if decompressedGB > 1 {
+		fmt.Printf("Decompressed to %.2f GB\n", decompressedGB)
+	} else {
+		fmt.Printf("Decompressed to %d bytes\n", len(decompressed))
+	}
+
+	return decompressed, ErrorCategoryUnknown, nil
 }
 
 // recordOutcome posts the outcome of an actual download to the API so the
@@ -606,39 +707,34 @@ func sanitizeErrorMessage(msg string) string {
 	return scrubbed
 }
 
-// decryptData decrypts data using envelope decryption.
+// decryptData opens the encryption envelope every upload produces:
+//
+//	[4 bytes big-endian wrapped-key length][wrapped key][16 IV][16 tag][ciphertext]
+//
+// The header comes from an untrusted object, so it is validated against the
+// bytes actually present before anything is allocated or sent to KMS: a
+// plaintext object (its first four bytes read as a length) is refused with
+// errNotEncrypted instead of being passed through.
 func (c *Consumer) decryptData(ctx context.Context, data []byte) ([]byte, error) {
-	buf := bytes.NewReader(data)
-
-	// Read encrypted key length.
-	var keyLen uint32
-	if err := binary.Read(buf, binary.BigEndian, &keyLen); err != nil {
-		return nil, err
+	if c.kmsClient == nil {
+		return nil, errors.New("KMS client is not configured; cannot decrypt")
 	}
 
-	// Read encrypted data key.
-	encryptedKey := make([]byte, keyLen)
-	if _, err := buf.Read(encryptedKey); err != nil {
-		return nil, err
+	const ivLen, tagLen = 16, 16
+
+	if len(data) < 4 {
+		return nil, errNotEncrypted
+	}
+	keyLen := binary.BigEndian.Uint32(data[:4])
+	rest := data[4:]
+	if keyLen == 0 || keyLen > maxWrappedKeyLen || uint64(len(rest)) < uint64(keyLen)+ivLen+tagLen {
+		return nil, errNotEncrypted
 	}
 
-	// Read IV (16 bytes).
-	iv := make([]byte, 16)
-	if _, err := buf.Read(iv); err != nil {
-		return nil, err
-	}
-
-	// Read auth tag (16 bytes).
-	authTag := make([]byte, 16)
-	if _, err := buf.Read(authTag); err != nil {
-		return nil, err
-	}
-
-	// Remaining bytes are encrypted data.
-	encryptedData, err := io.ReadAll(buf)
-	if err != nil {
-		return nil, err
-	}
+	encryptedKey := rest[:keyLen]
+	iv := rest[keyLen : keyLen+ivLen]
+	authTag := rest[keyLen+ivLen : keyLen+ivLen+tagLen]
+	encryptedData := rest[keyLen+ivLen+tagLen:]
 
 	// Decrypt data key with KMS.
 	decryptOut, err := c.kmsClient.Decrypt(ctx, &kms.DecryptInput{
@@ -655,13 +751,15 @@ func (c *Consumer) decryptData(ctx context.Context, data []byte) ([]byte, error)
 	}
 
 	// Use 16-byte nonce (Python uses os.urandom(16) for IV).
-	aesGCM, err := cipher.NewGCMWithNonceSize(block, 16)
+	aesGCM, err := cipher.NewGCMWithNonceSize(block, ivLen)
 	if err != nil {
 		return nil, err
 	}
 
-	// Append auth tag to encrypted data for GCM.
-	ciphertext := append(encryptedData, authTag...)
+	// GCM expects the auth tag appended to the ciphertext.
+	ciphertext := make([]byte, 0, len(encryptedData)+tagLen)
+	ciphertext = append(ciphertext, encryptedData...)
+	ciphertext = append(ciphertext, authTag...)
 
 	plaintext, err := aesGCM.Open(nil, iv, ciphertext, nil)
 	if err != nil {
@@ -671,11 +769,12 @@ func (c *Consumer) decryptData(ctx context.Context, data []byte) ([]byte, error)
 	return plaintext, nil
 }
 
-// decompressData decompresses data using gzip.
+// decompressData gunzips data. Bytes that are not a gzip stream are refused
+// with errNotCompressed: a download never returns an uncompressed object.
 func (c *Consumer) decompressData(data []byte) ([]byte, error) {
 	gr, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", errNotCompressed, err)
 	}
 
 	defer gr.Close()
@@ -907,7 +1006,7 @@ func (c *Consumer) makeAPIRequest(ctx context.Context, method, path string, body
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 
-		return fmt.Errorf("API request failed: %d - %s", resp.StatusCode, string(bodyBytes))
+		return &APIError{StatusCode: resp.StatusCode, Body: string(bodyBytes)}
 	}
 
 	if result != nil {
@@ -930,7 +1029,7 @@ func (c *Consumer) makeAPIRequest(ctx context.Context, method, path string, body
 // Set opts.AutoAcknowledge to false if you need manual control over message deletion.
 func (c *Consumer) PollNotifications(ctx context.Context, opts PollNotificationsOptions) ([]Notification, error) {
 	// Apply defaults
-	if opts.MaxMessages == 0 {
+	if opts.MaxMessages <= 0 {
 		opts.MaxMessages = 10
 	}
 
@@ -938,12 +1037,21 @@ func (c *Consumer) PollNotifications(ctx context.Context, opts PollNotifications
 		opts.MaxMessages = 10 // AWS limit.
 	}
 
-	if opts.WaitTimeSeconds == 0 {
+	switch {
+	case opts.ShortPoll:
+		opts.WaitTimeSeconds = 0
+	case opts.WaitTimeSeconds <= 0:
 		opts.WaitTimeSeconds = 20
+	case opts.WaitTimeSeconds > 20:
+		opts.WaitTimeSeconds = 20 // AWS limit.
 	}
 
-	if opts.WaitTimeSeconds > 20 {
-		opts.WaitTimeSeconds = 20 // AWS limit.
+	if opts.VisibilityTimeout <= 0 {
+		opts.VisibilityTimeout = 300
+	}
+
+	if opts.VisibilityTimeout > 43200 {
+		opts.VisibilityTimeout = 43200 // AWS limit (12 hours).
 	}
 
 	// Default AutoAcknowledge to true.
@@ -954,58 +1062,28 @@ func (c *Consumer) PollNotifications(ctx context.Context, opts PollNotifications
 	}
 
 	// Get per-consumer queue URL from active subscriptions where this customer is the consumer.
-	if c.queueURL == nil {
-		// For "both" customers, explicitly request consumer subscriptions to disambiguate.
-		// This ensures we get the queue where WE are the consumer, not producer.
-		subscriptions, err := c.ListSubscriptions(ctx, &ListSubscriptionsOptions{Role: "consumer"})
-		if err != nil {
-			return nil, fmt.Errorf("failed to get subscriptions: %w", err)
-		}
-
-		if len(subscriptions) == 0 {
-			return nil, fmt.Errorf("no active subscriptions found. Create a subscription first using CreateSubscriptionRequest()")
-		}
-
-		// Filter to only subscriptions where WE are the consumer.
-		// This handles edge cases and ensures we get the correct queue.
-		var myConsumerSubs []Subscription
-		for _, sub := range subscriptions {
-			if sub.ConsumerID == c.CustomerID {
-				myConsumerSubs = append(myConsumerSubs, sub)
-			}
-		}
-
-		if len(myConsumerSubs) == 0 {
-			return nil, fmt.Errorf("no subscriptions found where you are the consumer")
-		}
-
-		// Get queue URL from our own subscription (all consumer subscriptions share same queue).
-		var queueURL *string
-		for _, sub := range myConsumerSubs {
-			if sub.SQSQueueURL != nil {
-				queueURL = sub.SQSQueueURL
-				break
-			}
-		}
-
-		if queueURL == nil {
-			return nil, fmt.Errorf("per-consumer queue not provisioned. This may be a legacy subscription. " +
-				"Please contact support or create a new subscription to get a dedicated queue.")
-		}
-
-		c.queueURL = queueURL
+	if err := c.resolveQueueURL(ctx, "no active subscriptions found. Create a subscription first using CreateSubscriptionRequest()"); err != nil {
+		return nil, err
 	}
 
 	queueURL := aws.ToString(c.queueURL)
+
+	// The SQS serializer omits a zero WaitTimeSeconds, and an omitted value means
+	// "the queue's own default" (20 seconds for consumer queues) — i.e. a long
+	// poll. A short poll therefore has to put an explicit 0 on the wire.
+	var optFns []func(*sqs.Options)
+	if opts.ShortPoll {
+		optFns = append(optFns, forceZeroWaitTime)
+	}
 
 	// Poll SQS for messages.
 	receiveOutput, err := c.sqsClient.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
 		MaxNumberOfMessages:   opts.MaxMessages,
 		MessageAttributeNames: []string{"All"},
 		QueueUrl:              aws.String(queueURL),
-		VisibilityTimeout:     300,
+		VisibilityTimeout:     opts.VisibilityTimeout,
 		WaitTimeSeconds:       opts.WaitTimeSeconds,
-	})
+	}, optFns...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to poll SQS queue: %w", err)
 	}
@@ -1104,6 +1182,121 @@ func (c *Consumer) PollNotifications(ctx context.Context, opts PollNotifications
 	}
 
 	return notifications, nil
+}
+
+// forceZeroWaitTime adds an explicit "WaitTimeSeconds": 0 to the serialized
+// ReceiveMessage request, which the generated serializer drops for a zero
+// value. It runs after serialization and before signing, so the signature
+// covers the final body.
+func forceZeroWaitTime(o *sqs.Options) {
+	o.APIOptions = append(o.APIOptions, func(stack *middleware.Stack) error {
+		return stack.Serialize.Add(middleware.SerializeMiddlewareFunc("HelixShortPoll", zeroWaitSerialize), middleware.After)
+	})
+}
+
+// zeroWaitSerialize is the serialize-step middleware behind forceZeroWaitTime.
+func zeroWaitSerialize(ctx context.Context, in middleware.SerializeInput, next middleware.SerializeHandler) (middleware.SerializeOutput, middleware.Metadata, error) {
+	req, ok := in.Request.(*smithyhttp.Request)
+	if !ok || req.GetStream() == nil {
+		return next.HandleSerialize(ctx, in)
+	}
+
+	patched, err := withZeroWaitTime(req.GetStream())
+	if err != nil {
+		return middleware.SerializeOutput{}, middleware.Metadata{}, err
+	}
+
+	// A bytes.Reader is seekable, so SetStream's only failure mode (a Seek
+	// error) cannot occur; the error is still propagated rather than dropped.
+	if req, err = req.SetStream(bytes.NewReader(patched)); err != nil {
+		return middleware.SerializeOutput{}, middleware.Metadata{}, err
+	}
+
+	in.Request = req
+
+	return next.HandleSerialize(ctx, in)
+}
+
+// withZeroWaitTime reads a serialized JSON request body and returns it with
+// "WaitTimeSeconds" set to 0; every other key is preserved.
+func withZeroWaitTime(body io.Reader) ([]byte, error) {
+	raw, err := io.ReadAll(body)
+	if err != nil {
+		return nil, err
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+
+	fields["WaitTimeSeconds"] = json.RawMessage("0")
+
+	return json.Marshal(fields)
+}
+
+// resolveQueueURL caches the per-consumer queue URL, taking it from a
+// subscription where THIS customer is the consumer. noSubscriptions is the
+// error text for a customer with no subscriptions at all (it differs per
+// caller).
+//
+// The list is requested with role=consumer to disambiguate "both" customers.
+// The API answers 400 when that role does not match the credential's customer
+// type (or the type is unknown), so on a 400 — and only a 400 — the list is
+// requested again without a role. The rows are filtered to
+// consumer_id == this customer either way: the API sends sqs_queue_url on
+// producer-side rows too, and those queues are not ours to poll or purge.
+func (c *Consumer) resolveQueueURL(ctx context.Context, noSubscriptions string) error {
+	if c.queueURL != nil {
+		return nil
+	}
+
+	subscriptions, err := c.ListSubscriptions(ctx, &ListSubscriptionsOptions{Role: "consumer"})
+	if err != nil {
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+			return fmt.Errorf("failed to get subscriptions: %w", err)
+		}
+
+		if subscriptions, err = c.ListSubscriptions(ctx, nil); err != nil {
+			return fmt.Errorf("failed to get subscriptions: %w", err)
+		}
+	}
+
+	if len(subscriptions) == 0 {
+		return errors.New(noSubscriptions)
+	}
+
+	var queueURL *string
+
+	haveConsumerSub := false
+
+	for _, sub := range subscriptions {
+		if sub.ConsumerID != c.CustomerID {
+			continue
+		}
+
+		haveConsumerSub = true
+
+		if sub.SQSQueueURL != nil {
+			queueURL = sub.SQSQueueURL
+
+			break
+		}
+	}
+
+	if !haveConsumerSub {
+		return errors.New("no subscriptions found where you are the consumer")
+	}
+
+	if queueURL == nil {
+		return errors.New("per-consumer queue not provisioned. This may be a legacy subscription. " +
+			"Please contact support or create a new subscription to get a dedicated queue.")
+	}
+
+	c.queueURL = queueURL
+
+	return nil
 }
 
 // DeleteNotification deletes a notification message from the SQS queue after processing.
@@ -1209,43 +1402,8 @@ func (c *Consumer) GetSubscription(ctx context.Context, subscriptionID string) (
 // Calling this method more frequently will result in an error.
 func (c *Consumer) ClearQueue(ctx context.Context) error {
 	// Initialize queue URL if not already set.
-	if c.queueURL == nil {
-		subscriptions, err := c.ListSubscriptions(ctx, &ListSubscriptionsOptions{Role: "consumer"})
-		if err != nil {
-			return fmt.Errorf("failed to get subscriptions: %w", err)
-		}
-
-		if len(subscriptions) == 0 {
-			return fmt.Errorf("no active subscriptions found. Cannot determine queue URL")
-		}
-
-		// Filter to only subscriptions where WE are the consumer
-		var myConsumerSubs []Subscription
-		for _, sub := range subscriptions {
-			if sub.ConsumerID == c.CustomerID {
-				myConsumerSubs = append(myConsumerSubs, sub)
-			}
-		}
-
-		if len(myConsumerSubs) == 0 {
-			return fmt.Errorf("no subscriptions found where you are the consumer")
-		}
-
-		// Get queue URL from our own subscription
-		var queueURL *string
-		for _, sub := range myConsumerSubs {
-			if sub.SQSQueueURL != nil {
-				queueURL = sub.SQSQueueURL
-				break
-			}
-		}
-
-		if queueURL == nil {
-			return fmt.Errorf("per-consumer queue not provisioned. This may be a legacy subscription. " +
-				"Please contact support or create a new subscription to get a dedicated queue.")
-		}
-
-		c.queueURL = queueURL
+	if err := c.resolveQueueURL(ctx, "no active subscriptions found. Cannot determine queue URL"); err != nil {
+		return err
 	}
 
 	queueURL := aws.ToString(c.queueURL)

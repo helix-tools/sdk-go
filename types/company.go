@@ -1,9 +1,11 @@
 package types
 
 // CompanyStatus is the canonical lifecycle state of a company/customer.
-// Canonical contract values (8, matching the Go API source of truth):
-// provisioning, active, inactive, suspended, provisioning_failed,
-// onboarding_failed, deprovisioning, decommission_failed.
+// Canonical contract values (12, matching the Go API allowlist): the
+// provisioning lifecycle — provisioning, active, inactive, suspended,
+// provisioning_failed, onboarding_failed, deprovisioning, decommission_failed —
+// plus the self-service onboarding states pending_approval, rejected,
+// pending_offboard and offboarded.
 type CompanyStatus = string
 
 // Canonical CompanyStatus values.
@@ -16,6 +18,10 @@ const (
 	CompanyStatusOnboardingFailed   CompanyStatus = "onboarding_failed"
 	CompanyStatusDeprovisioning     CompanyStatus = "deprovisioning"
 	CompanyStatusDecommissionFailed CompanyStatus = "decommission_failed"
+	CompanyStatusPendingApproval    CompanyStatus = "pending_approval"
+	CompanyStatusRejected           CompanyStatus = "rejected"
+	CompanyStatusPendingOffboard    CompanyStatus = "pending_offboard"
+	CompanyStatusOffboarded         CompanyStatus = "offboarded"
 )
 
 // Company represents a company/customer in the system.
@@ -30,7 +36,7 @@ type Company struct {
 	StripeCustomerID     *string          `json:"stripe_customer_id,omitempty"`
 	StripeSubscriptionID string           `json:"stripe_subscription_id,omitempty"`
 	StripeStatus         string           `json:"stripe_status,omitempty"`
-	Status               string           `json:"status"`         // CompanyStatus: provisioning, active, inactive, suspended, provisioning_failed, onboarding_failed, deprovisioning, decommission_failed
+	Status               string           `json:"status"`         // CompanyStatus: one of the 12 CompanyStatus* values (provisioning ... offboarded)
 	Tier                 string           `json:"tier,omitempty"` // SubscriptionTier — canonical write value is "free"
 	FeatureFlags         FeatureFlags     `json:"feature_flags,omitempty"`
 	Settings             *CompanySettings `json:"settings,omitempty"`
@@ -83,11 +89,16 @@ type CompanySettings struct {
 
 // OnboardingInfo contains customer onboarding details.
 type OnboardingInfo struct {
-	CompletedAt              *string `json:"completed_at,omitempty"`
-	WelcomeEmailSent         bool    `json:"welcome_email_sent,omitempty"`
-	WelcomeEmailSentAt       *string `json:"welcome_email_sent_at,omitempty"`
-	CredentialsPortalURL     string  `json:"credentials_portal_url,omitempty"`
-	CredentialsPortalExpires *string `json:"credentials_portal_expires_at,omitempty"`
+	CompletedAt        *string `json:"completed_at,omitempty"`
+	WelcomeEmailSent   bool    `json:"welcome_email_sent,omitempty"`
+	WelcomeEmailSentAt *string `json:"welcome_email_sent_at,omitempty"`
+	// CredentialsPortalURL is the one-time credential link. On the wire (and in
+	// stored data) the key is credential_url; the Go field keeps its original
+	// name so existing callers still compile.
+	CredentialsPortalURL string `json:"credential_url,omitempty"`
+	// CredentialsPortalExpires is when that link expires (wire key
+	// credential_url_expires_at).
+	CredentialsPortalExpires *string `json:"credential_url_expires_at,omitempty"`
 	OnboardingSource         string  `json:"onboarding_source,omitempty"` // "api", "portal", "manual", "import", "migration"
 }
 
@@ -116,6 +127,10 @@ type UserPermissions struct {
 }
 
 // CreateCompanyRequest is the payload for POST /v1/companies.
+//
+// Deprecated: an admin-only wire type (the /v1/companies routes require an
+// administrator). The SDK itself no longer uses it; it is kept only so existing
+// code still compiles and will be removed in the next major version.
 type CreateCompanyRequest struct {
 	CompanyName   string   `json:"company_name"`
 	BusinessEmail string   `json:"business_email"`
@@ -127,6 +142,9 @@ type CreateCompanyRequest struct {
 }
 
 // UpdateCompanyRequest is the payload for PATCH /v1/companies/{id}.
+//
+// Deprecated: an admin-only wire type (see CreateCompanyRequest); kept only
+// for source compatibility and removed in the next major version.
 type UpdateCompanyRequest struct {
 	CompanyName   *string          `json:"company_name,omitempty"`
 	BusinessEmail *string          `json:"business_email,omitempty"`
@@ -139,12 +157,18 @@ type UpdateCompanyRequest struct {
 }
 
 // CompaniesResponse is the response for GET /v1/companies.
+//
+// Deprecated: an admin-only wire type (see CreateCompanyRequest); kept only
+// for source compatibility and removed in the next major version.
 type CompaniesResponse struct {
 	Companies []Company `json:"companies"`
 	Count     int       `json:"count"`
 }
 
 // CreateCompanyResponse is the response for POST /v1/companies.
+//
+// Deprecated: an admin-only wire type (see CreateCompanyRequest); kept only
+// for source compatibility and removed in the next major version.
 type CreateCompanyResponse struct {
 	Success   bool    `json:"success"`
 	CompanyID string  `json:"company_id"`
@@ -152,6 +176,9 @@ type CreateCompanyResponse struct {
 }
 
 // InviteUserRequest is the payload for POST /v1/companies/{id}/users.
+//
+// Deprecated: an admin-only wire type (see CreateCompanyRequest); kept only
+// for source compatibility and removed in the next major version.
 type InviteUserRequest struct {
 	Email       string           `json:"email"`
 	FirstName   string           `json:"first_name,omitempty"`
@@ -163,6 +190,9 @@ type InviteUserRequest struct {
 }
 
 // CompanyUsersResponse is the response for GET /v1/companies/{id}/users.
+//
+// Deprecated: an admin-only wire type (see CreateCompanyRequest); kept only
+// for source compatibility and removed in the next major version.
 type CompanyUsersResponse struct {
 	Users []CompanyUser `json:"users"`
 	Count int           `json:"count"`

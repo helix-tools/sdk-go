@@ -88,14 +88,13 @@ func TestDatasets(t *testing.T) {
 			t.Fatalf("failed to create dataset: %v", err)
 		}
 
-		if dataset.ID == "" && dataset.IDAlias == "" {
-			t.Error("expected dataset ID to be set")
+		// The API sends "id" only; Dataset.ID must be populated from it. (This
+		// used to fall back to IDAlias, which hid the empty-ID bug B-01.)
+		if dataset.ID == "" {
+			t.Fatal("expected dataset.ID to be set from the API's id key")
 		}
 
 		createdDatasetID = dataset.ID
-		if createdDatasetID == "" {
-			createdDatasetID = dataset.IDAlias
-		}
 
 		t.Logf("Created dataset: %s (%s)", createdDatasetID, dataset.Name)
 

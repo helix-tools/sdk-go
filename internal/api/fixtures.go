@@ -16,11 +16,11 @@ func GenerateTestID() string {
 }
 
 // NewTestCompany creates a test company request with a unique name.
-func NewTestCompany(testID string, customerType string) types.CreateCompanyRequest {
+func NewTestCompany(testID string, customerType string) CreateCompanyRequest {
 	email := fmt.Sprintf("%scompany-%s@test.helix-integration.local", TestPrefix, testID)
 	phone := "+15551234567"
 
-	return types.CreateCompanyRequest{
+	return CreateCompanyRequest{
 		CompanyName:   fmt.Sprintf("%sCompany_%s", TestPrefix, testID),
 		BusinessEmail: email,
 		CustomerType:  customerType,
@@ -36,12 +36,12 @@ func NewTestCompany(testID string, customerType string) types.CreateCompanyReque
 }
 
 // NewTestProducerCompany creates a test producer company.
-func NewTestProducerCompany(testID string) types.CreateCompanyRequest {
+func NewTestProducerCompany(testID string) CreateCompanyRequest {
 	return NewTestCompany(testID, "producer")
 }
 
 // NewTestConsumerCompany creates a test consumer company.
-func NewTestConsumerCompany(testID string) types.CreateCompanyRequest {
+func NewTestConsumerCompany(testID string) CreateCompanyRequest {
 	return NewTestCompany(testID, "consumer")
 }
 
@@ -76,8 +76,8 @@ func NewTestSubscriptionRequest(producerID string, datasetID *string) types.Crea
 }
 
 // NewTestUserInvite creates a test user invite payload.
-func NewTestUserInvite(testID string) types.InviteUserRequest {
-	return types.InviteUserRequest{
+func NewTestUserInvite(testID string) InviteUserRequest {
+	return InviteUserRequest{
 		Email:     fmt.Sprintf("%suser-%s@test.helix-integration.local", TestPrefix, testID),
 		FirstName: "Test",
 		LastName:  "User",
