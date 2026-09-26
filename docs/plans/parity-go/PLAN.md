@@ -66,6 +66,32 @@ zero and SQS then applies the queue default (a 20 s long poll).
   API model emits). The schemas still name it `credentials_portal_expires_at`; the
   schema lane should rename it alongside `credential_url`.
 
+## Wave 2 — rules R1-R4 (Thales, 2026-09-25)
+
+| Rule | Go SDK state | Change |
+| --- | --- | --- |
+| R1 uploads always encrypted + compressed | `UploadOptions.Encrypt/Compress` kept; false already errored, but `Metadata` / `DatasetOverrides` could still set the record's flags to false or drop them, and `NewProducer` printed "encryption will be disabled" | `validateUploadOptions` (single point, in `processFile`) refuses false flags, a missing key, and disabled flags in `Metadata` / `DatasetOverrides` (top-level or nested `"metadata"`) before the file is read or any network call; the record's `metadata.encryption_enabled` / `compression_enabled` are pinned to true after the override merge; the key-lookup warning says uploads will fail |
+| R2 downloads always decrypt + decompress | decided from the record's flags: a record saying "false" returned raw bytes; header length read from the object was allocated unchecked | `decryptAndDecompress` is unconditional for both download paths; the object's header is validated before anything is allocated (`errNotEncrypted`); undecrypted or non-compressed content is refused (`errNotCompressed`); no file written on refusal |
+| R3 snake_case + RFC 3339 string dates | already true on every wire tag; agent package uses `time.Time` (RFC 3339 on the wire) | `types/wire_names_test.go` AST guard; `agent` exempt with the reason recorded in the test |
+| R4 ids are `<prefix>-<uuid>`, server-assigned | the SDK generates no entity id and no create/invite request type carries one | guard test `TestCreateRequestsCarryNoClientIDs`; upload POST body asserted to carry no id |
+
+Ringboost's exporter options (`Encrypt: true, Compress: true, CompressionLevel: 6`
+plus its `Metadata` and `DatasetOverrides`) are pinned by
+`TestUploadDataset_RingboostCallPathIsUnchanged`, which passes identically
+against the pre-change producer.
+
+`ApproveSubscriptionRequestWithSubscription` is the envelope-returning approve
+method name (TS `approveSubscriptionRequestWithSubscription`, Python
+`approve_subscription_request_with_subscription`); nothing to rename.
+
+New files: `consumer/envelope_helpers_test.go`,
+`consumer/download_always_decrypt_test.go`,
+`producer/upload_encrypted_compressed_test.go`, `types/wire_names_test.go`.
+Reworked blind tests: the consumer download fixtures served plaintext with the
+flags "false" (now a real compressed + encrypted object behind a fake key service); the
+zero-byte "legal" download (now an empty dataset, compressed and encrypted); the producer
+"compress-only" size test (now pins size_bytes = bytes PUT).
+
 ## Files
 
 - CHANGELOG.md
@@ -78,6 +104,10 @@ zero and SQS then applies the queue default (a 20 s long poll).
 - agent/types.go
 - consumer/consumer.go
 - consumer/consumer_sts_test.go
+- consumer/download_always_decrypt_test.go
+- consumer/download_outcome_callback_test.go
+- consumer/envelope_helpers_test.go
+- consumer/security_test.go
 - consumer/example_test.go
 - consumer/list_datasets_full_test.go
 - consumer/poll_parity_test.go
@@ -104,6 +134,7 @@ zero and SQS then applies the queue default (a 20 s long poll).
 - producer/ssm_lookup_test.go
 - producer/subscription_request_pricing_test.go
 - producer/update_dataset_parity_test.go
+- producer/upload_encrypted_compressed_test.go
 - producer/upload_sizes_test.go
 - types/common.go
 - types/company.go
@@ -115,3 +146,4 @@ zero and SQS then applies the queue default (a 20 s long poll).
 - types/subscription_request.go
 - types/subscription_request_test.go
 - types/subscription_test.go
+- types/wire_names_test.go
