@@ -81,7 +81,7 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 	f := &fakeAPI{
 		t:        t,
 		s3Status: http.StatusOK,
-		s3Body:   []byte("hello world"), // 11 bytes default
+		s3Body:   encryptedObject([]byte("hello world")), // 11 bytes once decrypted and decompressed
 		dataset: map[string]any{
 			"_id":      "ds-1",
 			"name":     "Test Dataset",
@@ -128,6 +128,9 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 	f.mu.Unlock()
 
 	switch {
+	case fakeKMSDecrypt(w, r):
+		// The fake API doubles as the KMS endpoint (see newTestConsumer).
+
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/s3-mock/"):
 		if f.s3Err {
 			// Hijack and close so the consumer's http.Get sees a transport
@@ -193,13 +196,16 @@ func newTestConsumer(endpoint string) *Consumer {
 		Region:      "us-east-1",
 		Credentials: credentials.NewStaticCredentialsProvider("AKIDTEST", "SECRETTEST", ""),
 	}
-	return &Consumer{
+	c := &Consumer{
 		APIEndpoint: endpoint,
 		CustomerID:  "test-customer",
 		Region:      "us-east-1",
 		awsConfig:   awsCfg,
 		httpClient:  &http.Client{Timeout: 10 * time.Second},
 	}
+	// Every download decrypts, so every test consumer gets a KMS client; the
+	// fake API answers KMS Decrypt on the same endpoint.
+	return useFakeKMS(c, endpoint, nil)
 }
 
 // waitForCallback polls the captured calls until at least one POST to a
@@ -345,7 +351,11 @@ func TestDownloadOutcome_DatasetIDEncoded(t *testing.T) {
 // (commit 45b765d) for the bytes_downloaded field.
 func TestDownloadOutcome_SuccessZeroBytes(t *testing.T) {
 	f := newFakeAPI(t)
-	f.s3Body = []byte{} // legal empty dataset — 0 bytes transferred
+	// An empty dataset is still compressed and encrypted like every other
+	// upload: it decrypts and decompresses to 0 bytes. (A literal 0-byte
+	// object is NOT a legal dataset — see
+	// TestDownloadDataset_RejectsObjectNotEncryptedAndCompressed.)
+	f.s3Body = encryptedObject([]byte{})
 	c := newTestConsumer(f.server.URL)
 
 	out := filepath.Join(t.TempDir(), "out.bin")
