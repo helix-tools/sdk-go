@@ -1,6 +1,24 @@
 # Changelog
 
-## Unreleased
+## 2026-09-26 (v2.17.0)
+
+### Highlights
+- Uploads are always encrypted and compressed; downloads always decrypt and
+  decompress (details under "Changed").
+- Approving a subscription request unwraps the API's `{request, subscription}`
+  envelope, and `ApproveSubscriptionRequestWithSubscription` returns all of it.
+- Dataset and subscription listings follow every page, so `ListDatasets`,
+  `ListSubscriptions` and the notification/queue helpers return the complete
+  result rather than page 1.
+- Types are aligned with the published schemas: `Dataset.ID` reads the API's
+  `id` key, `SubscriptionRequest` required keys are always sent, and
+  `CompanyStatus`, `ProducerInfo` and the onboarding link keys match the API.
+
+### Changed (public surface)
+- The admin-only integration-test harness package
+  `github.com/helix-tools/sdk-go/v2/api` is no longer public; it moved to
+  `internal/api`. The admin company request/response types in `types` stay
+  in place, marked Deprecated (see "Deprecated" and "Removed" below).
 
 ### Fixed
 - **`types.Dataset.ID` is populated from the API's `id` key (B-01).** The
