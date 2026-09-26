@@ -492,6 +492,17 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 	// exact byte length of the object about to be PUT to S3 (compressed,
 	// then encrypted — both mandatory), so it always matches
 	// metadata.encrypted_size_bytes.
+	// encryption MUST be sent top-level, matching Python (producer.py
+	// _create_dataset_record, "encryption": encryption_enabled) and TypeScript
+	// (datasetSchema.ts buildDatasetPayload, encryption:
+	// metadataPayload.encryption_enabled || false). The create endpoint's
+	// extractBool (api service.go) drops metadata.encryption_enabled from the
+	// stored record whenever the request has no top-level "encryption" field,
+	// so a request that only sets the metadata key ends up with a record that
+	// is silently missing it — found 2026-09-26 comparing Go's stored Mongo
+	// record against Python/TS's for an identical upload. Always true: Encrypt
+	// cannot be false (validateUploadOptions), so this mirrors the same
+	// invariant as pinnedMetadata's encryption_enabled below, not a new one.
 	payload := map[string]any{
 		"name":           opts.DatasetName,
 		"description":    opts.Description,
@@ -505,6 +516,7 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 		"version":        version,
 		"record_count":   recordCount,
 		"size_bytes":     int64(len(processed.Data)),
+		"encryption":     true,
 		"metadata":       metadata,
 	}
 
