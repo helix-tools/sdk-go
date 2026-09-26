@@ -108,3 +108,31 @@ func exprString(e ast.Expr) string {
 		return reflect.TypeOf(e).String()
 	}
 }
+
+// TestCreateRequestsCarryNoClientIDs is R4 from the SDK's side: entity ids are
+// minted by the server in `<prefix>-<uuid>` form, so no request type that
+// creates or invites an entity may carry an "id" / "_id" field the SDK (or a
+// caller) could fill with an id of their own making. References to existing
+// entities (dataset_id, customer_id, ...) are not ids of the new entity and
+// stay.
+func TestCreateRequestsCarryNoClientIDs(t *testing.T) {
+	requests := []any{
+		CreateCompanyRequest{},
+		UpdateCompanyRequest{},
+		InviteUserRequest{},
+		CreateSubscriptionRequest{},
+		CreateSubscriptionRequestInput{},
+		InviteConsumerInput{},
+		DatasetUpdateInput{},
+	}
+
+	for _, req := range requests {
+		typ := reflect.TypeOf(req)
+		for i := 0; i < typ.NumField(); i++ {
+			name, _, _ := strings.Cut(typ.Field(i).Tag.Get("json"), ",")
+			if name == "id" || name == "_id" {
+				t.Errorf("%s.%s carries the entity id (%q) on a request: ids are server-assigned", typ.Name(), typ.Field(i).Name, name)
+			}
+		}
+	}
+}
