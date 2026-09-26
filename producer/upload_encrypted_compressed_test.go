@@ -83,6 +83,28 @@ func TestUploadDataset_CannotDisableEncryptionOrCompression(t *testing.T) {
 			false, "cannot be disabled",
 		},
 		{
+			"metadata key spelled Encryption_Enabled=false",
+			func(o *UploadOptions) { o.Metadata = map[string]any{"Encryption_Enabled": false} },
+			false, "use exactly",
+		},
+		{
+			"override key with a trailing space",
+			func(o *UploadOptions) { o.DatasetOverrides = map[string]any{"compression_enabled ": false} },
+			false, "use exactly",
+		},
+		{
+			"nested override key spelled COMPRESSION_ENABLED=false",
+			func(o *UploadOptions) {
+				o.DatasetOverrides = map[string]any{"metadata": map[string]any{"COMPRESSION_ENABLED": false}}
+			},
+			false, "use exactly",
+		},
+		{
+			"override key spelled Encryption=true (a non-canonical spelling is refused too)",
+			func(o *UploadOptions) { o.DatasetOverrides = map[string]any{"Encryption": true} },
+			false, "use exactly",
+		},
+		{
 			"override metadata that is not an object",
 			func(o *UploadOptions) { o.DatasetOverrides = map[string]any{"metadata": "encryption_enabled=false"} },
 			false, "must be an object",
