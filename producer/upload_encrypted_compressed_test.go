@@ -440,3 +440,96 @@ func TestResolveKMSKeyID(t *testing.T) {
 // Compile-time guard: the option fields callers already use keep their names
 // and types (source compatibility) even though false is no longer accepted.
 var _ = UploadOptions{Encrypt: true, Compress: true, CompressionLevel: 6, DataFreshness: types.DataFreshnessDaily}
+
+// TestUploadDataset_KeyServiceOutageUploadsNothing: if KMS cannot encrypt the
+// data key, the upload fails before the catalog record is created and before
+// any byte is PUT — a key-service outage never turns into a plaintext upload.
+func TestUploadDataset_KeyServiceOutageUploadsNothing(t *testing.T) {
+	var apiRequests atomic.Int64
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiRequests.Add(1)
+	}))
+	defer api.Close()
+
+	kmsDown := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Amzn-ErrorType", "AccessDeniedException")
+		w.Header().Set("Content-Type", "application/x-amz-json-1.1")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"__type":"AccessDeniedException","message":"denied"}`))
+	}))
+	defer kmsDown.Close()
+
+	p := newTestProducerWithKMS(api.URL, kmsDown.URL)
+
+	_, err := p.UploadDataset(context.Background(), writeNDJSON(t, 3), NewUploadOptions("kms-down"))
+	if err == nil || !strings.Contains(err.Error(), "encryption failed") {
+		t.Fatalf("error = %v, want an encryption failure", err)
+	}
+	if got := apiRequests.Load(); got != 0 {
+		t.Fatalf("%d API request(s) after the encryption failure; want 0 (no record, no upload)", got)
+	}
+}
+
+// TestMetadataObject covers the shapes a metadata value can take: nil is an
+// empty object, a caller's map is copied (never aliased), and anything that
+// cannot be an object is an error.
+func TestMetadataObject(t *testing.T) {
+	t.Run("nil is an empty object", func(t *testing.T) {
+		got, err := metadataObject(nil)
+		if err != nil || got == nil || len(got) != 0 {
+			t.Fatalf("metadataObject(nil) = %v, %v; want an empty, non-nil map", got, err)
+		}
+	})
+
+	t.Run("a map is copied, not aliased", func(t *testing.T) {
+		in := map[string]any{"k": "v"}
+		got, err := metadataObject(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got["added"] = true
+		if _, leaked := in["added"]; leaked {
+			t.Fatal("metadataObject returned the caller's own map; writes would leak into it")
+		}
+	})
+
+	t.Run("a value that cannot be encoded is an error", func(t *testing.T) {
+		if _, err := metadataObject(make(chan int)); err == nil || !strings.Contains(err.Error(), "must be an object") {
+			t.Fatalf("error = %v, want a must-be-an-object error", err)
+		}
+	})
+}
+
+// TestCreateDatasetRecord_RefusesNonObjectMetadataOverride: createDatasetRecord
+// is reached only through UploadDataset, which validates first — but the pin
+// after the merge must not silently swallow a metadata override that is not an
+// object either.
+func TestCreateDatasetRecord_RefusesNonObjectMetadataOverride(t *testing.T) {
+	f := newUploadFixture(t)
+	opts := NewUploadOptions("bad-metadata")
+	opts.DatasetOverrides = map[string]any{"metadata": []string{"encryption_enabled"}}
+
+	processed := &ProcessedFileData{Data: []byte("x"), Sizes: map[string]any{}}
+	if _, err := f.p.createDatasetRecord(context.Background(), writeNDJSON(t, 2), opts, processed); err == nil || !strings.Contains(err.Error(), "must be an object") {
+		t.Fatalf("error = %v, want a must-be-an-object error", err)
+	}
+	if len(f.order) != 0 {
+		t.Fatalf("calls = %v, want none: the record must not be created", f.order)
+	}
+}
+
+// TestUploadDataset_NilMetadataOverrideStillCarriesFlags: an explicit nil
+// metadata override (JSON null) is not a way to send a record without flags.
+func TestUploadDataset_NilMetadataOverrideStillCarriesFlags(t *testing.T) {
+	f := newUploadFixture(t)
+	opts := NewUploadOptions("nil-metadata")
+	opts.DatasetOverrides = map[string]any{"metadata": nil}
+
+	if _, err := f.p.UploadDataset(context.Background(), writeNDJSON(t, 3), opts); err != nil {
+		t.Fatalf("UploadDataset: %v", err)
+	}
+	md, _ := f.postBody["metadata"].(map[string]any)
+	if md["encryption_enabled"] != true || md["compression_enabled"] != true {
+		t.Errorf("metadata = %v, want both flags true", f.postBody["metadata"])
+	}
+}

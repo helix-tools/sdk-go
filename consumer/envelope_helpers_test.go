@@ -81,9 +81,12 @@ func fakeKMSDecrypt(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // kmsDecryptBody is the JSON a KMS Decrypt reply carries, for round trippers.
-func kmsDecryptBody() string {
+func kmsDecryptBody() string { return kmsDecryptBodyFor(testDataKey) }
+
+// kmsDecryptBodyFor is a KMS Decrypt reply that unwraps to key.
+func kmsDecryptBodyFor(key []byte) string {
 	b, _ := json.Marshal(map[string]string{
-		"Plaintext": base64.StdEncoding.EncodeToString(testDataKey),
+		"Plaintext": base64.StdEncoding.EncodeToString(key),
 		"KeyId":     "test-kms-key",
 	})
 	return string(b)
