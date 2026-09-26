@@ -85,6 +85,19 @@ const (
 	ErrorCategoryUnknown        ErrorCategory = "unknown"
 )
 
+// errNotEncrypted and errNotCompressed mark a downloaded object that does not
+// have the shape every upload produces (gzip, then the encryption envelope).
+// A download never passes such an object through: it is an error.
+var (
+	errNotEncrypted  = errors.New("object is not in the encrypted format every upload produces; refusing to return it unencrypted")
+	errNotCompressed = errors.New("object is not gzip-compressed; refusing to return it uncompressed")
+)
+
+// maxWrappedKeyLen bounds the wrapped-data-key length an object's header may
+// declare. It is the KMS Decrypt CiphertextBlob limit; a larger value cannot
+// be a real envelope.
+const maxWrappedKeyLen = 6144
+
 // errorMessageMaxChars caps error_message before sending so a stack trace
 // can't blow the server-side 500-char limit.
 const errorMessageMaxChars = 500
@@ -496,18 +509,17 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 	// 1. Metadata fetch (BEFORE signed-url fetch — matches TS order so a
 	// metadata failure has no event_id captured yet and the callback
 	// becomes a no-op).
+	//
+	// Every upload is compressed and encrypted, so every download is decrypted
+	// and decompressed: the record's flags are NOT consulted (a record that
+	// claims otherwise is never a licence to return raw bytes). The fetch stays
+	// so an unknown or forbidden dataset fails here, as metadata_fetch, before
+	// a signed URL is issued.
 	phase = ErrorCategoryMetadataFetch
-	dataset, err := c.GetDataset(ctx, datasetID)
-	if err != nil {
+	if _, err := c.GetDataset(ctx, datasetID); err != nil {
 		errorMessage = err.Error()
 		return fmt.Errorf("failed to get dataset metadata: %w", err)
 	}
-
-	// Decide whether to decrypt/decompress (see resolveEncryptCompress).
-	isEncrypted, isCompressed := resolveEncryptCompress(dataset)
-
-	fmt.Printf("   Compressed: %v\n", isCompressed)
-	fmt.Printf("   Encrypted: %v\n", isEncrypted)
 
 	// 2. Signed-URL fetch.
 	phase = ErrorCategorySignedURLFetch
@@ -583,34 +595,12 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 			return fmt.Errorf("failed to read temp file: %w", rerr)
 		}
 
-		if isEncrypted {
-			phase = ErrorCategoryKMSDecrypt
-			fmt.Printf("Decrypting %d bytes with KMS...\n", len(data))
-			data, err = c.decryptData(ctx, data)
-			if err != nil {
-				errorMessage = err.Error()
-				return fmt.Errorf("decryption failed: %w", err)
-			}
-			fmt.Printf("Decrypted to %d bytes\n", len(data))
-			bytesDownloaded = int64(len(data))
+		data, phase, err = c.decryptAndDecompress(ctx, data)
+		if err != nil {
+			errorMessage = err.Error()
+			return err
 		}
-
-		if isCompressed {
-			phase = ErrorCategoryDecompress
-			fmt.Printf("Decompressing %d bytes...\n", len(data))
-			data, err = c.decompressData(data)
-			if err != nil {
-				errorMessage = err.Error()
-				return fmt.Errorf("decompression failed: %w", err)
-			}
-			decompressedGB := float64(len(data)) / (1024 * 1024 * 1024)
-			if decompressedGB > 1 {
-				fmt.Printf("Decompressed to %.2f GB\n", decompressedGB)
-			} else {
-				fmt.Printf("Decompressed to %d bytes\n", len(data))
-			}
-			bytesDownloaded = int64(len(data))
-		}
+		bytesDownloaded = int64(len(data))
 
 		phase = ErrorCategoryDiskWrite
 		if werr := writeFileWithinRoot(safeOutputPath, data); werr != nil {
@@ -631,34 +621,12 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 	fmt.Printf("Downloaded %d bytes\n", len(data))
 	bytesDownloaded = int64(len(data))
 
-	if isEncrypted {
-		phase = ErrorCategoryKMSDecrypt
-		fmt.Printf("Decrypting %d bytes with KMS...\n", len(data))
-		data, err = c.decryptData(ctx, data)
-		if err != nil {
-			errorMessage = err.Error()
-			return fmt.Errorf("decryption failed: %w", err)
-		}
-		fmt.Printf("Decrypted to %d bytes\n", len(data))
-		bytesDownloaded = int64(len(data))
+	data, phase, err = c.decryptAndDecompress(ctx, data)
+	if err != nil {
+		errorMessage = err.Error()
+		return err
 	}
-
-	if isCompressed {
-		phase = ErrorCategoryDecompress
-		fmt.Printf("Decompressing %d bytes...\n", len(data))
-		data, err = c.decompressData(data)
-		if err != nil {
-			errorMessage = err.Error()
-			return fmt.Errorf("decompression failed: %w", err)
-		}
-		decompressedGB := float64(len(data)) / (1024 * 1024 * 1024)
-		if decompressedGB > 1 {
-			fmt.Printf("Decompressed to %.2f GB\n", decompressedGB)
-		} else {
-			fmt.Printf("Decompressed to %d bytes\n", len(data))
-		}
-		bytesDownloaded = int64(len(data))
-	}
+	bytesDownloaded = int64(len(data))
 
 	phase = ErrorCategoryDiskWrite
 	if err := writeFileWithinRoot(safeOutputPath, data); err != nil {
@@ -668,6 +636,34 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 	fmt.Printf("Saved to %s\n", safeOutputPath)
 
 	return nil
+}
+
+// decryptAndDecompress reverses what every upload does — gzip, then encrypt —
+// and is the only way DownloadDataset turns a stored object into dataset
+// bytes: there is no option to skip either step. An object that is not
+// encrypted, or not compressed, is an error, never a pass-through. On failure
+// it reports the pipeline phase that failed, for the outcome callback.
+func (c *Consumer) decryptAndDecompress(ctx context.Context, data []byte) ([]byte, ErrorCategory, error) {
+	fmt.Printf("Decrypting %d bytes with KMS...\n", len(data))
+	decrypted, err := c.decryptData(ctx, data)
+	if err != nil {
+		return nil, ErrorCategoryKMSDecrypt, fmt.Errorf("decryption failed: %w", err)
+	}
+	fmt.Printf("Decrypted to %d bytes\n", len(decrypted))
+
+	fmt.Printf("Decompressing %d bytes...\n", len(decrypted))
+	decompressed, err := c.decompressData(decrypted)
+	if err != nil {
+		return nil, ErrorCategoryDecompress, fmt.Errorf("decompression failed: %w", err)
+	}
+	decompressedGB := float64(len(decompressed)) / (1024 * 1024 * 1024)
+	if decompressedGB > 1 {
+		fmt.Printf("Decompressed to %.2f GB\n", decompressedGB)
+	} else {
+		fmt.Printf("Decompressed to %d bytes\n", len(decompressed))
+	}
+
+	return decompressed, ErrorCategoryUnknown, nil
 }
 
 // recordOutcome posts the outcome of an actual download to the API so the
@@ -711,39 +707,34 @@ func sanitizeErrorMessage(msg string) string {
 	return scrubbed
 }
 
-// decryptData decrypts data using envelope decryption.
+// decryptData opens the encryption envelope every upload produces:
+//
+//	[4 bytes big-endian wrapped-key length][wrapped key][16 IV][16 tag][ciphertext]
+//
+// The header comes from an untrusted object, so it is validated against the
+// bytes actually present before anything is allocated or sent to KMS: a
+// plaintext object (its first four bytes read as a length) is refused with
+// errNotEncrypted instead of being passed through.
 func (c *Consumer) decryptData(ctx context.Context, data []byte) ([]byte, error) {
-	buf := bytes.NewReader(data)
-
-	// Read encrypted key length.
-	var keyLen uint32
-	if err := binary.Read(buf, binary.BigEndian, &keyLen); err != nil {
-		return nil, err
+	if c.kmsClient == nil {
+		return nil, errors.New("KMS client is not configured; cannot decrypt")
 	}
 
-	// Read encrypted data key.
-	encryptedKey := make([]byte, keyLen)
-	if _, err := buf.Read(encryptedKey); err != nil {
-		return nil, err
+	const ivLen, tagLen = 16, 16
+
+	if len(data) < 4 {
+		return nil, errNotEncrypted
+	}
+	keyLen := binary.BigEndian.Uint32(data[:4])
+	rest := data[4:]
+	if keyLen == 0 || keyLen > maxWrappedKeyLen || uint64(len(rest)) < uint64(keyLen)+ivLen+tagLen {
+		return nil, errNotEncrypted
 	}
 
-	// Read IV (16 bytes).
-	iv := make([]byte, 16)
-	if _, err := buf.Read(iv); err != nil {
-		return nil, err
-	}
-
-	// Read auth tag (16 bytes).
-	authTag := make([]byte, 16)
-	if _, err := buf.Read(authTag); err != nil {
-		return nil, err
-	}
-
-	// Remaining bytes are encrypted data.
-	encryptedData, err := io.ReadAll(buf)
-	if err != nil {
-		return nil, err
-	}
+	encryptedKey := rest[:keyLen]
+	iv := rest[keyLen : keyLen+ivLen]
+	authTag := rest[keyLen+ivLen : keyLen+ivLen+tagLen]
+	encryptedData := rest[keyLen+ivLen+tagLen:]
 
 	// Decrypt data key with KMS.
 	decryptOut, err := c.kmsClient.Decrypt(ctx, &kms.DecryptInput{
@@ -760,13 +751,15 @@ func (c *Consumer) decryptData(ctx context.Context, data []byte) ([]byte, error)
 	}
 
 	// Use 16-byte nonce (Python uses os.urandom(16) for IV).
-	aesGCM, err := cipher.NewGCMWithNonceSize(block, 16)
+	aesGCM, err := cipher.NewGCMWithNonceSize(block, ivLen)
 	if err != nil {
 		return nil, err
 	}
 
-	// Append auth tag to encrypted data for GCM.
-	ciphertext := append(encryptedData, authTag...)
+	// GCM expects the auth tag appended to the ciphertext.
+	ciphertext := make([]byte, 0, len(encryptedData)+tagLen)
+	ciphertext = append(ciphertext, encryptedData...)
+	ciphertext = append(ciphertext, authTag...)
 
 	plaintext, err := aesGCM.Open(nil, iv, ciphertext, nil)
 	if err != nil {
@@ -776,11 +769,12 @@ func (c *Consumer) decryptData(ctx context.Context, data []byte) ([]byte, error)
 	return plaintext, nil
 }
 
-// decompressData decompresses data using gzip.
+// decompressData gunzips data. Bytes that are not a gzip stream are refused
+// with errNotCompressed: a download never returns an uncompressed object.
 func (c *Consumer) decompressData(data []byte) ([]byte, error) {
 	gr, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", errNotCompressed, err)
 	}
 
 	defer gr.Close()

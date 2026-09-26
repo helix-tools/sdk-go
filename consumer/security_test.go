@@ -22,9 +22,12 @@ func (r securityRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 	contentLength := int64(-1)
 
 	switch {
+	case req.Header.Get("X-Amz-Target") == kmsDecryptTarget:
+		body = kmsDecryptBody()
 	case req.URL.Path == "/download-data":
-		body = "download payload"
-		contentLength = int64(len(body))
+		object := encryptedObject([]byte("download payload"))
+		body = string(object)
+		contentLength = int64(len(object))
 		if r.largeDownload {
 			contentLength = 100*1024*1024 + 1
 		}
@@ -45,7 +48,8 @@ func (r securityRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 }
 
 func newSecurityTestConsumer(largeDownload bool) *Consumer {
-	return &Consumer{
+	client := &http.Client{Transport: securityRoundTripper{largeDownload: largeDownload}}
+	return useFakeKMS(&Consumer{
 		APIEndpoint: "https://security.test",
 		CustomerID:  "test-customer",
 		Region:      "us-east-1",
@@ -53,8 +57,8 @@ func newSecurityTestConsumer(largeDownload bool) *Consumer {
 			Region:      "us-east-1",
 			Credentials: credentials.NewStaticCredentialsProvider("AKIDTEST", "SECRETTEST", ""),
 		},
-		httpClient: &http.Client{Transport: securityRoundTripper{largeDownload: largeDownload}},
-	}
+		httpClient: client,
+	}, "", client)
 }
 
 func TestDownloadDatasetRejectsParentTraversal(t *testing.T) {
