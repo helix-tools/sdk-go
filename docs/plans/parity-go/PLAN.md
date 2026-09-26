@@ -80,6 +80,15 @@ plus its `Metadata` and `DatasetOverrides`) are pinned by
 `TestUploadDataset_RingboostCallPathIsUnchanged`, which passes identically
 against the pre-change producer.
 
+Self-attack (inputs that most plausibly evade the wave-2 fixes, each now a test):
+1. A flag key in another spelling (`Encryption_Enabled`, `compression_enabled `,
+   nested `COMPRESSION_ENABLED`) inside `Metadata` / `DatasetOverrides` — a
+   case-folding decoder would read it as the flag itself; refused ("use exactly").
+2. A valid encrypted object whose gzip is cut short, or has garbage after it —
+   the download fails and writes nothing.
+3. A refused download at an output path that already holds a good copy — the
+   old file is left untouched (both size paths).
+
 `ApproveSubscriptionRequestWithSubscription` is the envelope-returning approve
 method name (TS `approveSubscriptionRequestWithSubscription`, Python
 `approve_subscription_request_with_subscription`); nothing to rename.
