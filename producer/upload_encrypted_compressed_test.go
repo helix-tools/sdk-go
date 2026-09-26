@@ -295,6 +295,7 @@ func TestUploadDataset_RingboostCallPathIsUnchanged(t *testing.T) {
 		"record_count":   float64(40),
 		"original_size":  float64(len(plaintext)),
 		"visibility":     "private",
+		"encryption":     true,
 	} {
 		if f.postBody[key] != want {
 			t.Errorf("POST body %s = %v, want %v", key, f.postBody[key], want)
@@ -324,6 +325,50 @@ func TestUploadDataset_RingboostCallPathIsUnchanged(t *testing.T) {
 	}
 	if f.postBody["size_bytes"] != float64(len(f.uploaded)) {
 		t.Errorf("size_bytes = %v, want %d", f.postBody["size_bytes"], len(f.uploaded))
+	}
+}
+
+// TestUploadDataset_TopLevelEncryptionMatchesTSAndPython pins the exact
+// flag set the API needs to keep metadata.encryption_enabled on the stored
+// record: a top-level "encryption": true field alongside
+// metadata.encryption_enabled/compression_enabled, matching what the other
+// two SDKs send on every create-dataset call —
+//   - TypeScript (sdk-typescript/src/datasetSchema.ts buildDatasetPayload):
+//     `encryption: metadataPayload.encryption_enabled || false`
+//   - Python (sdk-python/helix_connect/producer.py _create_dataset_record):
+//     `"encryption": encryption_enabled` (from
+//     metadata_payload.get("encryption_enabled", False))
+//
+// Without the top-level field, the API's extractBool (api service.go) drops
+// metadata.encryption_enabled from the stored record — confirmed 2026-09-26
+// against live Mongo records: Go's record had only metadata.compression_enabled,
+// while TS's and Python's records for an identical upload had both flags.
+// Negative control (run manually, not re-executed on every `go test` since it
+// requires reverting shipped code): with producer.go's "encryption": true line
+// removed from the payload literal, this test fails with
+// "POST body top-level encryption = <nil>, want true" — the exact assertion
+// below, not an unrelated panic or a different field.
+func TestUploadDataset_TopLevelEncryptionMatchesTSAndPython(t *testing.T) {
+	f := newUploadFixture(t)
+
+	opts := NewUploadOptions("parity-test")
+	if _, err := f.p.UploadDataset(context.Background(), writeNDJSON(t, 3), opts); err != nil {
+		t.Fatalf("UploadDataset: %v", err)
+	}
+
+	if f.postBody["encryption"] != true {
+		t.Errorf("POST body top-level encryption = %v, want true (TS/Python both send this; the API drops metadata.encryption_enabled without it)", f.postBody["encryption"])
+	}
+
+	md, ok := f.postBody["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata is not an object: %T", f.postBody["metadata"])
+	}
+	if md["encryption_enabled"] != true {
+		t.Errorf("metadata.encryption_enabled = %v, want true", md["encryption_enabled"])
+	}
+	if md["compression_enabled"] != true {
+		t.Errorf("metadata.compression_enabled = %v, want true", md["compression_enabled"])
 	}
 }
 
