@@ -42,7 +42,7 @@ func TestUploadDataset_CannotDisableEncryptionOrCompression(t *testing.T) {
 		{"both false", func(o *UploadOptions) { o.Encrypt, o.Compress = false, false }, false, "encryption is required"},
 		{"zero-value options", func(o *UploadOptions) { *o = UploadOptions{DatasetName: "x"} }, false, "encryption is required"},
 		{"missing KMS key", func(o *UploadOptions) {}, true, "no encryption key configured"},
-		{"invalid gzip level", func(o *UploadOptions) { o.CompressionLevel = 10 }, false, "gzip"},
+		{"invalid gzip level", func(o *UploadOptions) { o.CompressionLevel = 10 }, false, "failed to create compression writer"},
 		{
 			"metadata says encryption off",
 			func(o *UploadOptions) { o.Metadata = map[string]any{"encryption_enabled": false} },
