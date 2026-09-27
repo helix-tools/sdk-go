@@ -76,10 +76,33 @@ func containsForbiddenTerm(s string) string {
 	return ""
 }
 
+// importAliases maps each file-local package identifier (its import alias,
+// or its default name when unaliased) to the import path it actually
+// resolves to, so isLoggingCall recognizes fmt/errors calls even through an
+// aliased import (e.g. `import f "fmt"`).
+func importAliases(file *ast.File) map[string]string {
+	aliases := map[string]string{}
+	for _, imp := range file.Imports {
+		path := strings.Trim(imp.Path.Value, `"`)
+		name := path
+		if idx := strings.LastIndex(path, "/"); idx >= 0 {
+			name = path[idx+1:]
+		}
+		if imp.Name != nil {
+			name = imp.Name.Name
+		}
+		aliases[name] = path
+	}
+	return aliases
+}
+
 // isLoggingCall reports whether call is one of fmt.Errorf/Printf/.../
 // errors.New — a call whose string-literal arguments become customer-
-// visible runtime text.
-func isLoggingCall(call *ast.CallExpr) bool {
+// visible runtime text. It resolves the call's receiver through aliases
+// (this file's import-alias table) rather than trusting the local
+// identifier spelling, so an aliased import (`import f "fmt"`) is still
+// recognized.
+func isLoggingCall(call *ast.CallExpr, aliases map[string]string) bool {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return false
@@ -88,7 +111,11 @@ func isLoggingCall(call *ast.CallExpr) bool {
 	if !ok {
 		return false
 	}
-	fns, ok := loggingCallNames[pkgIdent.Name]
+	path, ok := aliases[pkgIdent.Name]
+	if !ok {
+		path = pkgIdent.Name
+	}
+	fns, ok := loggingCallNames[path]
 	if !ok {
 		return false
 	}
@@ -113,10 +140,12 @@ func checkFile(t *testing.T, fset *token.FileSet, path string) []violation {
 		}
 	}
 
+	aliases := importAliases(src)
+
 	ast.Inspect(src, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.CallExpr:
-			if !isLoggingCall(node) {
+			if !isLoggingCall(node, aliases) {
 				return true
 			}
 			for _, arg := range node.Args {
@@ -156,8 +185,15 @@ func checkFile(t *testing.T, fset *token.FileSet, path string) []violation {
 					doc, name = s.Doc, s.Name.Name
 				case *ast.ValueSpec:
 					doc = s.Doc
-					if len(s.Names) > 0 {
-						name = s.Names[0].Name
+					// A ValueSpec can declare several names sharing one doc
+					// comment (`var a, Exported = 0, 1`); the comment is
+					// exported-visible if ANY of them is, so scan all of
+					// them rather than just the first.
+					for _, n := range s.Names {
+						if n.IsExported() {
+							name = n.Name
+							break
+						}
 					}
 				}
 				if doc == nil || name == "" || !ast.IsExported(name) {

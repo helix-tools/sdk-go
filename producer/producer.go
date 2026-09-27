@@ -190,7 +190,7 @@ func NewProducer(cfg types.Config) (*Producer, error) {
 func resolveKMSKeyID(ctx context.Context, client *ssm.Client, customerID string) (string, error) {
 	keyID, err := getSSMParameterValue(ctx, client, ssmParamCandidates(customerID, "kms_key_id"))
 	if err != nil {
-		return "", fmt.Errorf("encryption key not found, uploads will fail until one is configured: %w", err)
+		return "", fmt.Errorf("encryption key configuration could not be resolved, uploads will fail until it is: %w", err)
 	}
 
 	return keyID, nil
@@ -758,7 +758,7 @@ func (p *Producer) uploadToPresignedURL(ctx context.Context, uploadURL string, d
 // Step 2 still happens before any bytes reach S3, so the race the original
 // POST-first refactor closed (an S3 event firing before the catalog record
 // exists) stays closed. A refused POST still means zero PUTs — step 1 has no
-// side effect beyond one local compress-and-encrypt pass.
+// side effect beyond one local compress and one encryption call.
 //
 // NOTE: Use NewUploadOptions() to get sane defaults.
 func (p *Producer) UploadDataset(ctx context.Context, filePath string, opts UploadOptions) (*types.Dataset, error) {
