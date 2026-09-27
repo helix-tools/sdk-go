@@ -50,6 +50,13 @@
   `credential_url` / `credential_url_expires_at` — the keys the API and stored
   data use — instead of `credentials_portal_*`. The Go field names are
   unchanged.
+- **`UploadDataset`'s create-dataset request sends a top-level `encryption`
+  field, matching the TypeScript and Python SDKs.** Without it, the API's
+  `extractBool` dropped `metadata.encryption_enabled` from the stored catalog
+  record — confirmed against live Mongo records where Go's record had only
+  `metadata.compression_enabled` while TS's and Python's had both flags for an
+  identical upload. `metadata.encryption_enabled`/`compression_enabled` were
+  already sent and are unchanged.
 
 ### Changed
 - **Every upload is compressed and encrypted; nothing can turn either off.**
