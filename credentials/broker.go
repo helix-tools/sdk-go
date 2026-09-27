@@ -134,7 +134,7 @@ func (e *MintError) Error() string {
 }
 
 // IsSubscriptionExpired reports whether err is a *MintError carrying the
-// subscription_expired code (finding #24 enforced at mint time).
+// subscription_expired code, enforced at mint time.
 func IsSubscriptionExpired(err error) bool { return hasCode(err, ErrCodeSubscriptionExpired) }
 
 // IsCustomerSuspended reports whether err is a *MintError carrying the
