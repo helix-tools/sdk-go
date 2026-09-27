@@ -169,7 +169,7 @@ func TestDownloadDataset_RejectsObjectNotEncryptedAndCompressed(t *testing.T) {
 		{"encrypted but never compressed", sealEnvelope(plaintext), errNotCompressed, "", 1},
 		{"encrypted gzip cut short", sealEnvelope(gzipBytes(plaintext)[:20]), nil, "unexpected EOF", 1},
 		{"encrypted gzip with garbage after it", sealEnvelope(append(gzipBytes(plaintext), []byte("trailing garbage")...)), nil, "decompression failed", 1},
-		{"ciphertext tampered with", tampered, nil, "AES-GCM decrypt failed", 1},
+		{"ciphertext tampered with", tampered, nil, "decryption failed", 1},
 	}
 
 	for _, path := range downloadPaths {
@@ -240,8 +240,8 @@ func TestDecryptData_WithoutKMSClientIsAnError(t *testing.T) {
 	c := &Consumer{}
 
 	_, err := c.decryptData(context.Background(), encryptedObject([]byte("x")))
-	if err == nil || !strings.Contains(err.Error(), "KMS client") {
-		t.Fatalf("decryptData error = %v, want a missing-KMS-client error", err)
+	if err == nil || !strings.Contains(err.Error(), "encryption is not configured") {
+		t.Fatalf("decryptData error = %v, want a missing-encryption-client error", err)
 	}
 }
 
@@ -294,7 +294,7 @@ func TestDownloadDataset_KeyServiceFailuresAreErrors(t *testing.T) {
 		{
 			"KMS denies the request",
 			&objectTransport{record: recordFlagsFalse, object: encryptedObject([]byte("rows\n")), kmsDenied: true},
-			"KMS decrypt failed",
+			"decryption failed",
 		},
 		{
 			"KMS returns a key of the wrong size",
@@ -304,7 +304,7 @@ func TestDownloadDataset_KeyServiceFailuresAreErrors(t *testing.T) {
 		{
 			"KMS returns a different valid key",
 			&objectTransport{record: recordFlagsFalse, object: encryptedObject([]byte("rows\n")), kmsKey: []byte("ffffffffffffffffffffffffffffffff")},
-			"AES-GCM decrypt failed",
+			"decryption failed",
 		},
 	}
 
