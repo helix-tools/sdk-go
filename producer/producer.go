@@ -1,7 +1,7 @@
 // Package producer provides functionality for uploading datasets to the Helix Connect Platform.
 //
 // It handles the entire lifecycle of dataset production, including authentication,
-// encrypting, compressing, uploading datasets, and notifying subscribers via SNS.
+// encrypting, compressing, uploading datasets, and notifying subscribers of new uploads.
 //
 // TODO: Use thalesfsp/sypl logger, and set log levels to `debug`.
 package producer
@@ -75,16 +75,16 @@ func (e *APIError) IsConflict() bool {
 // UploadOptions contains options for uploading datasets.
 //
 // NOTE: Use NewUploadOptions() to get sane defaults.
-// NOTE: Encryption and compression are required: every upload is gzip-compressed
+// NOTE: Encryption and compression are required: every upload is compressed
 // and then encrypted, and no option turns either off. Encrypt and Compress stay
 // on this struct so existing callers keep compiling, but UploadDataset returns
-// an error — before any network call — when either is false, when the KMS key is
-// missing, or when Metadata / DatasetOverrides try to switch the record's
+// an error — before any network call — when either is false, when the encryption
+// key is missing, or when Metadata / DatasetOverrides try to switch the record's
 // encryption_enabled / compression_enabled flags off.
 type UploadOptions struct {
 	Category         string
 	Compress         bool
-	CompressionLevel int // Default: 6 (gzip compression level 1-9)
+	CompressionLevel int // Default: 6 (compression level 1-9)
 	DataFreshness    types.DataFreshness
 	DatasetName      string
 	Description      string
@@ -130,8 +130,7 @@ func NewProducer(cfg types.Config) (*Producer, error) {
 	// Select the AWS credentials provider: "static" (default, byte-identical
 	// to the pre-STS behavior) or "sts" (auto-refreshing broker-issued
 	// session credentials, opt-in via cfg.CredentialMode). See
-	// credentials.SelectProvider and STS_C0_INVENTORY.md for the full
-	// mode-inference matrix.
+	// credentials.SelectProvider for the full mode-inference matrix.
 	credProvider, err := stscreds.SelectProvider(cfg.APIEndpoint, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to select AWS credentials provider: %w", err)
@@ -191,7 +190,7 @@ func NewProducer(cfg types.Config) (*Producer, error) {
 func resolveKMSKeyID(ctx context.Context, client *ssm.Client, customerID string) (string, error) {
 	keyID, err := getSSMParameterValue(ctx, client, ssmParamCandidates(customerID, "kms_key_id"))
 	if err != nil {
-		return "", fmt.Errorf("KMS key not found, uploads will fail until one is configured: %w", err)
+		return "", fmt.Errorf("encryption key not found, uploads will fail until one is configured: %w", err)
 	}
 
 	return keyID, nil
@@ -272,15 +271,15 @@ func (p *Producer) compressData(data []byte, level int) ([]byte, error) {
 	var buf bytes.Buffer
 	gzWriter, err := gzip.NewWriterLevel(&buf, level)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create gzip writer: %w", err)
+		return nil, fmt.Errorf("failed to create compression writer: %w", err)
 	}
 
 	if _, err := gzWriter.Write(data); err != nil {
-		return nil, fmt.Errorf("failed to write to gzip: %w", err)
+		return nil, fmt.Errorf("failed to write compressed data: %w", err)
 	}
 
 	if err := gzWriter.Close(); err != nil {
-		return nil, fmt.Errorf("failed to close gzip writer: %w", err)
+		return nil, fmt.Errorf("failed to close compression writer: %w", err)
 	}
 
 	return buf.Bytes(), nil
@@ -294,11 +293,11 @@ func (p *Producer) compressData(data []byte, level int) ([]byte, error) {
 // 4. Return: [key_length][encrypted_key][iv][tag][encrypted_data]
 func (p *Producer) encryptData(ctx context.Context, data []byte) ([]byte, error) {
 	if p.KMSKeyID == "" {
-		return nil, fmt.Errorf("KMS key not configured, cannot encrypt data")
+		return nil, fmt.Errorf("encryption key not configured for this account, cannot encrypt data")
 	}
 
 	if p.kmsClient == nil {
-		return nil, errors.New("KMS client is not configured; cannot encrypt data")
+		return nil, errors.New("encryption is not configured; cannot encrypt data")
 	}
 
 	// Generate random data key and IV.
@@ -338,7 +337,7 @@ func (p *Producer) encryptData(ctx context.Context, data []byte) ([]byte, error)
 		Plaintext: dataKey,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("KMS encryption failed: %w", err)
+		return nil, fmt.Errorf("encryption failed: %w", err)
 	}
 
 	// Package: [4 bytes: key length][encrypted key][16 bytes: IV][16 bytes: tag][encrypted data].
@@ -582,7 +581,7 @@ func (p *Producer) processFile(ctx context.Context, filePath string, opts Upload
 	}
 
 	// Step 1: Compress FIRST
-	fmt.Printf("📦 Compressing %d bytes with gzip (level %d)...\n", len(data), opts.CompressionLevel)
+	fmt.Printf("📦 Compressing %d bytes (level %d)...\n", len(data), opts.CompressionLevel)
 
 	compressed, err := p.compressData(data, opts.CompressionLevel)
 	if err != nil {
@@ -594,7 +593,7 @@ func (p *Producer) processFile(ctx context.Context, filePath string, opts Upload
 	fmt.Printf("Compressed: %d bytes (%.1f%% reduction)\n", compressedSize, compressionRatio)
 
 	// Step 2: Encrypt SECOND
-	fmt.Printf("🔒 Encrypting %d bytes with KMS key...\n", compressedSize)
+	fmt.Printf("🔒 Encrypting %d bytes...\n", compressedSize)
 
 	encrypted, err := p.encryptData(ctx, compressed)
 	if err != nil {
@@ -640,7 +639,7 @@ func (p *Producer) validateUploadOptions(opts UploadOptions) error {
 	}
 
 	if p.KMSKeyID == "" {
-		return errors.New("encryption requested but KMS key not found")
+		return errors.New("encryption requested but no encryption key configured for this account")
 	}
 
 	if err := rejectDisabledFlags("UploadOptions.Metadata", opts.Metadata); err != nil {
@@ -747,7 +746,7 @@ func (p *Producer) uploadToPresignedURL(ctx context.Context, uploadURL string, d
 	return nil
 }
 
-// UploadDataset uploads a dataset, always gzip-compressed and then encrypted.
+// UploadDataset uploads a dataset, always compressed and then encrypted.
 // FLOW (process-before-POST, still catalog-record-before-S3-upload):
 // 1. Process file (compress + encrypt) — no upload yet, so the real sizes
 //    are known.
@@ -759,7 +758,7 @@ func (p *Producer) uploadToPresignedURL(ctx context.Context, uploadURL string, d
 // Step 2 still happens before any bytes reach S3, so the race the original
 // POST-first refactor closed (an S3 event firing before the catalog record
 // exists) stays closed. A refused POST still means zero PUTs — step 1 has no
-// side effect beyond one local compress and one KMS Encrypt call.
+// side effect beyond one local compress-and-encrypt pass.
 //
 // NOTE: Use NewUploadOptions() to get sane defaults.
 func (p *Producer) UploadDataset(ctx context.Context, filePath string, opts UploadOptions) (*types.Dataset, error) {
@@ -1068,8 +1067,8 @@ var deprecationWriter io.Writer = os.Stderr
 var warnedApproveDatasetID atomic.Bool
 
 // ApproveSubscriptionRequest approves a subscription request from a consumer.
-// This creates the necessary resources (SQS queue, SNS subscription, KMS grants)
-// for the consumer to access the producer's datasets.
+// This provisions the resources the consumer needs to receive upload
+// notifications and access the producer's datasets.
 //
 // Parameters:
 //   - requestID: The subscription request ID to approve.

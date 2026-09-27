@@ -231,17 +231,17 @@ func TestUploadDatasetValidation(t *testing.T) {
 		}
 	})
 
-	t.Run("KMS key required for encryption", func(t *testing.T) {
+	t.Run("encryption key required for encryption", func(t *testing.T) {
 		opts := NewUploadOptions("test-dataset")
 		opts.Encrypt = true
 		// p.KMSKeyID is empty
 
 		_, err := p.UploadDataset(context.Background(), testFile, opts)
 		if err == nil {
-			t.Error("expected error when KMS key is missing")
+			t.Error("expected error when the encryption key is missing")
 		}
-		if !strings.Contains(err.Error(), "KMS key not found") {
-			t.Errorf("expected 'KMS key not found', got: %v", err)
+		if !strings.Contains(err.Error(), "no encryption key configured") {
+			t.Errorf("expected 'no encryption key configured', got: %v", err)
 		}
 	})
 }

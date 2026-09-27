@@ -90,7 +90,7 @@ const (
 // A download never passes such an object through: it is an error.
 var (
 	errNotEncrypted  = errors.New("object is not in the encrypted format every upload produces; refusing to return it unencrypted")
-	errNotCompressed = errors.New("object is not gzip-compressed; refusing to return it uncompressed")
+	errNotCompressed = errors.New("object is not compressed; refusing to return it uncompressed")
 )
 
 // maxWrappedKeyLen bounds the wrapped-data-key length an object's header may
@@ -329,8 +329,7 @@ func NewConsumer(cfg types.Config) (*Consumer, error) {
 	// Select the AWS credentials provider: "static" (default, byte-identical
 	// to the pre-STS behavior) or "sts" (auto-refreshing broker-issued
 	// session credentials, opt-in via cfg.CredentialMode). See
-	// credentials.SelectProvider and STS_C0_INVENTORY.md for the full
-	// mode-inference matrix.
+	// credentials.SelectProvider for the full mode-inference matrix.
 	credProvider, err := stscreds.SelectProvider(cfg.APIEndpoint, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to select AWS credentials provider: %w", err)
@@ -644,7 +643,7 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 // encrypted, or not compressed, is an error, never a pass-through. On failure
 // it reports the pipeline phase that failed, for the outcome callback.
 func (c *Consumer) decryptAndDecompress(ctx context.Context, data []byte) ([]byte, ErrorCategory, error) {
-	fmt.Printf("Decrypting %d bytes with KMS...\n", len(data))
+	fmt.Printf("Decrypting %d bytes...\n", len(data))
 	decrypted, err := c.decryptData(ctx, data)
 	if err != nil {
 		return nil, ErrorCategoryKMSDecrypt, fmt.Errorf("decryption failed: %w", err)
@@ -717,7 +716,7 @@ func sanitizeErrorMessage(msg string) string {
 // errNotEncrypted instead of being passed through.
 func (c *Consumer) decryptData(ctx context.Context, data []byte) ([]byte, error) {
 	if c.kmsClient == nil {
-		return nil, errors.New("KMS client is not configured; cannot decrypt")
+		return nil, errors.New("encryption is not configured; cannot decrypt")
 	}
 
 	const ivLen, tagLen = 16, 16
@@ -741,7 +740,7 @@ func (c *Consumer) decryptData(ctx context.Context, data []byte) ([]byte, error)
 		CiphertextBlob: encryptedKey,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("KMS decrypt failed: %w", err)
+		return nil, fmt.Errorf("decryption failed: %w", err)
 	}
 
 	// Decrypt data with AES-256-GCM.
@@ -763,7 +762,7 @@ func (c *Consumer) decryptData(ctx context.Context, data []byte) ([]byte, error)
 
 	plaintext, err := aesGCM.Open(nil, iv, ciphertext, nil)
 	if err != nil {
-		return nil, fmt.Errorf("AES-GCM decrypt failed: %w", err)
+		return nil, fmt.Errorf("decryption failed: %w", err)
 	}
 
 	return plaintext, nil
@@ -1020,9 +1019,9 @@ func (c *Consumer) makeAPIRequest(ctx context.Context, method, path string, body
 
 // PollNotifications polls the per-consumer SQS queue for dataset upload notifications.
 //
-// IMPORTANT: This uses a DEDICATED queue for this consumer. SNS filter policies
-// ensure only relevant notifications reach this queue. You can optionally filter
-// by subscription IDs for advanced use cases.
+// IMPORTANT: This uses a DEDICATED queue for this consumer, so only
+// notifications relevant to this consumer are delivered here. You can
+// optionally filter by subscription IDs for advanced use cases.
 //
 // Messages are automatically acknowledged (deleted) by default after retrieval.
 // This prevents duplicate processing and simplifies the developer experience.
@@ -1122,7 +1121,7 @@ func (c *Consumer) PollNotifications(ctx context.Context, opts PollNotifications
 		if snsMessage, hasSNSWrapper := parsedBody["Message"].(string); hasSNSWrapper {
 			// SNS-wrapped format: { "Type": "Notification", "Message": "{...}", ... }
 			if err := json.Unmarshal([]byte(snsMessage), &notificationData); err != nil {
-				fmt.Printf("Warning: Failed to parse notification payload from SNS wrapper: %v\n", err)
+				fmt.Printf("Warning: Failed to parse notification payload: %v\n", err)
 				continue
 			}
 		} else if _, hasEventType := parsedBody["event_type"]; hasEventType {
