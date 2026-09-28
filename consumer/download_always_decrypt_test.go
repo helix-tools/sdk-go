@@ -302,9 +302,15 @@ func TestDownloadDataset_KeyServiceFailuresAreErrors(t *testing.T) {
 			"decryption failed",
 		},
 		{
+			// A wrong-size key fails inside aes.NewCipher — the raw stdlib
+			// text ("crypto/aes: invalid key size 5") is never customer-
+			// visible; decryptData wraps every failure branch with the same
+			// clean "decryption failed" message (see
+			// TestDecryptData_WrongKeySizeCauseNeverLeaksIntoMessage for the
+			// cause-reachability half of this contract).
 			"KMS returns a key of the wrong size",
 			&objectTransport{record: recordFlagsFalse, object: encryptedObject([]byte("rows\n")), kmsKey: []byte("short")},
-			"invalid key size",
+			"decryption failed",
 		},
 		{
 			"KMS returns a different valid key",
