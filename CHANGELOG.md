@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-09-28 (v2.17.1)
+
+### Fixed
+- Patch: upstream errors now carry a clean message with the cause attached;
+  published package no longer includes internal references.
+
 ## 2026-09-26 (v2.17.0)
 
 ### Highlights

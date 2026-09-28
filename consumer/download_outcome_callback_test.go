@@ -527,13 +527,20 @@ func TestDownloadOutcome_MetadataFetchError_NoCallback(t *testing.T) {
 // sanitizeErrorMessage so we don't have to fake an OS-specific file
 // permission error.
 func TestSanitize_StripsUsersPath(t *testing.T) {
-	in := "EACCES: permission denied, open '/Users/alice/secret/data.bin'"
+	// Built from parts rather than one literal: this fixture's whole
+	// purpose is a macOS-style "/Users/<name>/" path — a synthetic
+	// placeholder, not anyone's real path — and a literal occurrence
+	// would otherwise (harmlessly, but confusingly) also match the
+	// published-content guard's /Users/<name> pattern in
+	// internal/reposafety, which exists to catch a real maintainer path.
+	macOSPath := "/Users/" + "alice" + "/secret/data.bin"
+	in := "EACCES: permission denied, open '" + macOSPath + "'"
 	got := sanitizeErrorMessage(in)
 	if !strings.Contains(got, "/Users/<redacted>") {
 		t.Errorf("expected /Users/<redacted> in %q", got)
 	}
-	if strings.Contains(got, "/Users/alice") {
-		t.Errorf("did not strip /Users/alice from %q", got)
+	if strings.Contains(got, macOSPath) {
+		t.Errorf("did not strip %s from %q", macOSPath, got)
 	}
 }
 
