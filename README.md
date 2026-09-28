@@ -201,6 +201,12 @@ always exposed (`ID`, `Name`, `Metadata.CompressionEnabled`,
 row `ListDatasets` returns. `ID` is populated from the API's `id` key, so it can
 be passed straight to `GetDataset` or `Producer.UpdateDataset`.
 
+### Listing subscription requests
+
+`ListSubscriptionRequests` (producer and consumer, plus the consumer's
+`ListMySubscriptionRequests` alias) follows every page, returning every
+matching request rather than just the first page.
+
 ### Polling options
 
 `PollNotificationsOptions` accepts `MaxMessages` (1-10), `WaitTimeSeconds`
