@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/helix-tools/sdk-go/v2/types"
@@ -39,14 +40,17 @@ const twoRequestsBody = `{
 // end-to-end against an httptest server. It pins:
 //   - the method is PUBLIC under the canonical name (compile-time: it is
 //     called here from outside the function body),
-//   - it GETs /v1/subscription-requests with no status filter,
+//   - it GETs /v1/subscription-requests, paginated (page=1&limit=100), with
+//     no status filter,
 //   - it returns the unwrapped []SubscriptionRequest slice.
 func TestListSubscriptionRequests_Parity(t *testing.T) {
 	var gotPath string
 	var gotMethod string
+	var gotQuery url.Values
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotMethod = r.Method
+		gotQuery = r.URL.Query()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(twoRequestsBody))
@@ -65,6 +69,15 @@ func TestListSubscriptionRequests_Parity(t *testing.T) {
 	if gotPath != "/v1/subscription-requests" {
 		t.Errorf("expected path /v1/subscription-requests, got %q", gotPath)
 	}
+	if gotQuery.Get("page") != "1" {
+		t.Errorf("expected page=1, got %q", gotQuery.Get("page"))
+	}
+	if gotQuery.Get("limit") != "100" {
+		t.Errorf("expected limit=100, got %q", gotQuery.Get("limit"))
+	}
+	if gotQuery.Has("status") {
+		t.Errorf("expected no status key for an empty filter, got %q", gotQuery.Get("status"))
+	}
 	if len(reqs) != 2 {
 		t.Fatalf("expected 2 requests, got %d", len(reqs))
 	}
@@ -74,11 +87,11 @@ func TestListSubscriptionRequests_Parity(t *testing.T) {
 }
 
 // TestListSubscriptionRequests_StatusFilter verifies the status query param
-// is appended and URL-escaped.
+// is appended and URL-escaped, alongside the page/limit pagination params.
 func TestListSubscriptionRequests_StatusFilter(t *testing.T) {
-	var gotQuery string
+	var gotQuery url.Values
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotQuery = r.URL.Query().Get("status")
+		gotQuery = r.URL.Query()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"requests": [], "count": 0}`))
@@ -90,17 +103,26 @@ func TestListSubscriptionRequests_StatusFilter(t *testing.T) {
 	if _, err := c.ListSubscriptionRequests(context.Background(), types.SubscriptionRequestStatusPending); err != nil {
 		t.Fatalf("ListSubscriptionRequests: %v", err)
 	}
-	if gotQuery != "pending" {
-		t.Errorf("expected status=pending query, got %q", gotQuery)
+	if gotQuery.Get("status") != "pending" {
+		t.Errorf("expected status=pending query, got %q", gotQuery.Get("status"))
+	}
+	if gotQuery.Get("page") != "1" {
+		t.Errorf("expected page=1, got %q", gotQuery.Get("page"))
+	}
+	if gotQuery.Get("limit") != "100" {
+		t.Errorf("expected limit=100, got %q", gotQuery.Get("limit"))
 	}
 }
 
 // TestListMySubscriptionRequests_BackwardCompat asserts the deprecated alias
-// still works and delegates to the canonical method (same path, same result).
+// still works and delegates to the canonical method (same path, same paged
+// query, same result).
 func TestListMySubscriptionRequests_BackwardCompat(t *testing.T) {
 	var gotPath string
+	var gotQuery url.Values
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
+		gotQuery = r.URL.Query()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(twoRequestsBody))
@@ -115,6 +137,9 @@ func TestListMySubscriptionRequests_BackwardCompat(t *testing.T) {
 	}
 	if gotPath != "/v1/subscription-requests" {
 		t.Errorf("alias hit wrong path %q", gotPath)
+	}
+	if gotQuery.Get("page") != "1" || gotQuery.Get("limit") != "100" {
+		t.Errorf("alias did not send the paged query: page=%q limit=%q", gotQuery.Get("page"), gotQuery.Get("limit"))
 	}
 	if len(reqs) != 2 {
 		t.Fatalf("alias returned %d requests, want 2", len(reqs))

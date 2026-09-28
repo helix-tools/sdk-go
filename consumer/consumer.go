@@ -1370,7 +1370,8 @@ func (c *Consumer) DeleteNotification(ctx context.Context, receiptHandle string)
 // Allows consumers to track the status of their pending, approved, or rejected requests.
 //
 // This is the canonical parity method (see SDK-PARITY-METHODS-SPEC.md). It
-// maps to GET /v1/subscription-requests[?status={status}].
+// maps to GET /v1/subscription-requests[?status={status}], following every
+// page of its paginated response until total_pages is exhausted.
 //
 // Parameters:
 //   - status: Filter by request status. Canonical values: "pending",
@@ -1379,17 +1380,24 @@ func (c *Consumer) DeleteNotification(ctx context.Context, receiptHandle string)
 //
 // Returns a slice of subscription requests matching the filter.
 func (c *Consumer) ListSubscriptionRequests(ctx context.Context, status string) ([]types.SubscriptionRequest, error) {
-	path := "/v1/subscription-requests"
-	if status != "" {
-		path = fmt.Sprintf("/v1/subscription-requests?status=%s", url.QueryEscape(status))
-	}
+	return paginateAll(func(page int) ([]types.SubscriptionRequest, *int, int, error) {
+		path := fmt.Sprintf("/v1/subscription-requests?page=%d&limit=100", page)
+		if status != "" {
+			path += "&status=" + url.QueryEscape(status)
+		}
 
-	var response types.SubscriptionRequestsResponse
-	if err := c.makeAPIRequest(ctx, http.MethodGet, path, nil, &response); err != nil {
-		return nil, err
-	}
+		var response struct {
+			Requests   []types.SubscriptionRequest `json:"requests"`
+			Page       *int                        `json:"page"`
+			TotalPages int                         `json:"total_pages"`
+		}
 
-	return response.Requests, nil
+		if err := c.makeAPIRequest(ctx, http.MethodGet, path, nil, &response); err != nil {
+			return nil, nil, 0, err
+		}
+
+		return response.Requests, response.Page, response.TotalPages, nil
+	})
 }
 
 // ListMySubscriptionRequests is a backward-compatibility alias for

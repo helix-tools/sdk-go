@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- `Producer.ListSubscriptionRequests` and `Consumer.ListSubscriptionRequests`
+  (and its `ListMySubscriptionRequests` alias) now follow every page of their
+  paginated response until exhausted, so a producer or consumer with more
+  than one page of subscription requests gets all of them instead of just
+  the first page. Against an older API build that still returns the
+  single-page legacy response, behavior is unchanged: one request, every
+  row returned.
+
 ## 2026-09-28 (v2.17.1)
 
 ### Fixed

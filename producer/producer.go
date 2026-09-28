@@ -1062,7 +1062,9 @@ func (p *Producer) RevokeSubscription(ctx context.Context, subscriptionID string
 	return nil
 }
 
-// ListSubscriptionRequests lists incoming subscription requests for this producer.
+// ListSubscriptionRequests lists incoming subscription requests for this
+// producer, following every page of GET /v1/producers/subscription-requests'
+// paginated response until total_pages is exhausted.
 // Returns requests that match the specified status filter.
 //
 // Parameters:
@@ -1076,14 +1078,21 @@ func (p *Producer) ListSubscriptionRequests(ctx context.Context, status string) 
 		status = "pending"
 	}
 
-	path := fmt.Sprintf("/v1/producers/subscription-requests?status=%s", url.QueryEscape(status))
+	return paginateAll(func(page int) ([]types.SubscriptionRequest, *int, int, error) {
+		path := fmt.Sprintf("/v1/producers/subscription-requests?status=%s&page=%d&limit=100", url.QueryEscape(status), page)
 
-	var response types.SubscriptionRequestsResponse
-	if err := p.makeAPIRequest(ctx, http.MethodGet, path, nil, &response); err != nil {
-		return nil, err
-	}
+		var response struct {
+			Requests   []types.SubscriptionRequest `json:"requests"`
+			Page       *int                        `json:"page"`
+			TotalPages int                         `json:"total_pages"`
+		}
 
-	return response.Requests, nil
+		if err := p.makeAPIRequest(ctx, http.MethodGet, path, nil, &response); err != nil {
+			return nil, nil, 0, err
+		}
+
+		return response.Requests, response.Page, response.TotalPages, nil
+	})
 }
 
 // deprecationWriter receives one-time deprecation warnings. It is a variable
