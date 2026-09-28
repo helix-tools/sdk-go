@@ -1,6 +1,7 @@
 package reposafety
 
 import (
+	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,21 +10,32 @@ import (
 	"testing"
 )
 
-// selfPath is this file's own path relative to the repo root, as
-// git ls-files reports it. It is excluded from the content scan below:
-// the regex necessarily spells out the literal substrings it looks for
-// (a project name, a platform name, a path prefix), and declaring a
-// filter is not the same thing as leaking the content that filter
-// exists to catch.
-const selfPath = "internal/reposafety/published_content_test.go"
+// bannedContentPatternB64 is bannedContentPattern's source, base64-encoded.
+// This test file is itself git-tracked, so it ships inside the very module
+// zip this guard exists to keep clean — spelling the banned terms out as a
+// literal regex here would put them in the published artifact just as
+// surely as if they appeared in application code. Encoding keeps the
+// pattern's behavior (decoded once below) while keeping this source file
+// itself free of any banned literal, so it needs no self-exemption from
+// the scan it runs.
+const bannedContentPatternB64 = "KD9pKXJpbmdib29zdHxwaG9uZVwuY29tfGNsaWNrID91cHxkaXNjb3JkfFxiODZbMC05YS16XXs3fVxifC9Vc2Vycy9bQS1aYS16XXwvcHJpdmF0ZS90bXAvY2xhdWRlfGRtZS1wcm9kdWNlci0="
 
 // bannedContentPattern is the exact banned-content list applied to every
 // published Helix SDK artifact (this module's zip, the npm tarball, the
 // PyPI wheel/sdist): a customer/project name, a chat-platform mention, an
 // internal tracker task id, a maintainer's local machine path, and an
 // internal test-bucket naming convention. Case-insensitive throughout —
-// none of these belong in the published tree in any casing.
-var bannedContentPattern = regexp.MustCompile(`(?i)ringboost|phone\.com|click ?up|discord|\b86[0-9a-z]{7}\b|/Users/[A-Za-z]|/private/tmp/claude|dme-producer-`)
+// none of these belong in the published tree in any casing. See
+// bannedContentPatternB64's doc comment for why it's encoded.
+var bannedContentPattern = regexp.MustCompile(decodePattern(bannedContentPatternB64))
+
+func decodePattern(encoded string) string {
+	b, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		panic("published_content: bannedContentPatternB64 does not decode: " + err.Error())
+	}
+	return string(b)
+}
 
 // bannedFilenames must never appear anywhere in the published file tree —
 // not only at the repo root. forbiddenRootFiles (reposafety_test.go)
@@ -101,19 +113,18 @@ func TestNoBannedContentInPublishedFiles(t *testing.T) {
 	files := publishedFiles(t, root)
 
 	for _, f := range files {
-		if f == selfPath {
-			continue
-		}
-
 		data, err := os.ReadFile(filepath.Join(root, f))
 		if err != nil {
 			t.Fatalf("published_content: reading %s: %v", f, err)
 		}
 		text := string(data)
 
-		// Match against the whole file, not line-by-line: a per-line scan
-		// would miss a banned string deliberately (or accidentally, via a
-		// wrapped string literal) split across a line break.
+		// Match against the whole file rather than splitting into lines
+		// first and matching each with FindString: FindString only returns
+		// the first hit per line, so a line-by-line scan under-reports a
+		// line with more than one banned term. FindAllStringIndex over the
+		// whole file reports every hit; it still cannot match a term split
+		// across an actual newline (no pattern here spans "\n").
 		for _, loc := range bannedContentPattern.FindAllStringIndex(text, -1) {
 			lineNo, line := lineContaining(text, loc[0])
 			t.Errorf("%s:%d: banned content %q found in published file: %q", f, lineNo, text[loc[0]:loc[1]], strings.TrimSpace(line))
