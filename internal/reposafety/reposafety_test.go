@@ -26,6 +26,7 @@ var forbiddenRootFiles = []string{
 	"STS_C0_INVENTORY.md",
 	"PLAN.md",
 	"sdk-parity-analysis.json",
+	"AGENTS.md",
 }
 
 // repoRoot locates the module root by walking up from this file's directory

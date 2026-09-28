@@ -33,7 +33,7 @@ func TestCreateDatasetRecord_IncludesS3BucketName(t *testing.T) {
 	}))
 	defer server.Close()
 
-	p := newTestProducer(server.URL) // BucketName = "dme-producer-test"
+	p := newTestProducer(server.URL) // BucketName = "example-bucket-9"
 
 	tmpDir := t.TempDir()
 	dataFile := filepath.Join(tmpDir, "data.ndjson")
@@ -54,8 +54,8 @@ func TestCreateDatasetRecord_IncludesS3BucketName(t *testing.T) {
 	if !ok {
 		t.Fatalf("create-dataset body is MISSING s3_bucket_name; keys=%v", keysOf(gotBody))
 	}
-	if got != "dme-producer-test" {
-		t.Fatalf("expected s3_bucket_name=%q, got %q", "dme-producer-test", got)
+	if got != "example-bucket-9" {
+		t.Fatalf("expected s3_bucket_name=%q, got %q", "example-bucket-9", got)
 	}
 
 	// access_tier is likewise required by the create validator (free/premium/enterprise).

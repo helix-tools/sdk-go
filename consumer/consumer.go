@@ -55,7 +55,7 @@ const emptyPayloadHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca49599
 // best-effort default for those dev-build cases; the wire-sent
 // sdk_version value for a normally-built consumer binary instead
 // reflects the actual resolved module version, which cannot drift.
-const SDKVersion = "2.17.0"
+const SDKVersion = "2.17.1"
 
 // SDKLanguage identifies this SDK's language in download outcome callbacks
 // (matches the dataset_download_event JSON Schema's sdk_language field).
@@ -903,7 +903,7 @@ func (c *Consumer) CreateSubscriptionRequest(ctx context.Context, input types.Cr
 	}
 
 	// Default tier to "free" — the only canonical tier accepted by the API
-	// (sub-1 of Producer-Invite Epic 86e12p8ah collapsed all paid tiers).
+	// (paid tiers were collapsed upstream).
 	if payload.Tier == "" {
 		payload.Tier = "free"
 	}

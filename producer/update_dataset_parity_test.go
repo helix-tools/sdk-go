@@ -24,7 +24,7 @@ func newTestProducer(endpoint string) *Producer {
 	}
 	return &Producer{
 		APIEndpoint: endpoint,
-		BucketName:  "dme-producer-test",
+		BucketName:  "example-bucket-9",
 		CustomerID:  "test-producer",
 		Region:      "us-east-1",
 		awsConfig:   awsCfg,

@@ -25,7 +25,7 @@ import (
 func newTestProducerWithCredentials(endpoint string, provider aws.CredentialsProvider) *Producer {
 	return &Producer{
 		APIEndpoint: endpoint,
-		BucketName:  "dme-producer-test",
+		BucketName:  "example-bucket-9",
 		CustomerID:  "test-producer",
 		Region:      "us-east-1",
 		awsConfig:   aws.Config{Region: "us-east-1", Credentials: provider},
