@@ -109,11 +109,26 @@ func TestNoBannedContentInPublishedFiles(t *testing.T) {
 		if err != nil {
 			t.Fatalf("published_content: reading %s: %v", f, err)
 		}
+		text := string(data)
 
-		for i, line := range strings.Split(string(data), "\n") {
-			if m := bannedContentPattern.FindString(line); m != "" {
-				t.Errorf("%s:%d: banned content %q found in published file: %q", f, i+1, m, strings.TrimSpace(line))
-			}
+		// Match against the whole file, not line-by-line: a per-line scan
+		// would miss a banned string deliberately (or accidentally, via a
+		// wrapped string literal) split across a line break.
+		for _, loc := range bannedContentPattern.FindAllStringIndex(text, -1) {
+			lineNo, line := lineContaining(text, loc[0])
+			t.Errorf("%s:%d: banned content %q found in published file: %q", f, lineNo, text[loc[0]:loc[1]], strings.TrimSpace(line))
 		}
 	}
+}
+
+// lineContaining returns the 1-indexed line number and the full line text
+// containing byte offset idx within text.
+func lineContaining(text string, idx int) (lineNo int, line string) {
+	lineNo = 1 + strings.Count(text[:idx], "\n")
+	start := strings.LastIndexByte(text[:idx], '\n') + 1
+	end := strings.IndexByte(text[idx:], '\n')
+	if end == -1 {
+		return lineNo, text[start:]
+	}
+	return lineNo, text[start : idx+end]
 }
