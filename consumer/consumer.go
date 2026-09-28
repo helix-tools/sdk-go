@@ -27,6 +27,7 @@ import (
 	"time"
 
 	stscreds "github.com/helix-tools/sdk-go/v2/credentials"
+	"github.com/helix-tools/sdk-go/v2/internal/sdkerr"
 	"github.com/helix-tools/sdk-go/v2/internal/useragent"
 	"github.com/helix-tools/sdk-go/v2/types"
 
@@ -35,6 +36,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go/middleware"
@@ -336,22 +338,15 @@ func NewConsumer(cfg types.Config) (*Consumer, error) {
 	}
 
 	// Load AWS config.
-	awsCfg, err := config.LoadDefaultConfig(context.Background(),
-		config.WithRegion(cfg.Region),
-		config.WithCredentialsProvider(credProvider),
-		config.WithHTTPClient(awsHTTPClient),
-	)
+	awsCfg, err := loadAWSConfig(context.Background(), cfg.Region, credProvider, awsHTTPClient)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load AWS config: %w", err)
+		return nil, err
 	}
 
 	// Validate credentials.
 	stsClient := sts.NewFromConfig(awsCfg)
-	if _, err = stsClient.GetCallerIdentity(
-		context.Background(),
-		&sts.GetCallerIdentityInput{},
-	); err != nil {
-		return nil, fmt.Errorf("invalid AWS credentials: %w", err)
+	if err := validateCredentials(context.Background(), stsClient); err != nil {
+		return nil, err
 	}
 
 	return &Consumer{
@@ -365,6 +360,33 @@ func NewConsumer(cfg types.Config) (*Consumer, error) {
 		sqsClient:  sqs.NewFromConfig(awsCfg),
 		ssmClient:  ssm.NewFromConfig(awsCfg),
 	}, nil
+}
+
+// loadAWSConfig wraps config.LoadDefaultConfig, an AWS SDK call: on failure
+// the customer sees a clean, capability-language message while the raw AWS
+// error (which can carry local shared-config-file paths or profile detail)
+// stays reachable via errors.Unwrap/errors.As for debugging.
+func loadAWSConfig(ctx context.Context, region string, credProvider aws.CredentialsProvider, httpClient aws.HTTPClient) (aws.Config, error) {
+	awsCfg, err := config.LoadDefaultConfig(ctx,
+		config.WithRegion(region),
+		config.WithCredentialsProvider(credProvider),
+		config.WithHTTPClient(httpClient),
+	)
+	if err != nil {
+		return aws.Config{}, sdkerr.Wrap("failed to load AWS config", err)
+	}
+	return awsCfg, nil
+}
+
+// validateCredentials calls AWS STS GetCallerIdentity, an AWS SDK call, to
+// fail fast on bad credentials. On failure the customer sees a clean message
+// while the raw STS/IAM error (which can carry the account ID and an IAM
+// ARN) stays reachable via errors.Unwrap/errors.As for debugging.
+func validateCredentials(ctx context.Context, stsClient *sts.Client) error {
+	if _, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); err != nil {
+		return sdkerr.Wrap("invalid AWS credentials", err)
+	}
+	return nil
 }
 
 // GetDataset retrieves metadata for a specific dataset.
@@ -548,7 +570,7 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		errorMessage = err.Error()
-		return fmt.Errorf("failed to download: %w", err)
+		return sdkerr.Wrap("failed to download", err)
 	}
 	defer resp.Body.Close()
 
@@ -646,14 +668,17 @@ func (c *Consumer) decryptAndDecompress(ctx context.Context, data []byte) ([]byt
 	fmt.Printf("Decrypting %d bytes...\n", len(data))
 	decrypted, err := c.decryptData(ctx, data)
 	if err != nil {
-		return nil, ErrorCategoryKMSDecrypt, fmt.Errorf("decryption failed: %w", err)
+		// decryptData's own errors are already clean (an authored message
+		// with the cause attached, or a bare sentinel) — re-wrapping here
+		// would only add a redundant prefix, not any new information.
+		return nil, ErrorCategoryKMSDecrypt, err
 	}
 	fmt.Printf("Decrypted to %d bytes\n", len(decrypted))
 
 	fmt.Printf("Decompressing %d bytes...\n", len(decrypted))
 	decompressed, err := c.decompressData(decrypted)
 	if err != nil {
-		return nil, ErrorCategoryDecompress, fmt.Errorf("decompression failed: %w", err)
+		return nil, ErrorCategoryDecompress, err
 	}
 	decompressedGB := float64(len(decompressed)) / (1024 * 1024 * 1024)
 	if decompressedGB > 1 {
@@ -740,7 +765,7 @@ func (c *Consumer) decryptData(ctx context.Context, data []byte) ([]byte, error)
 		CiphertextBlob: encryptedKey,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("decryption failed: %w", err)
+		return nil, sdkerr.Wrap("decryption failed", err)
 	}
 
 	// Decrypt data with AES-256-GCM.
@@ -773,12 +798,16 @@ func (c *Consumer) decryptData(ctx context.Context, data []byte) ([]byte, error)
 func (c *Consumer) decompressData(data []byte) ([]byte, error) {
 	gr, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", errNotCompressed, err)
+		return nil, sdkerr.WrapSentinel(errNotCompressed, err)
 	}
 
 	defer gr.Close()
 
-	return io.ReadAll(gr)
+	out, err := io.ReadAll(gr)
+	if err != nil {
+		return nil, sdkerr.Wrap("decompression failed", err)
+	}
+	return out, nil
 }
 
 // ListDatasets lists all available datasets.
@@ -978,7 +1007,7 @@ func (c *Consumer) makeAPIRequest(ctx context.Context, method, path string, body
 	// Sign request with AWS SigV4
 	creds, err := c.awsConfig.Credentials.Retrieve(ctx)
 	if err != nil {
-		return err
+		return sdkerr.Wrap("failed to retrieve credentials", err)
 	}
 
 	// Calculate payload hash for SigV4
@@ -992,12 +1021,12 @@ func (c *Consumer) makeAPIRequest(ctx context.Context, method, path string, body
 
 	signer := v4.NewSigner()
 	if err := signer.SignHTTP(ctx, creds, req, payloadHash, "execute-api", c.Region, time.Now()); err != nil {
-		return err
+		return sdkerr.Wrap("failed to sign request", err)
 	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return err
+		return sdkerr.Wrap("request failed", err)
 	}
 
 	defer resp.Body.Close()
@@ -1084,7 +1113,7 @@ func (c *Consumer) PollNotifications(ctx context.Context, opts PollNotifications
 		WaitTimeSeconds:       opts.WaitTimeSeconds,
 	}, optFns...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to poll SQS queue: %w", err)
+		return nil, sdkerr.Wrap("failed to poll SQS queue", err)
 	}
 
 	var notifications []Notification
@@ -1311,7 +1340,7 @@ func (c *Consumer) DeleteNotification(ctx context.Context, receiptHandle string)
 		QueueUrl:      aws.String(queueURL),
 		ReceiptHandle: aws.String(receiptHandle),
 	}); err != nil {
-		return fmt.Errorf("failed to delete notification: %w", err)
+		return sdkerr.Wrap("failed to delete notification", err)
 	}
 
 	return nil
@@ -1411,12 +1440,14 @@ func (c *Consumer) ClearQueue(ctx context.Context) error {
 	if _, err := c.sqsClient.PurgeQueue(ctx, &sqs.PurgeQueueInput{
 		QueueUrl: aws.String(queueURL),
 	}); err != nil {
-		// Check for PurgeQueueInProgress error.
-		if strings.Contains(err.Error(), "PurgeQueueInProgress") {
-			return fmt.Errorf("queue purge already in progress. AWS limits PurgeQueue to once every 60 seconds per queue")
+		// Categorize by the typed SQS exception, not by inspecting the raw
+		// upstream error message text.
+		var inProgress *sqstypes.PurgeQueueInProgress
+		if errors.As(err, &inProgress) {
+			return errors.New("queue purge already in progress. AWS limits PurgeQueue to once every 60 seconds per queue")
 		}
 
-		return fmt.Errorf("failed to clear queue: %w", err)
+		return sdkerr.Wrap("failed to clear queue", err)
 	}
 
 	return nil
