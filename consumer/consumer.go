@@ -564,13 +564,20 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 	phase = ErrorCategoryNetworkFetch
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlInfo.DownloadURL, nil)
 	if err != nil {
-		errorMessage = err.Error()
-		return fmt.Errorf("failed to build download request: %w", err)
+		// urlInfo.DownloadURL is a server-issued presigned URL carrying a
+		// SigV4 signature/credential scope in its query string; a malformed
+		// version of it must not reach the caller (or the outcome
+		// callback) via the raw *url.Error http.NewRequestWithContext
+		// returns.
+		wrapped := sdkerr.Wrap("failed to build download request", err)
+		errorMessage = wrapped.Error()
+		return wrapped
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		errorMessage = err.Error()
-		return sdkerr.Wrap("failed to download", err)
+		wrapped := sdkerr.Wrap("failed to download", err)
+		errorMessage = wrapped.Error()
+		return wrapped
 	}
 	defer resp.Body.Close()
 
@@ -600,8 +607,12 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 
 		written, cerr := io.Copy(tempFile, resp.Body)
 		if cerr != nil {
-			errorMessage = cerr.Error()
-			return fmt.Errorf("failed to stream to temp file: %w", cerr)
+			// io.Copy reads from the HTTP response body, so a network-level
+			// failure mid-stream surfaces here exactly as it would from
+			// resp.Body.Read directly.
+			wrapped := sdkerr.Wrap("failed to stream to temp file", cerr)
+			errorMessage = wrapped.Error()
+			return wrapped
 		}
 		if cerr := tempFile.Close(); cerr != nil {
 			errorMessage = cerr.Error()
@@ -635,8 +646,9 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 	// Small-file path: process in memory.
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		errorMessage = err.Error()
-		return fmt.Errorf("failed to read response: %w", err)
+		wrapped := sdkerr.Wrap("failed to read response", err)
+		errorMessage = wrapped.Error()
+		return wrapped
 	}
 
 	fmt.Printf("Downloaded %d bytes\n", len(data))
@@ -768,16 +780,21 @@ func (c *Consumer) decryptData(ctx context.Context, data []byte) ([]byte, error)
 		return nil, sdkerr.Wrap("decryption failed", err)
 	}
 
-	// Decrypt data with AES-256-GCM.
+	// Decrypt data with AES-256-GCM. Every failure branch below uses the
+	// same clean message as the KMS branch above, so decryptData's contract
+	// is uniform: Error() is always exactly "decryption failed" and the
+	// underlying cause (however unlikely — KMS handed back a malformed key
+	// size, tampered ciphertext failing the GCM auth tag, ...) is always
+	// reachable via errors.Unwrap, never bare on the wire to the caller.
 	block, err := aes.NewCipher(decryptOut.Plaintext)
 	if err != nil {
-		return nil, err
+		return nil, sdkerr.Wrap("decryption failed", err)
 	}
 
 	// Use 16-byte nonce (Python uses os.urandom(16) for IV).
 	aesGCM, err := cipher.NewGCMWithNonceSize(block, ivLen)
 	if err != nil {
-		return nil, err
+		return nil, sdkerr.Wrap("decryption failed", err)
 	}
 
 	// GCM expects the auth tag appended to the ciphertext.
@@ -787,7 +804,7 @@ func (c *Consumer) decryptData(ctx context.Context, data []byte) ([]byte, error)
 
 	plaintext, err := aesGCM.Open(nil, iv, ciphertext, nil)
 	if err != nil {
-		return nil, fmt.Errorf("decryption failed: %w", err)
+		return nil, sdkerr.Wrap("decryption failed", err)
 	}
 
 	return plaintext, nil
@@ -1039,7 +1056,10 @@ func (c *Consumer) makeAPIRequest(ctx context.Context, method, path string, body
 
 	if result != nil {
 		if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
-			return err
+			// json.Decoder does not wrap a Read error from resp.Body — a
+			// connection reset mid-response surfaces here exactly as it
+			// would from resp.Body.Read directly.
+			return sdkerr.Wrap("failed to decode response", err)
 		}
 	}
 
@@ -1444,7 +1464,7 @@ func (c *Consumer) ClearQueue(ctx context.Context) error {
 		// upstream error message text.
 		var inProgress *sqstypes.PurgeQueueInProgress
 		if errors.As(err, &inProgress) {
-			return errors.New("queue purge already in progress. AWS limits PurgeQueue to once every 60 seconds per queue")
+			return sdkerr.Wrap("queue purge already in progress. AWS limits PurgeQueue to once every 60 seconds per queue", err)
 		}
 
 		return sdkerr.Wrap("failed to clear queue", err)

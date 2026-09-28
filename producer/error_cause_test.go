@@ -238,3 +238,52 @@ type arnTransport struct{}
 func (arnTransport) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, fmt.Errorf("dial tcp: connection refused talking to a host serving %s", arnAccountService)
 }
+
+// TestMakeAPIRequest_DecodeFailureCauseNeverLeaksIntoMessage covers
+// json.NewDecoder(resp.Body).Decode: json.Decoder does not wrap a Read
+// error, so a connection reset mid-response surfaces exactly as it would
+// from resp.Body.Read directly.
+func TestMakeAPIRequest_DecodeFailureCauseNeverLeaksIntoMessage(t *testing.T) {
+	p := newTestProducer("https://api.test")
+	p.httpClient = &http.Client{Transport: decodeFailsTransport{}}
+
+	var out struct{ ID string }
+	err := p.makeAPIRequest(context.Background(), http.MethodGet, "/v1/datasets/ds-1", nil, &out)
+
+	assertClean(t, err, "failed to decode response")
+	assertCauseReachable(t, err, arnAccountService)
+}
+
+type decodeFailsTransport struct{}
+
+func (decodeFailsTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       &failingReadCloser{failMsg: "connection reset touching " + arnAccountService},
+		Request:    req,
+	}, nil
+}
+
+type failingReadCloser struct{ failMsg string }
+
+func (f *failingReadCloser) Read([]byte) (int, error) { return 0, errors.New(f.failMsg) }
+func (f *failingReadCloser) Close() error              { return nil }
+
+// ----------------------------------------------------------------------------
+// uploadToPresignedURL's request-build failure (a malformed presigned URL).
+// ----------------------------------------------------------------------------
+
+// TestUploadToPresignedURL_RequestBuildFailureCauseNeverLeaksIntoMessage
+// covers http.NewRequestWithContext failing on a malformed presigned URL —
+// the URL itself carries a SigV4 signature/credential scope, so the raw
+// *url.Error must never reach the caller.
+func TestUploadToPresignedURL_RequestBuildFailureCauseNeverLeaksIntoMessage(t *testing.T) {
+	p := newTestProducer("https://api.test")
+
+	err := p.uploadToPresignedURL(context.Background(), "https://s3.example.invalid/%zz?X-Amz-Signature="+arnAccountService, []byte("data"))
+
+	assertClean(t, err, "failed to create upload request")
+	assertCauseReachable(t, err, arnAccountService)
+}

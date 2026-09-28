@@ -742,7 +742,11 @@ func (p *Producer) uploadToPresignedURL(ctx context.Context, uploadURL string, d
 
 	req, err := http.NewRequestWithContext(ctx, "PUT", uploadURL, bytes.NewReader(data))
 	if err != nil {
-		return fmt.Errorf("failed to create upload request: %w", err)
+		// uploadURL is a server-issued presigned URL carrying a SigV4
+		// signature/credential scope in its query string; a malformed
+		// version of it must not reach the caller via the raw *url.Error
+		// http.NewRequestWithContext returns.
+		return sdkerr.Wrap("failed to create upload request", err)
 	}
 
 	// Set content type for binary data
@@ -921,7 +925,10 @@ func (p *Producer) makeAPIRequest(ctx context.Context, method, path string, body
 
 	if response != nil {
 		if err := json.NewDecoder(resp.Body).Decode(response); err != nil {
-			return fmt.Errorf("failed to decode response: %w", err)
+			// json.Decoder does not wrap a Read error from resp.Body — a
+			// connection reset mid-response surfaces here exactly as it
+			// would from resp.Body.Read directly.
+			return sdkerr.Wrap("failed to decode response", err)
 		}
 	}
 

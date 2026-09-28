@@ -13,8 +13,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -178,6 +180,153 @@ func jsonResponse(req *http.Request, body string) *http.Response {
 	}
 }
 
+// TestDecryptData_WrongKeySizeCauseNeverLeaksIntoMessage covers the
+// non-KMS decryption branches (aes.NewCipher, cipher.NewGCMWithNonceSize,
+// aesGCM.Open): every one of them must return the SAME clean "decryption
+// failed" message as the KMS branch, with the raw stdlib crypto error (never
+// itself sensitive, but never customer-visible either — decryptData's
+// contract is uniform) reachable via errors.Unwrap.
+func TestDecryptData_WrongKeySizeCauseNeverLeaksIntoMessage(t *testing.T) {
+	// wrongKeySizeTransport answers KMS Decrypt with a 5-byte key — not a
+	// valid AES key size — driving the aes.NewCipher failure branch.
+	c := useFakeKMS(newTestConsumer("https://objects.test"), "", &http.Client{Transport: wrongKeySizeTransport{}})
+
+	_, err := c.decryptData(context.Background(), encryptedObject([]byte("row\n")))
+
+	assertClean(t, err, "decryption failed")
+	assertCauseReachable(t, err, "invalid key size")
+}
+
+type wrongKeySizeTransport struct{}
+
+func (wrongKeySizeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK, Status: "200 OK",
+		Header:  http.Header{"Content-Type": []string{"application/x-amz-json-1.1"}},
+		Body:    ioNopCloser(kmsDecryptBodyFor([]byte("short"))),
+		Request: req,
+	}, nil
+}
+
+// ----------------------------------------------------------------------------
+// DownloadDataset's own HTTP-client-category wrap sites: building the
+// request from a server-issued presigned URL, streaming the response body,
+// and decoding a JSON response — each of these reads from or is built from
+// data that can carry a SigV4-signed URL's account/credential detail.
+// ----------------------------------------------------------------------------
+
+func TestDownloadDataset_RequestBuildFailureCauseNeverLeaksIntoMessage(t *testing.T) {
+	c := newTestConsumer("https://api.test")
+	c.httpClient = &http.Client{Transport: malformedDownloadURLTransport{}}
+
+	err := c.DownloadDataset(context.Background(), "ds-1", t.TempDir()+"/out.ndjson")
+
+	assertClean(t, err, "failed to build download request")
+	assertCauseReachable(t, err, arnAccountService)
+}
+
+type malformedDownloadURLTransport struct{}
+
+func (malformedDownloadURLTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	switch {
+	case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/download"):
+		return jsonResponse(req, `{"download_url":"https://objects.test/%zz?X-Amz-Signature=`+arnAccountService+`"}`), nil
+	default:
+		return jsonResponse(req, `{"_id":"ds-1","name":"n","metadata":{"compression_enabled":false,"encryption_enabled":false}}`), nil
+	}
+}
+
+// TestDownloadDataset_StreamToTempFileCauseNeverLeaksIntoMessage covers the
+// large-file path's io.Copy(tempFile, resp.Body): a network failure mid-
+// stream must not surface raw.
+func TestDownloadDataset_StreamToTempFileCauseNeverLeaksIntoMessage(t *testing.T) {
+	c := newTestConsumer("https://api.test")
+	c.httpClient = &http.Client{Transport: largeObjectStreamFailsTransport{}}
+
+	err := c.DownloadDataset(context.Background(), "ds-1", t.TempDir()+"/out.ndjson")
+
+	assertClean(t, err, "failed to stream to temp file")
+	assertCauseReachable(t, err, arnAccountService)
+}
+
+type largeObjectStreamFailsTransport struct{}
+
+func (largeObjectStreamFailsTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Path == "/object" {
+		return &http.Response{
+			StatusCode:    http.StatusOK,
+			Status:        "200 OK",
+			Header:        make(http.Header),
+			ContentLength: 200 * 1024 * 1024, // force the large-file streaming path
+			Body:          &failingReadCloser{failMsg: "connection reset touching " + arnAccountService},
+			Request:       req,
+		}, nil
+	}
+	switch {
+	case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/download"):
+		return jsonResponse(req, `{"download_url":"https://objects.test/object"}`), nil
+	default:
+		return jsonResponse(req, `{"_id":"ds-1","name":"n","metadata":{"compression_enabled":false,"encryption_enabled":false}}`), nil
+	}
+}
+
+// TestMakeAPIRequest_DecodeFailureCauseNeverLeaksIntoMessage covers
+// json.NewDecoder(resp.Body).Decode: json.Decoder does not wrap a Read
+// error, so a connection reset mid-response surfaces exactly as it would
+// from resp.Body.Read directly.
+func TestMakeAPIRequest_DecodeFailureCauseNeverLeaksIntoMessage(t *testing.T) {
+	c := newTestConsumer("https://api.test")
+	c.httpClient = &http.Client{Transport: decodeFailsTransport{}}
+
+	_, err := c.GetDataset(context.Background(), "ds-1")
+
+	assertClean(t, err, "failed to decode response")
+	assertCauseReachable(t, err, arnAccountService)
+}
+
+type decodeFailsTransport struct{}
+
+func (decodeFailsTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       &failingReadCloser{failMsg: "connection reset touching " + arnAccountService},
+		Request:    req,
+	}, nil
+}
+
+// TestDownloadOutcome_ErrorMessageDoesNotLeakUpstreamCause covers the
+// outcome-callback telemetry channel: it must carry the SAME clean message
+// the caller sees, not the raw upstream text captured before the wrap.
+// (newFakeAPI's s3Err hijacks the connection, producing whatever raw
+// transport text the OS/net package assigns — the test doesn't need to
+// control that text; an EXACT match against the clean authored message is
+// the strongest possible proof nothing raw leaked through, whatever it was.)
+func TestDownloadOutcome_ErrorMessageDoesNotLeakUpstreamCause(t *testing.T) {
+	f := newFakeAPI(t)
+	f.s3Err = true
+	c := newTestConsumer(f.server.URL)
+
+	out := filepath.Join(t.TempDir(), "out.bin")
+	err := c.DownloadDataset(context.Background(), "ds-1", out)
+	if err == nil {
+		t.Fatal("expected DownloadDataset to fail on network error")
+	}
+	if err.Error() != "failed to download" {
+		t.Fatalf("caller-visible Error() = %q, want exactly %q", err.Error(), "failed to download")
+	}
+
+	if !waitForCallback(f, 1, 2*time.Second) {
+		t.Fatal("outcome callback never fired")
+	}
+
+	p := callbackPayload(f)
+	if msg, _ := p["error_message"].(string); msg != "failed to download" {
+		t.Fatalf("outcome callback error_message = %q, want exactly %q (the same clean message the caller sees)", msg, "failed to download")
+	}
+}
+
 // ----------------------------------------------------------------------------
 // decompressData (gzip).
 // ----------------------------------------------------------------------------
@@ -282,6 +431,7 @@ func TestClearQueue_PurgeQueueInProgressStillDetected(t *testing.T) {
 	if strings.Contains(err.Error(), "123456789012") {
 		t.Fatalf("err = %v, leaks the upstream queue ARN", err)
 	}
+	assertCauseReachable(t, err, "123456789012")
 }
 
 // TestPollNotifications_SQSCauseNeverLeaksIntoMessage covers ReceiveMessage.
@@ -407,3 +557,10 @@ type nopCloserReader struct{ r *strings.Reader }
 
 func (n *nopCloserReader) Read(p []byte) (int, error) { return n.r.Read(p) }
 func (n *nopCloserReader) Close() error               { return nil }
+
+// failingReadCloser is a response body that fails on every Read — the shape
+// a connection reset mid-response takes.
+type failingReadCloser struct{ failMsg string }
+
+func (f *failingReadCloser) Read([]byte) (int, error) { return 0, errors.New(f.failMsg) }
+func (f *failingReadCloser) Close() error              { return nil }
