@@ -1,8 +1,7 @@
 // Package credentials implements an aws.CredentialsProvider that mints
 // short-lived AWS STS session credentials from the Helix Connect credential
 // broker (POST /v1/credentials/session), per credential_session.schema.json
-// (sdk-schemas #17, contract frozen in sdk-schemas PR #17) and STS-PLAN.md
-// §P3 (B1).
+// (sdk-schemas #17).
 //
 // Two ways to consume it:
 //
@@ -12,22 +11,17 @@
 //     auto-refreshing broker-backed provider, wrapped in aws.CredentialsCache).
 //     consumer.NewConsumer and producer.NewProducer call this internally.
 //
-//   - Tests that need to disable auto-refresh or force a refresh (e2e
-//     requirement E.8.2's "auto_refresh=False" / "force_refresh()" hooks,
-//     translated to Go idiom): use Provider directly (each Retrieve call
-//     mints fresh, no caching — freeze the one result you want with
-//     awssdk-go-v2's credentials.NewStaticCredentialsProvider to simulate
+//   - Tests that need to disable auto-refresh or force a refresh: use
+//     Provider directly (each Retrieve call mints fresh, no caching — freeze
+//     the one result you want with awssdk-go-v2's
+//     credentials.NewStaticCredentialsProvider to simulate
 //     "auto_refresh=False"), or hold onto the *aws.CredentialsCache returned
 //     by NewCredentialsCache and call its exported Invalidate() method to
 //     force the next Retrieve to re-mint ("force_refresh()").
 //
 // Bootstrap authentication: mint requests are SigV4-signed with the caller's
-// existing static AWS key (AWSAccessKeyID/AWSSecretAccessKey) — the ratified
-// B0/B1 bootstrap mechanism (STS-PLAN.md §9 decision #1), verified directly
-// against the real broker implementation (helix-tools/api PR #129), whose
-// route chain accepts only AuthMethodSigV4 (RequireMachineAuth) — there is no
-// bearer/API-key auth path yet. See STS_C0_INVENTORY.md at the repo root for
-// the full bind-site inventory this package's wiring is derived from.
+// existing static AWS key (AWSAccessKeyID/AWSSecretAccessKey); there is no
+// bearer/API-key auth path yet.
 package credentials
 
 import (
@@ -110,8 +104,7 @@ const (
 )
 
 // Closed error-code taxonomy from credential_session.schema.json's
-// error_code definition (sdk-schemas #17), mirrored exactly in
-// helix-tools/api PR #129's session_types.go. SDKs branch on these.
+// error_code definition (sdk-schemas #17). SDKs branch on these.
 const (
 	ErrCodeSubscriptionExpired        = "subscription_expired"
 	ErrCodeSubscriptionWindowTooShort = "subscription_window_too_short"
@@ -141,7 +134,7 @@ func (e *MintError) Error() string {
 }
 
 // IsSubscriptionExpired reports whether err is a *MintError carrying the
-// subscription_expired code (finding #24 enforced at mint time).
+// subscription_expired code, enforced at mint time.
 func IsSubscriptionExpired(err error) bool { return hasCode(err, ErrCodeSubscriptionExpired) }
 
 // IsCustomerSuspended reports whether err is a *MintError carrying the
@@ -218,10 +211,8 @@ type BrokerConfig struct {
 	// Required.
 	Region string
 
-	// AWSAccessKeyID / AWSSecretAccessKey SigV4-sign the mint request —
-	// the caller's existing static AWS key, which is the ratified B0/B1
-	// broker bootstrap mechanism (STS-PLAN.md §9 decision #1). Both
-	// required.
+	// AWSAccessKeyID / AWSSecretAccessKey SigV4-sign the mint request,
+	// using the caller's existing static AWS key. Both required.
 	AWSAccessKeyID     string
 	AWSSecretAccessKey string
 
@@ -247,8 +238,7 @@ type BrokerConfig struct {
 // AdjustExpiresBy below) so that, when wrapped in NewCredentialsCache, a
 // broker blip during a due refresh rides through on the last-known-good
 // session until its TRUE hard expiry rather than failing the caller
-// immediately — "serve-last-good creds until hard expiry (a broker blip is
-// invisible)", STS-PLAN.md/C-sdk.md C.1 bullet 3 / R7.
+// immediately — a broker blip stays invisible to the caller.
 type Provider struct {
 	cfg        BrokerConfig
 	httpClient *http.Client
@@ -271,7 +261,7 @@ func NewProvider(cfg BrokerConfig) (*Provider, error) {
 		return nil, fmt.Errorf("credentials: BrokerConfig.Region is required")
 	}
 	if cfg.AWSAccessKeyID == "" || cfg.AWSSecretAccessKey == "" {
-		return nil, fmt.Errorf("credentials: BrokerConfig requires AWSAccessKeyID and AWSSecretAccessKey to bootstrap-authenticate mint requests (SigV4) — see STS-PLAN.md §9 decision #1")
+		return nil, fmt.Errorf("credentials: BrokerConfig requires AWSAccessKeyID and AWSSecretAccessKey to bootstrap-authenticate mint requests")
 	}
 
 	httpClient := cfg.HTTPClient
@@ -289,9 +279,8 @@ func NewProvider(cfg BrokerConfig) (*Provider, error) {
 // Retrieve implements aws.CredentialsProvider. It mints a fresh session
 // credential from the broker (retrying transient failures with backoff+
 // jitter), then computes Expires as local_now + ttl_seconds capped by the
-// parsed server expiration — the clock-skew-hardened formula from
-// STS-PLAN.md/C-sdk.md C.1 bullet 4: using the SMALLER of the two bounds
-// means client/server clock drift can only ever shorten, never extend, a
+// parsed server expiration — using the SMALLER of the two bounds means
+// client/server clock drift can only ever shorten, never extend, a
 // credential's effective client-side lifetime beyond what the server
 // actually granted.
 func (p *Provider) Retrieve(ctx context.Context) (aws.Credentials, error) {
@@ -339,8 +328,8 @@ func (p *Provider) Retrieve(ctx context.Context) (aws.Credentials, error) {
 // TRUE hard expiry from the last successful mint (tracked in
 // p.lastHardExpiry, independent of old.Expires' own adjustment) has not
 // actually passed yet — a broker blip during the ~5-minute pre-expiry
-// refresh window becomes invisible to callers, matching "serve-last-good
-// creds until hard expiry" (STS-PLAN.md/C-sdk.md C.1 bullet 3 / R7).
+// refresh window becomes invisible to callers, which keep serving the
+// last-known-good credential until it truly expires.
 //
 // The returned Expires is deliberately set to lastHardExpiry+
 // proactiveExpiryWindow, NOT lastHardExpiry itself: aws.CredentialsCache
@@ -580,7 +569,7 @@ func SelectProvider(apiEndpoint string, cfg types.Config) (aws.CredentialsProvid
 	case types.CredentialModeSTS:
 		if !hasStaticKeys {
 			if cfg.APIKey != "" {
-				return nil, fmt.Errorf("credentials: CredentialMode %q with APIKey is not yet supported by this SDK version — the credential broker currently accepts only the SigV4 bootstrap path (STS-PLAN.md §9 decision #1); set AWSAccessKeyID/AWSSecretAccessKey instead", types.CredentialModeSTS)
+				return nil, fmt.Errorf("credentials: CredentialMode %q with APIKey is not yet supported by this SDK version — the credential broker currently accepts only the AWS-key bootstrap path; set AWSAccessKeyID/AWSSecretAccessKey instead", types.CredentialModeSTS)
 			}
 			return nil, fmt.Errorf("credentials: CredentialMode %q requires AWSAccessKeyID and AWSSecretAccessKey to bootstrap the broker mint request", types.CredentialModeSTS)
 		}

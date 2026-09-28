@@ -41,8 +41,8 @@ func TestUploadDataset_CannotDisableEncryptionOrCompression(t *testing.T) {
 		{"Compress=false", func(o *UploadOptions) { o.Compress = false }, false, "compression is required"},
 		{"both false", func(o *UploadOptions) { o.Encrypt, o.Compress = false, false }, false, "encryption is required"},
 		{"zero-value options", func(o *UploadOptions) { *o = UploadOptions{DatasetName: "x"} }, false, "encryption is required"},
-		{"missing KMS key", func(o *UploadOptions) {}, true, "KMS key not found"},
-		{"invalid gzip level", func(o *UploadOptions) { o.CompressionLevel = 10 }, false, "gzip"},
+		{"missing KMS key", func(o *UploadOptions) {}, true, "no encryption key configured"},
+		{"invalid gzip level", func(o *UploadOptions) { o.CompressionLevel = 10 }, false, "failed to create compression writer"},
 		{
 			"metadata says encryption off",
 			func(o *UploadOptions) { o.Metadata = map[string]any{"encryption_enabled": false} },
@@ -458,8 +458,8 @@ func TestProcessFile_ResultAlwaysSaysEncryptedAndCompressed(t *testing.T) {
 func TestEncryptData_WithoutKMSClientIsAnError(t *testing.T) {
 	p := &Producer{KMSKeyID: "some-key"}
 
-	if _, err := p.encryptData(context.Background(), []byte("x")); err == nil || !strings.Contains(err.Error(), "KMS client") {
-		t.Fatalf("encryptData error = %v, want a missing-KMS-client error", err)
+	if _, err := p.encryptData(context.Background(), []byte("x")); err == nil || !strings.Contains(err.Error(), "encryption is not configured") {
+		t.Fatalf("encryptData error = %v, want a missing-encryption-client error", err)
 	}
 }
 

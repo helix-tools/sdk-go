@@ -16,10 +16,9 @@
 //
 // Deep refresh-timing / single-flight / 403-surfacing / fail-closed-expiry
 // coverage lives in credentials/broker_test.go, which tests Provider and
-// aws.CredentialsCache directly — see STS_C0_INVENTORY.md for why the split
-// is drawn there (NewConsumer/NewProducer cannot be unit-tested end-to-end
-// without hitting real AWS STS — see the existing
-// TestDefaultHTTPClientTimeoutIsBounded comment in consumer_test.go).
+// aws.CredentialsCache directly, since NewConsumer/NewProducer cannot be
+// unit-tested end-to-end without hitting real AWS STS — see the existing
+// TestDefaultHTTPClientTimeoutIsBounded comment in consumer_test.go.
 package consumer
 
 import (
