@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-09-28 (v2.18.0)
 
 ### Fixed
 - `Producer.ListSubscriptionRequests` and `Consumer.ListSubscriptionRequests`
