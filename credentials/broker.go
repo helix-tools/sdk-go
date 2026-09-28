@@ -36,6 +36,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/helix-tools/sdk-go/v2/internal/sdkerr"
 	"github.com/helix-tools/sdk-go/v2/internal/useragent"
 	"github.com/helix-tools/sdk-go/v2/types"
 
@@ -450,13 +451,13 @@ func (p *Provider) mint(ctx context.Context) (*mintSuccessResponse, bool, error)
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return nil, true, fmt.Errorf("credentials: mint request failed: %w", err)
+		return nil, true, sdkerr.Wrap("credentials: mint request failed", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, true, fmt.Errorf("credentials: failed to read mint response: %w", err)
+		return nil, true, sdkerr.Wrap("credentials: failed to read mint response", err)
 	}
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -510,12 +511,12 @@ func (p *Provider) buildRequest(ctx context.Context) (*http.Request, error) {
 	bootstrap := awscreds.NewStaticCredentialsProvider(p.cfg.AWSAccessKeyID, p.cfg.AWSSecretAccessKey, "")
 	bootstrapCreds, err := bootstrap.Retrieve(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("credentials: failed to resolve bootstrap credentials: %w", err)
+		return nil, sdkerr.Wrap("credentials: failed to resolve bootstrap credentials", err)
 	}
 
 	signer := v4.NewSigner()
 	if err := signer.SignHTTP(ctx, bootstrapCreds, req, types.EmptyPayloadHash, mintService, p.cfg.Region, p.now()); err != nil {
-		return nil, fmt.Errorf("credentials: failed to sign mint request: %w", err)
+		return nil, sdkerr.Wrap("credentials: failed to sign mint request", err)
 	}
 
 	return req, nil

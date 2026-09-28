@@ -30,6 +30,7 @@ import (
 	"time"
 
 	stscreds "github.com/helix-tools/sdk-go/v2/credentials"
+	"github.com/helix-tools/sdk-go/v2/internal/sdkerr"
 	"github.com/helix-tools/sdk-go/v2/internal/useragent"
 	"github.com/helix-tools/sdk-go/v2/types"
 
@@ -137,21 +138,15 @@ func NewProducer(cfg types.Config) (*Producer, error) {
 	}
 
 	// Load AWS config.
-	awsCfg, err := config.LoadDefaultConfig(context.Background(),
-		config.WithRegion(cfg.Region),
-		config.WithCredentialsProvider(credProvider),
-	)
+	awsCfg, err := loadAWSConfig(context.Background(), cfg.Region, credProvider)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load AWS config: %w", err)
+		return nil, err
 	}
 
 	// Validate credentials.
 	stsClient := sts.NewFromConfig(awsCfg)
-	if _, err = stsClient.GetCallerIdentity(
-		context.Background(),
-		&sts.GetCallerIdentityInput{},
-	); err != nil {
-		return nil, fmt.Errorf("invalid AWS credentials: %w", err)
+	if err := validateCredentials(context.Background(), stsClient); err != nil {
+		return nil, err
 	}
 
 	// Get producer-specific resources from SSM.
@@ -161,7 +156,7 @@ func NewProducer(cfg types.Config) (*Producer, error) {
 	bucketParamCandidates := ssmParamCandidates(cfg.CustomerID, "s3_bucket")
 	bucketValue, err := getSSMParameterValue(context.Background(), ssmClient, bucketParamCandidates)
 	if err != nil {
-		return nil, fmt.Errorf("S3 bucket not found for producer %s: %w", cfg.CustomerID, err)
+		return nil, sdkerr.Wrap(fmt.Sprintf("S3 bucket not found for producer %s", cfg.CustomerID), err)
 	}
 
 	// Get KMS key ID. Without one the Producer is still built (non-upload calls
@@ -190,10 +185,36 @@ func NewProducer(cfg types.Config) (*Producer, error) {
 func resolveKMSKeyID(ctx context.Context, client *ssm.Client, customerID string) (string, error) {
 	keyID, err := getSSMParameterValue(ctx, client, ssmParamCandidates(customerID, "kms_key_id"))
 	if err != nil {
-		return "", fmt.Errorf("encryption key configuration could not be resolved, uploads will fail until it is: %w", err)
+		return "", sdkerr.Wrap("encryption key configuration could not be resolved, uploads will fail until it is", err)
 	}
 
 	return keyID, nil
+}
+
+// loadAWSConfig wraps config.LoadDefaultConfig, an AWS SDK call: on failure
+// the customer sees a clean, capability-language message while the raw AWS
+// error (which can carry local shared-config-file paths or profile detail)
+// stays reachable via errors.Unwrap/errors.As for debugging.
+func loadAWSConfig(ctx context.Context, region string, credProvider aws.CredentialsProvider) (aws.Config, error) {
+	awsCfg, err := config.LoadDefaultConfig(ctx,
+		config.WithRegion(region),
+		config.WithCredentialsProvider(credProvider),
+	)
+	if err != nil {
+		return aws.Config{}, sdkerr.Wrap("failed to load AWS config", err)
+	}
+	return awsCfg, nil
+}
+
+// validateCredentials calls AWS STS GetCallerIdentity, an AWS SDK call, to
+// fail fast on bad credentials. On failure the customer sees a clean message
+// while the raw STS/IAM error (which can carry the account ID and an IAM
+// ARN) stays reachable via errors.Unwrap/errors.As for debugging.
+func validateCredentials(ctx context.Context, stsClient *sts.Client) error {
+	if _, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); err != nil {
+		return sdkerr.Wrap("invalid AWS credentials", err)
+	}
+	return nil
 }
 
 func ssmParamCandidates(customerID, paramName string) []string {
@@ -271,15 +292,15 @@ func (p *Producer) compressData(data []byte, level int) ([]byte, error) {
 	var buf bytes.Buffer
 	gzWriter, err := gzip.NewWriterLevel(&buf, level)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create compression writer: %w", err)
+		return nil, sdkerr.Wrap("failed to create compression writer", err)
 	}
 
 	if _, err := gzWriter.Write(data); err != nil {
-		return nil, fmt.Errorf("failed to write compressed data: %w", err)
+		return nil, sdkerr.Wrap("failed to write compressed data", err)
 	}
 
 	if err := gzWriter.Close(); err != nil {
-		return nil, fmt.Errorf("failed to close compression writer: %w", err)
+		return nil, sdkerr.Wrap("failed to close compression writer", err)
 	}
 
 	return buf.Bytes(), nil
@@ -337,7 +358,7 @@ func (p *Producer) encryptData(ctx context.Context, data []byte) ([]byte, error)
 		Plaintext: dataKey,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("encryption failed: %w", err)
+		return nil, sdkerr.Wrap("encryption failed", err)
 	}
 
 	// Package: [4 bytes: key length][encrypted key][16 bytes: IV][16 bytes: tag][encrypted data].
@@ -730,7 +751,7 @@ func (p *Producer) uploadToPresignedURL(ctx context.Context, uploadURL string, d
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to upload to presigned URL: %w", err)
+		return sdkerr.Wrap("failed to upload to presigned URL", err)
 	}
 	defer resp.Body.Close()
 
@@ -858,7 +879,7 @@ func (p *Producer) makeAPIRequest(ctx context.Context, method, path string, body
 	// Sign request with AWS SigV4.
 	creds, err := p.awsConfig.Credentials.Retrieve(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to retrieve credentials: %w", err)
+		return sdkerr.Wrap("failed to retrieve credentials", err)
 	}
 
 	// Calculate payload hash for SigV4.
@@ -878,13 +899,13 @@ func (p *Producer) makeAPIRequest(ctx context.Context, method, path string, body
 
 	signer := v4.NewSigner()
 	if err := signer.SignHTTP(ctx, creds, req, payloadHash, "execute-api", p.Region, time.Now()); err != nil {
-		return fmt.Errorf("failed to sign request: %w", err)
+		return sdkerr.Wrap("failed to sign request", err)
 	}
 
 	// Execute request.
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
+		return sdkerr.Wrap("request failed", err)
 	}
 
 	defer resp.Body.Close()
