@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/helix-tools/sdk-go/v2/internal/sdkerr"
 	"github.com/helix-tools/sdk-go/v2/internal/useragent"
 )
 
@@ -164,13 +165,13 @@ func (c *Client) do(ctx context.Context, method, path string, body any, result a
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		return fmt.Errorf("agent: request failed: %w", err)
+		return sdkerr.Wrap("agent: request failed", err)
 	}
 	defer resp.Body.Close()
 
 	rawBody, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
-		return fmt.Errorf("agent: read response: %w", readErr)
+		return sdkerr.Wrap("agent: read response", readErr)
 	}
 
 	requestID := firstNonEmpty(

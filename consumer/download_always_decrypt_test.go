@@ -167,7 +167,12 @@ func TestDownloadDataset_RejectsObjectNotEncryptedAndCompressed(t *testing.T) {
 		{"envelope with a zero-length wrapped key", zeroKeyLen, errNotEncrypted, "", 0},
 		{"envelope cut short", truncated, errNotEncrypted, "", 0},
 		{"encrypted but never compressed", sealEnvelope(plaintext), errNotCompressed, "", 1},
-		{"encrypted gzip cut short", sealEnvelope(gzipBytes(plaintext)[:20]), nil, "unexpected EOF", 1},
+		// A cut-short gzip stream fails mid-decompress, not at the gzip
+		// header check, so it is a "decompression failed" error like the
+		// trailing-garbage case below — never the raw stdlib flate/gzip
+		// text (see TestDecompressData_UpstreamCauseNeverLeaksIntoMessage
+		// for the clean-message-plus-cause contract this pins).
+		{"encrypted gzip cut short", sealEnvelope(gzipBytes(plaintext)[:20]), nil, "decompression failed", 1},
 		{"encrypted gzip with garbage after it", sealEnvelope(append(gzipBytes(plaintext), []byte("trailing garbage")...)), nil, "decompression failed", 1},
 		{"ciphertext tampered with", tampered, nil, "decryption failed", 1},
 	}
@@ -297,9 +302,15 @@ func TestDownloadDataset_KeyServiceFailuresAreErrors(t *testing.T) {
 			"decryption failed",
 		},
 		{
+			// A wrong-size key fails inside aes.NewCipher — the raw stdlib
+			// text ("crypto/aes: invalid key size 5") is never customer-
+			// visible; decryptData wraps every failure branch with the same
+			// clean "decryption failed" message (see
+			// TestDecryptData_WrongKeySizeCauseNeverLeaksIntoMessage for the
+			// cause-reachability half of this contract).
 			"KMS returns a key of the wrong size",
 			&objectTransport{record: recordFlagsFalse, object: encryptedObject([]byte("rows\n")), kmsKey: []byte("short")},
-			"invalid key size",
+			"decryption failed",
 		},
 		{
 			"KMS returns a different valid key",
