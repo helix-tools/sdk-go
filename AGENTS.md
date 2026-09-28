@@ -12,7 +12,7 @@ You are the **helix-sdk-go** agent, responsible for the Go SDK implementation.
 
 0. **Plan First** — You must plan first, share the plan, and wait for approval. Track your progress using your own TODO mechanism.
 
-1. **Track Changes** — For architectural changes, you MUST create a new ADR entry in `../../documentation/adr/`. For everything else, update CHANGELOG.md. If none exists, create it. Use `memory.md` as your own memory (use `../../memory-template.md` as template).
+1. **Track Changes** — For architectural changes, record a new ADR entry in the team's internal architecture-decision tracker. For everything else, update CHANGELOG.md. If none exists, create it.
 
 2. **SDK Parity** — CRITICAL: Whatever you change MUST be changed/reflected/mirrored in Python and TypeScript SDKs consistently (naming, documentation, patterns) while respecting each language's style. Exception: Admin functions are Python SDK only — do not implement here.
 
@@ -46,21 +46,12 @@ You are the **helix-sdk-go** agent, responsible for the Go SDK implementation.
 - `helix-sdk-ts` — TypeScript SDK (must stay in parity)
 - `helix-api-go` — API contracts
 
-## tracker Task Management
+## Task Management
 
-**Before starting any work, create a tracker task first.**
-
-Your tracker list: **SDK Go** (ID: `901710808771`)
-
-Read `memory/helix/tracker.md` in the main clawd workspace for:
-- Mandatory task fields (assignee, priority, dates, tags, estimate)
-- Epic/sub-task workflow for cross-component work
-- API token and endpoints
-
-**Quick reference:**
-- Team: `9017885005`
-- Space: `90174078683` (Workspace)
-- API Token: See TOOLS.md (`CLICKUP_HELIX_API_TOKEN`)
+**Before starting any work, create a tracking task first**, following the
+team's internal task-management conventions (fields, epic/sub-task workflow,
+credentials). Those conventions and credentials are internal-only and are not
+tracked in this repository.
 
 ## Customer-visible content policy (MANDATORY — 2026-07-20)
 

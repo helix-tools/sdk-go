@@ -7,8 +7,7 @@ import "encoding/json"
 const EmptyPayloadHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 // CredentialMode selects how Consumer/Producer obtain the AWS credentials
-// used to sign API requests (SigV4) and construct AWS service clients (KMS,
-// SQS, SSM, S3).
+// used to authenticate SDK operations.
 type CredentialMode string
 
 const (
@@ -24,11 +23,9 @@ const (
 	// credentials minted from the Helix Connect credential broker (POST
 	// /v1/credentials/session — see credential_session.schema.json,
 	// sdk-schemas #17). The mint request itself is bootstrap-authenticated
-	// with AWSAccessKeyID/AWSSecretAccessKey (STS-PLAN.md §9 decision #1:
-	// the broker's B0/B1 bootstrap is the existing SigV4 static key, not a
-	// new API key — verified against the real broker implementation,
-	// helix-tools/api PR #129, which accepts only SigV4). APIKey-based
-	// bootstrap is reserved for a later phase (P5) and is not yet wired.
+	// with AWSAccessKeyID/AWSSecretAccessKey — the broker does not yet
+	// accept an API-key bootstrap. APIKey-based bootstrap is reserved for a
+	// later release and is not yet wired.
 	CredentialModeSTS CredentialMode = "sts"
 )
 
@@ -41,8 +38,8 @@ type Config struct {
 	Region             string
 
 	// APIKey is reserved for the platform-scoped Helix API key bootstrap
-	// (hlx_-prefixed, STS-PLAN.md P5). It is currently NOT wired to any
-	// authentication path — the credential broker accepts only SigV4 today
+	// (hlx_-prefixed). It is currently NOT wired to any authentication path
+	// — the credential broker accepts only the AWS-key bootstrap today
 	// (see CredentialModeSTS) — so setting APIKey without
 	// AWSAccessKeyID/AWSSecretAccessKey produces a clear construction-time
 	// error rather than silently sending an unauthenticated request.

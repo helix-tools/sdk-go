@@ -390,8 +390,7 @@
   and a curated `Message` on error (never any infra internals). Status
   values are the `types.AIAgentState*` constants
   (`not_provisioned`/`provisioning`/`active`/`error`/`deprovisioning`).
-  Types verified field-for-field against the Go API's
-  `internal/resources/aiagent/types.go`. NOTE: server-side this surface
+  Types verified field-for-field against the Go API. NOTE: server-side this surface
   is dark behind `HELIX_MODEL2_ENABLED`; while off, all three endpoints
   respond 404 (surfaced as `*producer.APIError` with `StatusCode` 404),
   so live e2e is deferred until the flag is flipped.
@@ -464,8 +463,7 @@
   `types.Subscription` gains `Billing` — both pointer-typed and
   absent-tolerant, since every marketplace field is omitted server-side
   while the `marketplace_payments` feature flag is off (never
-  defaulted). Browse/details shapes anchored directly to the helix-api
-  handlers. Closes internal ticket (#8).
+  defaulted). Browse/details shapes anchored directly to the API (#8).
 - **Producer Stripe Connect payout surface — Python SDK parity (PR #11
   equivalent)**. `producer.ConnectOnboard(ctx)` replaces the earlier
   `GetConnectOnboardingLink` (never in a tagged release, so no
@@ -478,9 +476,9 @@
   `StatusCode` 403. Both new types (`types.ConnectOnboardResponse`,
   `types.ConnectLoginLinkResponse`) and the existing
   `producer.GetConnectStatus(ctx)` verified field-for-field against the
-  Go API's `internal/resources/connect/types.go` (`OnboardResponse`,
-  `StatusResponse`, `LoginLinkResponse`) and cross-checked against the
-  Python SDK's `helix_connect/producer.py` (PR #11) (#9).
+  Go API (`OnboardResponse`, `StatusResponse`, `LoginLinkResponse`) and
+  cross-checked against the Python SDK's `helix_connect/producer.py`
+  (PR #11) (#9).
 
 ### Fixed
 - **`types.ConnectStatus` was stale/wrong-shaped and drifted from the Go
@@ -520,7 +518,7 @@
 ## 2026-07-11 (v2.6.0)
 
 ### Added
-- **STS session credentials (opt-in)** — STS-PLAN.md §P3 (B1). New
+- **STS session credentials (opt-in)**. New
   `credentials` package (`github.com/helix-tools/sdk-go/v2/credentials`)
   implements an `aws.CredentialsProvider` that mints short-lived AWS STS
   session credentials from the Helix Connect credential broker (`POST
@@ -539,9 +537,9 @@
   additive fields: `APIKey` (reserved for a later phase's platform-scoped
   bootstrap — not yet wired, see below) and `CredentialMode` (`"static"` |
   `"sts"`, **default `"static"`**). `NewConsumer`/`NewProducer` select the
-  provider via `credentials.SelectProvider`; every other AWS client (KMS,
-  SQS, SSM, S3) and the hand-rolled API SigV4 signer inherit whichever
-  provider was selected automatically — **zero signing-path changes** (the
+  provider via `credentials.SelectProvider`; every other AWS service client
+  and the hand-rolled API SigV4 signer inherit whichever provider was
+  selected automatically — **zero signing-path changes** (the
   session token is emitted in `X-Amz-Security-Token` and included in
   SigV4 `SignedHeaders` automatically by the existing signer whenever the
   retrieved credential carries one). `api/config.go` gains a sibling
@@ -551,26 +549,20 @@
   `aws.CredentialsProvider`/`aws.CredentialsCache` primitives.
   - **Static remains the default and is byte-identical.** `CredentialMode`
     is *never* inferred as `"sts"` — only an explicit opt-in enables it.
-    Every existing caller (Acme's live static-key path included) is
-    unaffected: same construction call, same signed-request shape, no
-    `X-Amz-Security-Token` header, pinned by
+    Every existing caller is unaffected: same construction call, same
+    signed-request shape, no `X-Amz-Security-Token` header, pinned by
     `TestSelectProvider_StaticPath_ByteIdenticalToDirectConstruction` and
     `TestMakeAPIRequest_StaticMode_NoSecurityTokenHeader` (consumer +
     producer).
-  - **Mint-request bootstrap is the existing static AWS key (SigV4), not a
-    bearer API key** — STS-PLAN.md §9 decision #1, verified directly
-    against the real broker implementation (`helix-tools/api` PR #129:
-    `RequireMachineAuth(AuthMethodSigV4)` accepts only SigV4). `APIKey` is
-    additive/reserved for a later phase; setting it without static keys
-    returns a clear "not yet supported" construction error rather than
-    silently sending an unauthenticated request.
+  - **Mint-request bootstrap is the existing static AWS key, not a bearer
+    API key**, verified directly against the real broker implementation.
+    `APIKey` is additive/reserved for a later phase; setting it without
+    static keys returns a clear "not yet supported" construction error
+    rather than silently sending an unauthenticated request.
   - Merged inert (default static), same publish gate as every other SDK
     release: tagged as v2.6.0 only after the broker went live-dark,
     session-token-aware `UnifiedAuth` was verified, and local-first live
     validation passed across a real 15-minute expiry boundary.
-  - See `STS_C0_INVENTORY.md` at the repo root for the full grep-based
-    bind-site inventory this change was derived from (codex gate finding
-    #6).
 
 ### Tests
 - `credentials/broker_test.go` (new): mint client happy/bad/edge paths
@@ -893,7 +885,7 @@
 ## 2025-12-31
 
 ### Fixed
-- **SSM Path Fallbacks**: Producer now resolves SSM parameters from `/helix-tools/{env}/customers` with legacy fallbacks and optional `HELIX_SSM_CUSTOMER_PREFIX` override.
+- **SSM Path Fallbacks**: Producer now resolves per-customer parameters with legacy fallbacks and optional `HELIX_SSM_CUSTOMER_PREFIX` override.
 - **Dataset Registration**: Producer payload now includes `s3_bucket_name` and a default `access_tier` (Go API requirement) while keeping `s3_bucket` for compatibility.
 - **API Endpoint Default**: Producer/consumer now default to `HELIX_API_ENDPOINT` or `https://api-go.helix.tools` when no endpoint is provided.
 
