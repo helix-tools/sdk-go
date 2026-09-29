@@ -12,7 +12,7 @@ func TestFeatureFlagJSONTags(t *testing.T) {
 	raw := `{
 		"enabled": true,
 		"since": "2026-03-24T05:18:00Z",
-		"enabled_by": "thalesfsp",
+		"enabled_by": "user-1",
 		"disabled_by": "admin@helix.tools",
 		"disabled_at": "2026-04-01T00:00:00Z",
 		"reason": "beta access",
@@ -30,8 +30,8 @@ func TestFeatureFlagJSONTags(t *testing.T) {
 	if ff.Since != "2026-03-24T05:18:00Z" {
 		t.Errorf("Since = %q, want the schema since value", ff.Since)
 	}
-	if ff.EnabledBy != "thalesfsp" {
-		t.Errorf("EnabledBy = %q, want %q", ff.EnabledBy, "thalesfsp")
+	if ff.EnabledBy != "user-1" {
+		t.Errorf("EnabledBy = %q, want %q", ff.EnabledBy, "user-1")
 	}
 	if ff.DisabledBy != "admin@helix.tools" {
 		t.Errorf("DisabledBy = %q, want %q", ff.DisabledBy, "admin@helix.tools")
@@ -57,7 +57,7 @@ func TestCompanyFeatureFlagsRoundTrip(t *testing.T) {
 		CustomerType: "both",
 		Status:       CompanyStatusActive,
 		FeatureFlags: FeatureFlags{
-			"partner_invite": {Enabled: true, Since: "2026-03-24T05:18:00Z", EnabledBy: "thalesfsp"},
+			"partner_invite": {Enabled: true, Since: "2026-03-24T05:18:00Z", EnabledBy: "user-1"},
 		},
 	}
 
@@ -83,8 +83,8 @@ func TestCompanyFeatureFlagsRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatalf("partner_invite flag missing after round trip")
 	}
-	if !pi.Enabled || pi.EnabledBy != "thalesfsp" {
-		t.Errorf("partner_invite round trip = %+v, want enabled by thalesfsp", pi)
+	if !pi.Enabled || pi.EnabledBy != "user-1" {
+		t.Errorf("partner_invite round trip = %+v, want enabled by user-1", pi)
 	}
 }
 
