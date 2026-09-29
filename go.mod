@@ -28,3 +28,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sso v1.30.1 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.35.5 // indirect
 )
+
+// Retracted 2026-09-29: these releases shipped internal references in their
+// module contents. Upgrade to v2.18.1 or later.
+retract [v2.2.0, v2.17.0]
