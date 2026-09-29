@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- List methods that follow every page (`ListDatasets`, `ListSubscriptions`,
+  `ListMyDatasets`, `GetDatasetSubscribers`, `ListSubscriptionRequests`,
+  `ListMySubscriptionRequests`) — and the notification helpers that read
+  your subscription list (`PollNotifications`, `ClearQueue`) — now return an
+  error when the server reports more than 1000 pages, instead of silently
+  using only the first 1000 pages. Lists within that bound are unaffected.
+
 ## 2026-09-29 (v2.18.1)
 
 ### Fixed

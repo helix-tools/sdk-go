@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -545,5 +547,259 @@ func TestListSubscriptions_EmptyResult_ReturnsEmptyNotNilSlice(t *testing.T) {
 	}
 	if string(got) != "[]" {
 		t.Errorf("json.Marshal(subs) = %s, want []", got)
+	}
+}
+
+// wantPageCapError is the exact message every Helix SDK returns when a list
+// still has more pages after the page cap. The literal "1000" (not
+// maxListPages) pins parity with the other SDKs' cap and wording.
+const wantPageCapError = "list pagination: server reports more than 1000 pages; refusing to return a truncated list"
+
+// pageCapRecorder records, in order, every page a pageCapServer was asked
+// for, so a test can assert both how many requests were made and which.
+type pageCapRecorder struct {
+	mu    sync.Mutex
+	pages []int
+	count int32
+}
+
+func (r *pageCapRecorder) requestedPages() []int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]int(nil), r.pages...)
+}
+
+// newPageCapServer serves a paginated list, reading ?page and answering
+// with respond(page)'s status and body.
+func newPageCapServer(t *testing.T, respond func(page int) (int, string)) (*httptest.Server, *pageCapRecorder) {
+	t.Helper()
+	rec := &pageCapRecorder{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&rec.count, 1)
+		page, err := strconv.Atoi(r.URL.Query().Get("page"))
+		if err != nil {
+			t.Errorf("request without a numeric page param: %q", r.URL.RawQuery)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		rec.mu.Lock()
+		rec.pages = append(rec.pages, page)
+		rec.mu.Unlock()
+
+		status, body := respond(page)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+	return server, rec
+}
+
+// pageCapNames names a page's items after the page: "7" for one item per
+// page, "7a", "7b", ... for more.
+func pageCapNames(page, itemsPerPage int) []string {
+	if itemsPerPage == 1 {
+		return []string{strconv.Itoa(page)}
+	}
+	names := make([]string, itemsPerPage)
+	for i := range names {
+		names[i] = fmt.Sprintf("%d%c", page, 'a'+i)
+	}
+	return names
+}
+
+// pageCapPages serves itemsPerPage items on every page, always claims
+// totalPages, and serves an empty page at emptyPage (0 = never).
+func pageCapPages(itemsPerPage, totalPages, emptyPage int) func(page int) (int, string) {
+	return func(page int) (int, string) {
+		if page == emptyPage {
+			return http.StatusOK, datasetsPageJSON(nil, page, totalPages)
+		}
+		return http.StatusOK, datasetsPageJSON(pageCapNames(page, itemsPerPage), page, totalPages)
+	}
+}
+
+func wantPagesOneTo(n int) []int {
+	pages := make([]int, n)
+	for i := range pages {
+		pages[i] = i + 1
+	}
+	return pages
+}
+
+// TestListDatasets_MoreThanMaxListPages_ReturnsError pins that a list
+// with more pages than maxListPages is an error, never the first
+// maxListPages pages silently returned as if they were the whole list.
+func TestListDatasets_MoreThanMaxListPages_ReturnsError(t *testing.T) {
+	cases := []struct {
+		name         string
+		totalPages   int
+		itemsPerPage int
+	}{
+		{name: "one past the cap, one item per page", totalPages: maxListPages + 1, itemsPerPage: 1},
+		{name: "two past the cap, two items per page", totalPages: maxListPages + 2, itemsPerPage: 2},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, rec := newPageCapServer(t, pageCapPages(tc.itemsPerPage, tc.totalPages, 0))
+			c := newTestConsumer(server.URL)
+
+			datasets, err := c.ListDatasets(context.Background())
+			if err == nil || err.Error() != wantPageCapError {
+				t.Fatalf("err = %v, want %q (got %d rows)", err, wantPageCapError, len(datasets))
+			}
+			if datasets != nil {
+				t.Errorf("datasets = %d rows, want nil (no partial result on error)", len(datasets))
+			}
+			if got := atomic.LoadInt32(&rec.count); got != maxListPages {
+				t.Errorf("request count = %d, want exactly %d", got, maxListPages)
+			}
+			if got := rec.requestedPages(); !reflect.DeepEqual(got, wantPagesOneTo(maxListPages)) {
+				t.Errorf("requested pages were not exactly 1..%d in order (got %d requests)", maxListPages, len(got))
+			}
+		})
+	}
+}
+
+// TestListDatasets_ExactlyMaxListPages_ReturnsAll pins that a list of
+// exactly maxListPages pages is not an error.
+func TestListDatasets_ExactlyMaxListPages_ReturnsAll(t *testing.T) {
+	server, rec := newPageCapServer(t, pageCapPages(1, maxListPages, 0))
+	c := newTestConsumer(server.URL)
+
+	datasets, err := c.ListDatasets(context.Background())
+	if err != nil {
+		t.Fatalf("ListDatasets: %v", err)
+	}
+	if len(datasets) != maxListPages {
+		t.Fatalf("len(datasets) = %d, want %d", len(datasets), maxListPages)
+	}
+	if datasets[0].Name != "1" || datasets[maxListPages-1].Name != "1000" {
+		t.Errorf("first/last rows = %q/%q, want \"1\"/\"1000\"", datasets[0].Name, datasets[maxListPages-1].Name)
+	}
+	if got := atomic.LoadInt32(&rec.count); got != maxListPages {
+		t.Errorf("request count = %d, want exactly %d", got, maxListPages)
+	}
+}
+
+// TestListDatasets_EmptyPageBeforeCap_StopsWithoutError pins that an
+// empty page still ends the list cleanly even when total_pages is past the
+// cap.
+func TestListDatasets_EmptyPageBeforeCap_StopsWithoutError(t *testing.T) {
+	server, rec := newPageCapServer(t, pageCapPages(1, maxListPages+1, 3))
+	c := newTestConsumer(server.URL)
+
+	datasets, err := c.ListDatasets(context.Background())
+	if err != nil {
+		t.Fatalf("ListDatasets: %v", err)
+	}
+	if len(datasets) != 2 {
+		t.Errorf("len(datasets) = %d, want 2", len(datasets))
+	}
+	if got := atomic.LoadInt32(&rec.count); got != 3 {
+		t.Errorf("request count = %d, want exactly 3", got)
+	}
+}
+
+// TestListDatasets_EmptyPageAtCap_StopsWithoutError pins that only a
+// NON-empty last budgeted page is an error: an empty page maxListPages
+// means the list really ended there.
+func TestListDatasets_EmptyPageAtCap_StopsWithoutError(t *testing.T) {
+	server, rec := newPageCapServer(t, pageCapPages(1, maxListPages+1, maxListPages))
+	c := newTestConsumer(server.URL)
+
+	datasets, err := c.ListDatasets(context.Background())
+	if err != nil {
+		t.Fatalf("ListDatasets: %v", err)
+	}
+	if len(datasets) != maxListPages-1 {
+		t.Errorf("len(datasets) = %d, want %d", len(datasets), maxListPages-1)
+	}
+	if got := atomic.LoadInt32(&rec.count); got != maxListPages {
+		t.Errorf("request count = %d, want exactly %d", got, maxListPages)
+	}
+}
+
+// TestListDatasets_TotalPagesLoweredAtCap_ReturnsError is the bypass
+// attempt: a server that claims one page past the cap until the last
+// budgeted page, then lowers total_pages so the list looks complete. The
+// total_pages lock must still reject it.
+func TestListDatasets_TotalPagesLoweredAtCap_ReturnsError(t *testing.T) {
+	server, rec := newPageCapServer(t, func(page int) (int, string) {
+		totalPages := maxListPages + 1
+		if page == maxListPages {
+			totalPages = maxListPages
+		}
+		return http.StatusOK, datasetsPageJSON(pageCapNames(page, 1), page, totalPages)
+	})
+	c := newTestConsumer(server.URL)
+
+	datasets, err := c.ListDatasets(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "total_pages=1001 on page 1") {
+		t.Fatalf("err = %v, want the total_pages lock error (got %d rows)", err, len(datasets))
+	}
+	if datasets != nil {
+		t.Errorf("datasets = %d rows, want nil", len(datasets))
+	}
+	if got := atomic.LoadInt32(&rec.count); got != maxListPages {
+		t.Errorf("request count = %d, want exactly %d", got, maxListPages)
+	}
+}
+
+// TestListDatasets_PageCapDoesNotMaskOtherFailures pins that the page-cap
+// error never replaces, or pre-empts, a different failure: an absurd
+// total_pages is still followed page by page up to the cap, and an API
+// error or a changed pagination shape on the last budgeted page is
+// reported as itself.
+func TestListDatasets_PageCapDoesNotMaskOtherFailures(t *testing.T) {
+	cases := []struct {
+		name         string
+		respond      func(page int) (int, string)
+		wantContains string
+	}{
+		{
+			name:         "total_pages is MaxInt64",
+			respond:      pageCapPages(1, math.MaxInt64, 0),
+			wantContains: wantPageCapError,
+		},
+		{
+			name: "API error on the last budgeted page",
+			respond: func(page int) (int, string) {
+				if page == maxListPages {
+					return http.StatusInternalServerError, `{"error":"boom"}`
+				}
+				return pageCapPages(1, maxListPages+1, 0)(page)
+			},
+			wantContains: "500",
+		},
+		{
+			name: "page field dropped on the last budgeted page",
+			respond: func(page int) (int, string) {
+				if page == maxListPages {
+					return http.StatusOK, fmt.Sprintf(`{"datasets":[{"id":"ds-x","name":"x"}],"total_count":1,"limit":100,"total_pages":%d}`, maxListPages+1)
+				}
+				return pageCapPages(1, maxListPages+1, 0)(page)
+			},
+			wantContains: "page field presence on page 1000",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, rec := newPageCapServer(t, tc.respond)
+			c := newTestConsumer(server.URL)
+
+			datasets, err := c.ListDatasets(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tc.wantContains) {
+				t.Fatalf("err = %v, want it to contain %q (got %d rows)", err, tc.wantContains, len(datasets))
+			}
+			if datasets != nil {
+				t.Errorf("datasets = %d rows, want nil", len(datasets))
+			}
+			if got := atomic.LoadInt32(&rec.count); got != maxListPages {
+				t.Errorf("request count = %d, want exactly %d", got, maxListPages)
+			}
+		})
 	}
 }
