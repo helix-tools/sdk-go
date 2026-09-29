@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-09-29 (v2.18.1)
+
+### Fixed
+- `MIGRATION_v2.md` no longer names the private admin SDK's package name;
+  the admin SDK is never published, so referencing it invited dependency
+  confusion. Reworded to describe the capability (no Go admin surface)
+  without naming any package.
+- Test fixtures in `types/` no longer use a real GitHub handle as a
+  `created_by`/`enabled_by` sample value; replaced with a neutral
+  placeholder.
+
 ## 2026-09-28 (v2.18.0)
 
 ### Fixed

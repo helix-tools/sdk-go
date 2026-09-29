@@ -18,15 +18,25 @@ import (
 // pattern's behavior (decoded once below) while keeping this source file
 // itself free of any banned literal, so it needs no self-exemption from
 // the scan it runs.
-const bannedContentPatternB64 = "KD9pKXJpbmdib29zdHxwaG9uZVwuY29tfGNsaWNrID91cHxkaXNjb3JkfFxiODZbMC05YS16XXs3fVxifC9Vc2Vycy9bQS1aYS16XXwvcHJpdmF0ZS90bXAvY2xhdWRlfGRtZS1wcm9kdWNlci0="
+const bannedContentPatternB64 = "KD9pKXJpbmdib29zdHxwaG9uZVwuY29tfGNsaWNrID91cHxkaXNjb3JkfFxiODZbMC05YS16XXs3fVxifC9Vc2Vycy9bQS1aYS16XXwvcHJpdmF0ZS90bXAvY2xhdWRlfGRtZS1wcm9kdWNlci18aGVsaXhbLV8uXSthZG1pbg=="
 
 // bannedContentPattern is the exact banned-content list applied to every
 // published Helix SDK artifact (this module's zip, the npm tarball, the
 // PyPI wheel/sdist): a customer/project name, a chat-platform mention, an
-// internal tracker task id, a maintainer's local machine path, and an
-// internal test-bucket naming convention. Case-insensitive throughout —
-// none of these belong in the published tree in any casing. See
-// bannedContentPatternB64's doc comment for why it's encoded.
+// internal tracker task id, a maintainer's local machine path, an internal
+// test-bucket naming convention, and the private admin SDK's package name
+// (matching any run of one or more hyphen/underscore/dot separators
+// between the two name components, in any casing — PyPI's PEP 503 name
+// normalization collapses any such run to a single separator before
+// comparing, so every one of those spellings resolves to the same banned
+// package name and must be caught, not just the single-separator form; the
+// admin SDK is never published, so pointing at its package name anywhere
+// in a public artifact is a dependency-confusion risk, not just an
+// internals leak). Case-insensitive throughout — none of these belong in
+// the published tree in any casing. See bannedContentPatternB64's doc
+// comment for why it's encoded, and
+// TestBannedContentPatternMatchesAdminPackageVariants for the separator
+// spellings this alternative is proven to catch.
 var bannedContentPattern = regexp.MustCompile(decodePattern(bannedContentPatternB64))
 
 func decodePattern(encoded string) string {
@@ -100,6 +110,32 @@ func TestNoBannedFilenamesAnywhere(t *testing.T) {
 		if strings.Contains(f, "docs/plans/") {
 			t.Errorf("%s: docs/plans/ holds internal planning documents that must not ship", f)
 		}
+	}
+}
+
+// TestBannedContentPatternMatchesAdminPackageVariants is a regression test
+// for the admin-package alternative in bannedContentPatternB64: it proves
+// the decoded pattern actually matches every separator spelling PyPI's PEP
+// 503 name normalization resolves to the same banned package name (a run
+// of one or more `-`/`_`/`.`, any casing), so a future edit to the encoded
+// pattern that silently drops or narrows this alternative fails a test
+// instead of only being noticed by accident. The variant strings are built
+// here from separate literals joined at runtime — never a contiguous
+// banned substring in this file's own source — so this test doesn't trip
+// the very guard (TestNoBannedContentInPublishedFiles) it exercises.
+func TestBannedContentPatternMatchesAdminPackageVariants(t *testing.T) {
+	prefix, suffix := "helix", "admin"
+	separators := []string{"-", "_", ".", "__", "--", "._", "...", "-_"}
+
+	for _, sep := range separators {
+		variant := prefix + sep + suffix
+		if !bannedContentPattern.MatchString(variant) {
+			t.Errorf("bannedContentPattern does not match %q, a PEP-503-equivalent spelling of the private admin package name", variant)
+		}
+	}
+
+	if unrelated := prefix + suffix; bannedContentPattern.MatchString(unrelated) {
+		t.Errorf("bannedContentPattern unexpectedly matched %q (no separator) — it should require a separator between %q and %q, not flag an unrelated word", unrelated, prefix, suffix)
 	}
 }
 

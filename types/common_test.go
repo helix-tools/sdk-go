@@ -20,7 +20,7 @@ func TestDataset_StorageUsageFieldsRoundTrip(t *testing.T) {
 		"visibility": "public",
 		"status": "active",
 		"created_at": "2026-01-01T00:00:00Z",
-		"created_by": "thalesfsp",
+		"created_by": "user-1",
 		"file_formats": ["csv", "parquet"],
 		"total_files": 42,
 		"total_size_bytes": 104857600,
@@ -72,7 +72,7 @@ func TestDataset_LastUpdatedDataAbsentDecodesToNil(t *testing.T) {
 		"visibility": "public",
 		"status": "active",
 		"created_at": "2026-01-01T00:00:00Z",
-		"created_by": "thalesfsp"
+		"created_by": "user-1"
 	}`
 
 	var ds Dataset

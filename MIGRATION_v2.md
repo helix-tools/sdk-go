@@ -19,7 +19,7 @@ Coordinated with the other Helix SDKs:
 |---|---|
 | `@helix-tools/sdk-typescript` | version-only (already matched target contract) |
 | `helix-connect` (Python) | **breaking** — admin surface removed |
-| `helix-admin` (Python) | response dataclasses moved |
+| Python admin SDK (private, not published) | response dataclasses moved |
 | `sdk-go` (this) | version-only confirmation of full parity |
 
 From 2.0.0 forward, the schemas in `sdk/schemas/` are the single source of truth and CI blocks drift across any SDK.
@@ -36,7 +36,7 @@ This SDK was audited against schemas and the other SDKs on 2026-04-21. All expec
 
 ## What's not here
 
-- **No admin surface.** Admin functionality is Python-only (`helix-admin`). A Go admin SDK is not on the roadmap.
+- **No admin surface.** Admin operations are not part of this SDK; there is no Go admin SDK, and none is on the roadmap.
 
 ## New CI guardrails (informational)
 
