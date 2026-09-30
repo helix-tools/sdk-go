@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-09-29 (v2.18.2)
 
 ### Fixed
 - List methods that follow every page (`ListDatasets`, `ListSubscriptions`,
