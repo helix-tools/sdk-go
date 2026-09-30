@@ -937,7 +937,9 @@ func (p *Producer) makeAPIRequest(ctx context.Context, method, path string, body
 
 // maxListPages caps how many pages paginateAll will follow for a single
 // list call, so a server whose total_pages disagrees with reality (or lies)
-// can't make a list method loop forever.
+// can't make a list method loop forever. A list that still has more pages
+// after maxListPages non-empty pages is an error, never a silently
+// truncated result.
 const maxListPages = 1000
 
 // paginateAll drives fetchPage across pages 1..N, appending each page's
@@ -969,6 +971,9 @@ const maxListPages = 1000
 // while omitting page on page 2 would otherwise dodge the checks above
 // (each response is self-consistent on its own) and silently re-serve the
 // same page under a shape that looks like a valid single page.
+//
+// If the server still reports more pages after maxListPages non-empty
+// pages, paginateAll returns an error instead of the rows collected so far.
 func paginateAll[T any](fetchPage func(page int) (items []T, respPage *int, totalPages int, err error)) ([]T, error) {
 	all := []T{}
 
@@ -1002,11 +1007,11 @@ func paginateAll[T any](fetchPage func(page int) (items []T, respPage *int, tota
 		all = append(all, items...)
 
 		if len(items) == 0 || page >= totalPages {
-			break
+			return all, nil
 		}
 	}
 
-	return all, nil
+	return nil, fmt.Errorf("list pagination: server reports more than %d pages; refusing to return a truncated list", maxListPages)
 }
 
 // ListMyDatasets lists all datasets uploaded by this producer, following
