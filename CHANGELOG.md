@@ -24,6 +24,13 @@
   other mint failure is unchanged.
 - `json.Marshal` of `types.Config` no longer emits the `APIKey` field (it
   used to emit `"APIKey":""`), so the key can never be serialized.
+- Fixed `credentials.MintError` detection of a revoked/expired/retired API
+  key: the real API returns the distinguishing text in `error.message`
+  (e.g. `"api key revoked"`, `"feature not enabled: sts_broker"`), not in
+  `error.code` as previously assumed, so those cases now latch and surface
+  the friendly message as intended. `api_key_expired` and
+  `static_credentials_retired` (both real `error.code` values) are
+  unaffected by this correction.
 
 ## 2026-10-01 (v2.19.0)
 

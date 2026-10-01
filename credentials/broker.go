@@ -136,6 +136,13 @@ type MintError struct {
 	// every Helix SDK (TS, Python, Go) surfaces identical text for the same
 	// server response.
 	Friendly bool
+
+	// latchable caches isLatchableMintCode's verdict, computed in mint()
+	// from the RAW error.code/error.message pair before Message is
+	// potentially overwritten with friendly text — see
+	// isLatchableMintError's doc comment for why the decision cannot be
+	// safely re-derived later from this struct's own exported fields.
+	latchable bool
 }
 
 // Error implements the error interface.
@@ -152,7 +159,7 @@ func (e *MintError) Error() string {
 
 // friendlyMintErrorMessage returns the exact customer-facing message from
 // design §4.11's error table for a mint failure, or "" when this (status,
-// code) combination has no mapped message — the caller then keeps
+// code, message) combination has no mapped message — the caller then keeps
 // MintError's generic formatting. usedAPIKey distinguishes the two possible
 // causes of a 401: today's existing "bad static key" failure (unchanged,
 // not mapped here) vs. a rejected API key (newly mapped) — a 401 is only
@@ -160,7 +167,17 @@ func (e *MintError) Error() string {
 // API-key-bootstrapped, so no existing static/SigV4 caller's error text
 // changes. These strings are shared verbatim across the TypeScript, Python
 // and Go SDKs; never edit one without the other two.
-func friendlyMintErrorMessage(statusCode int, code string, usedAPIKey bool) string {
+//
+// code and message must be the RAW envelope values (helix-tools/api's
+// error.code / error.message), not any already-substituted friendly text —
+// see the mint error contract (scratchpad/briefs/mint-error-contract.md):
+// the API's revoked-key response carries code "forbidden" (today) or
+// "api_key_expired"/"static_credentials_retired" (api PR #449's canonical
+// codes) OR "api_key_revoked" (the post-fix canonical form), with the
+// human-readable detail living in message, not code — "feature not enabled:
+// sts_broker" and "api key revoked" are both exact MESSAGE strings, never
+// codes, so they are matched against message, not code.
+func friendlyMintErrorMessage(statusCode int, code, message string, usedAPIKey bool) string {
 	if usedAPIKey && statusCode == http.StatusUnauthorized {
 		return "Helix API key was rejected. Create a new key in the Helix portal under API Keys."
 	}
@@ -168,14 +185,18 @@ func friendlyMintErrorMessage(statusCode int, code string, usedAPIKey bool) stri
 		return ""
 	}
 	switch code {
-	case "api key revoked":
+	case "api_key_revoked":
 		return "This Helix API key has been revoked. Create a new key in the Helix portal under API Keys."
 	case "api_key_expired":
 		return "This Helix API key has expired. Create a new key in the Helix portal under API Keys."
-	case "feature not enabled: sts_broker":
-		return "API keys are not enabled for this account yet. Keep using your AWS access keys, or contact Helix support."
 	case "static_credentials_retired":
 		return "AWS access keys have been retired for this account. Configure apiKey (Helix API key) instead."
+	}
+	switch message {
+	case "api key revoked":
+		return "This Helix API key has been revoked. Create a new key in the Helix portal under API Keys."
+	case "feature not enabled: sts_broker":
+		return "API keys are not enabled for this account yet. Keep using your AWS access keys, or contact Helix support."
 	default:
 		return ""
 	}
@@ -233,19 +254,44 @@ func hasCode(err error, code string) bool {
 // keeps using the very same Provider. Latching those would wrongly keep
 // surfacing a stale failure forever, even after the account-side condition
 // that caused it is resolved.
+//
+// The decision itself is made once, in mint(), from the RAW error.code/
+// error.message pair (see isLatchableMintCode) and cached on
+// MintError.latchable — never recomputed here from me.Code/me.Message,
+// because mint() overwrites Message with the friendly customer-facing text
+// before returning, so by the time an error reaches here the exact server
+// message a latch rule may key on (e.g. "api key revoked") can already be
+// gone.
 func isLatchableMintError(err error) bool {
 	var me *MintError
 	if !errors.As(err, &me) {
 		return false
 	}
-	if me.StatusCode == http.StatusUnauthorized {
+	return me.latchable
+}
+
+// isLatchableMintCode implements the mint error contract's latch rule
+// (scratchpad/briefs/mint-error-contract.md): 401 always latches; a 403
+// latches when error.code is one of the closed revoked/expired/retired
+// codes, OR — because helix-tools/api's real revoked-key and
+// not-enabled-feature responses carry their distinguishing text in
+// error.message, not error.code (code is just "forbidden") — when
+// error.message, compared exactly, is one of the two message-keyed cases.
+// code and message must be the RAW envelope values, captured before any
+// friendly-text substitution.
+func isLatchableMintCode(statusCode int, code, message string) bool {
+	if statusCode == http.StatusUnauthorized {
 		return true
 	}
-	if me.StatusCode != http.StatusForbidden {
+	if statusCode != http.StatusForbidden {
 		return false
 	}
-	switch me.Code {
-	case "api key revoked", "api_key_expired", "feature not enabled: sts_broker", "static_credentials_retired":
+	switch code {
+	case "api_key_revoked", "api_key_expired", "static_credentials_retired":
+		return true
+	}
+	switch message {
+	case "api key revoked", "feature not enabled: sts_broker":
 		return true
 	default:
 		return false
@@ -789,8 +835,13 @@ func (p *Provider) mint(ctx context.Context) (*mintSuccessResponse, bool, error)
 	}
 	mErr.Message = redactAPIKeys(mErr.Message)
 
+	// Decided from the RAW code/message pair, before the friendly-text
+	// substitution below can overwrite mErr.Message — see
+	// isLatchableMintError's doc comment.
+	mErr.latchable = isLatchableMintCode(mErr.StatusCode, mErr.Code, mErr.Message)
+
 	usedAPIKey := p.cfg.APIKey != ""
-	if friendly := friendlyMintErrorMessage(resp.StatusCode, mErr.Code, usedAPIKey); friendly != "" {
+	if friendly := friendlyMintErrorMessage(resp.StatusCode, mErr.Code, mErr.Message, usedAPIKey); friendly != "" {
 		mErr.Message = friendly
 		mErr.Friendly = true
 	}

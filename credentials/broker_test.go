@@ -561,12 +561,115 @@ func TestProvider_Retrieve_SubscriptionExpired_DoesNotLatch(t *testing.T) {
 	}
 }
 
+// TestProvider_Retrieve_403ForbiddenUnrelatedMessage_DoesNotLatch is the
+// message-keyed counterpart to TestProvider_Retrieve_SubscriptionExpired_DoesNotLatch:
+// code "forbidden" is also the code the real API sends for a revoked key
+// (see the mint error contract), so the latch rule's message-based match
+// (isLatchableMintCode) must be exact — an unrelated message under the same
+// "forbidden" code (subscription expired, impersonation denied, etc.) must
+// never latch.
+func TestProvider_Retrieve_403ForbiddenUnrelatedMessage_DoesNotLatch(t *testing.T) {
+	broker := newFakeBroker(t, func(int) (int, string) {
+		return http.StatusForbidden, errorBody("forbidden", "subscription expired", "req-sub-forbidden")
+	})
+	p, err := NewProvider(testAPIKeyBrokerConfig(broker.server.URL))
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+
+	if _, err := p.Retrieve(context.Background()); err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if broker.calls() != 1 {
+		t.Fatalf("broker calls after first Retrieve = %d, want 1", broker.calls())
+	}
+
+	if _, err := p.Retrieve(context.Background()); err == nil {
+		t.Fatal("second Retrieve: expected error, got nil")
+	}
+	if broker.calls() != 2 {
+		t.Errorf("broker calls after second Retrieve = %d, want 2 (an unrelated message under code \"forbidden\" must not latch)", broker.calls())
+	}
+}
+
+// TestProvider_Retrieve_NonJSON403Body_DoesNotCrashOrLatch proves the mint
+// error contract's "never crash on a non-JSON body" rule, and that a body
+// that fails to parse into the typed envelope must not be treated as
+// latchable — it carries no recognizable code or message, so it falls into
+// the same "everything else never latches" bucket as any other
+// unrecognized 403.
+func TestProvider_Retrieve_NonJSON403Body_DoesNotCrashOrLatch(t *testing.T) {
+	broker := newFakeBroker(t, func(int) (int, string) {
+		return http.StatusForbidden, "<html>not json at all</html>"
+	})
+	p, err := NewProvider(testAPIKeyBrokerConfig(broker.server.URL))
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+
+	if _, err := p.Retrieve(context.Background()); err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if broker.calls() != 1 {
+		t.Fatalf("broker calls after first Retrieve = %d, want 1", broker.calls())
+	}
+
+	if _, err := p.Retrieve(context.Background()); err == nil {
+		t.Fatal("second Retrieve: expected error, got nil")
+	}
+	if broker.calls() != 2 {
+		t.Errorf("broker calls after second Retrieve = %d, want 2 (a non-JSON 403 body must not latch)", broker.calls())
+	}
+}
+
+// TestProvider_Retrieve_RevokedKey_BothContractForms_Latches is the
+// acceptance test for the mint error contract's two canonical revoked-key
+// envelopes (helix-tools/api PR #449, scratchpad/briefs/mint-error-contract.md):
+// today's interim shape (code "forbidden", message "api key revoked") and
+// the post-fix canonical shape (code "api_key_revoked"). Either form must
+// latch after exactly ONE broker call across 5 Retrieve calls, driven
+// through aws.CredentialsCache — the real path every AWS SDK client
+// actually uses to obtain credentials, not a bare Provider.Retrieve loop.
+func TestProvider_Retrieve_RevokedKey_BothContractForms_Latches(t *testing.T) {
+	cases := []struct {
+		name string
+		code string
+	}{
+		{name: "interim_forbidden_code", code: "forbidden"},
+		{name: "canonical_api_key_revoked_code", code: "api_key_revoked"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			broker := newFakeBroker(t, func(int) (int, string) {
+				return http.StatusForbidden, errorBody(tc.code, "api key revoked", "req-"+tc.name)
+			})
+			p, err := NewProvider(testAPIKeyBrokerConfig(broker.server.URL))
+			if err != nil {
+				t.Fatalf("NewProvider: %v", err)
+			}
+			cache := NewCredentialsCache(p)
+
+			wantMsg := "This Helix API key has been revoked. Create a new key in the Helix portal under API Keys."
+			for i := 1; i <= 5; i++ {
+				_, err := cache.Retrieve(context.Background())
+				if err == nil || !strings.Contains(err.Error(), wantMsg) {
+					t.Fatalf("Retrieve #%d error = %v, want it to contain %q", i, err, wantMsg)
+				}
+			}
+			if broker.calls() != 1 {
+				t.Errorf("broker calls = %d, want exactly 1 across 5 Retrieve calls (revoked must latch on the first mint, form code=%q)", broker.calls(), tc.code)
+			}
+		})
+	}
+}
+
 // TestProvider_LatchDoesNotCrossProviderInstances proves "a new provider
 // starts clean": a revoked key latched on p1 must have zero effect on an
 // independent p2 constructed afterward against the same broker.
 func TestProvider_LatchDoesNotCrossProviderInstances(t *testing.T) {
 	broker := newFakeBroker(t, func(int) (int, string) {
-		return http.StatusForbidden, errorBody("api key revoked", "revoked", "req-revoke-isolated")
+		return http.StatusForbidden, errorBody("forbidden", "api key revoked", "req-revoke-isolated")
 	})
 
 	p1, err := NewProvider(testAPIKeyBrokerConfig(broker.server.URL))
@@ -608,7 +711,7 @@ func TestCredentialsCache_RevokedKeyAfterHardExpiry_LatchesWithoutRetryStorm(t *
 		if n == 1 {
 			return http.StatusOK, successBody(time.Now().Add(ttl), int64(ttl.Seconds()))
 		}
-		return http.StatusForbidden, errorBody("api key revoked", "revoked", "req-revoke-storm")
+		return http.StatusForbidden, errorBody("forbidden", "api key revoked", "req-revoke-storm")
 	})
 	p, err := NewProvider(testAPIKeyBrokerConfig(broker.server.URL))
 	if err != nil {
@@ -657,7 +760,7 @@ func TestCredentialsCache_RevokedKeyAfterHardExpiry_LatchesWithoutRetryStorm(t *
 // network. Run with -race to also prove latchedErr itself has no data race.
 func TestProvider_Retrieve_ConcurrentCallsAfterLatch_NoAdditionalNetworkCalls(t *testing.T) {
 	broker := newFakeBroker(t, func(int) (int, string) {
-		return http.StatusForbidden, errorBody("api key revoked", "revoked", "req-race-1")
+		return http.StatusForbidden, errorBody("forbidden", "api key revoked", "req-race-1")
 	})
 	p, err := NewProvider(testAPIKeyBrokerConfig(broker.server.URL))
 	if err != nil {
@@ -1651,46 +1754,60 @@ func TestNewProvider_RefusesInsecureEndpointForAPIKey(t *testing.T) {
 }
 
 // TestMintError_FriendlyMessages is acceptance question 4: every one of the
-// five server responses must surface the EXACT design §4.11 message, via
-// Error(), and — because none of these five codes is in the retryable set
-// (429/5xx) — must do so after exactly ONE broker call, never a retry
-// storm (see also TestProvider_Retrieve_APIKeyRevoked_NoRetryStorm for the
-// "race a refresh" self-attack angle on the revoked case specifically).
+// five server responses (bodies copied verbatim from the mint error
+// contract's table, scratchpad/briefs/mint-error-contract.md — NOT the
+// invented `code: "api key revoked"` / `code: "feature not enabled:
+// sts_broker"` shapes this test used before the contract fix, which passed
+// for the wrong reason because the real API puts that text in
+// error.message, never error.code) must surface the EXACT design §4.11
+// message, via Error(), and — because none of these five cases is in the
+// retryable set (429/5xx) — must do so after exactly ONE broker call, never
+// a retry storm (see also TestProvider_Retrieve_APIKeyRevoked_NoRetryStorm
+// for the "race a refresh" self-attack angle on the revoked case
+// specifically). A second, independent Retrieve must also latch (no second
+// broker call), proving these all set the negative cache, not merely map to
+// friendly text once.
 func TestMintError_FriendlyMessages(t *testing.T) {
 	cases := []struct {
 		name       string
 		statusCode int
 		code       string
+		message    string
 		wantMsg    string
 	}{
 		{
 			name:       "401_key_rejected",
 			statusCode: http.StatusUnauthorized,
-			code:       "invalid credentials",
+			code:       "unauthorized",
+			message:    "unauthorized: invalid credentials",
 			wantMsg:    "Helix API key was rejected. Create a new key in the Helix portal under API Keys.",
 		},
 		{
-			name:       "403_revoked",
+			name:       "403_revoked_canonical_code",
 			statusCode: http.StatusForbidden,
-			code:       "api key revoked",
+			code:       "api_key_revoked",
+			message:    "api key revoked",
 			wantMsg:    "This Helix API key has been revoked. Create a new key in the Helix portal under API Keys.",
 		},
 		{
 			name:       "403_expired",
 			statusCode: http.StatusForbidden,
 			code:       "api_key_expired",
+			message:    "this Helix API key has expired",
 			wantMsg:    "This Helix API key has expired. Create a new key in the Helix portal under API Keys.",
 		},
 		{
 			name:       "403_not_enabled",
 			statusCode: http.StatusForbidden,
-			code:       "feature not enabled: sts_broker",
+			code:       "forbidden",
+			message:    "feature not enabled: sts_broker",
 			wantMsg:    "API keys are not enabled for this account yet. Keep using your AWS access keys, or contact Helix support.",
 		},
 		{
 			name:       "403_retired",
 			statusCode: http.StatusForbidden,
 			code:       "static_credentials_retired",
+			message:    "static AWS credentials have been retired for this account",
 			wantMsg:    "AWS access keys have been retired for this account. Configure apiKey (Helix API key) instead.",
 		},
 	}
@@ -1698,7 +1815,7 @@ func TestMintError_FriendlyMessages(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			broker := newFakeBroker(t, func(int) (int, string) {
-				return tc.statusCode, errorBody(tc.code, "server detail that must not leak verbatim", "req-"+tc.name)
+				return tc.statusCode, errorBody(tc.code, tc.message, "req-"+tc.name)
 			})
 			p, err := NewProvider(testAPIKeyBrokerConfig(broker.server.URL))
 			if err != nil {
@@ -1722,6 +1839,16 @@ func TestMintError_FriendlyMessages(t *testing.T) {
 			}
 			if !mErr.Friendly {
 				t.Error("Friendly = false, want true for a mapped design-§4.11 message")
+			}
+
+			// Latching: a second, independent Retrieve must surface the
+			// same message WITHOUT a second broker call.
+			_, err = p.Retrieve(context.Background())
+			if err == nil || err.Error() != tc.wantMsg {
+				t.Errorf("second Retrieve error = %v, want the same message %q", err, tc.wantMsg)
+			}
+			if broker.calls() != 1 {
+				t.Errorf("broker calls after second Retrieve = %d, want still 1 (latched)", broker.calls())
 			}
 		})
 	}
@@ -1843,7 +1970,7 @@ func TestRedactAPIKeys_KeyEmbeddedInURLQueryString(t *testing.T) {
 // have been catching.
 func TestProvider_Retrieve_APIKeyRevoked_NoRetryStorm(t *testing.T) {
 	broker := newFakeBroker(t, func(int) (int, string) {
-		return http.StatusForbidden, errorBody("api key revoked", "revoked", "req-revoke-1")
+		return http.StatusForbidden, errorBody("forbidden", "api key revoked", "req-revoke-1")
 	})
 	p, err := NewProvider(testAPIKeyBrokerConfig(broker.server.URL))
 	if err != nil {
@@ -2015,7 +2142,7 @@ func TestSelectProvider_Warnings(t *testing.T) {
 // error — never silently retry with, or switch to, the static keys.
 func TestSelectProvider_NoSilentFallback_OnMintFailure(t *testing.T) {
 	broker := newFakeBroker(t, func(int) (int, string) {
-		return http.StatusForbidden, errorBody("api key revoked", "revoked", "req-no-fallback")
+		return http.StatusForbidden, errorBody("forbidden", "api key revoked", "req-no-fallback")
 	})
 
 	cfg := types.Config{
