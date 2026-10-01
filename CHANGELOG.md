@@ -1,5 +1,30 @@
 # Changelog
 
+## 2026-10-01 (v2.19.0)
+
+### Changed
+- `NewProducer` now gets the producer's encryption key from the Helix API
+  (`GET /v1/self/producer-config`, signed with your existing credentials)
+  instead of reading platform configuration directly. Your AWS credentials
+  no longer need any permission beyond calling the Helix API and encrypting
+  with your own key.
+- If that key cannot be resolved, behavior is unchanged: the producer is
+  still created, a warning is printed, and every `UploadDataset` call fails
+  with "encryption key configuration could not be resolved". Nothing is ever
+  uploaded unencrypted.
+- Dataset creation no longer sends `s3_bucket_name`: the platform owns the
+  upload destination. A value you pass explicitly in
+  `UploadOptions.DatasetOverrides` is still sent unchanged, and the API
+  validates it.
+- `Producer.BucketName` is deprecated and left empty by `NewProducer`; it is
+  kept only so existing code keeps compiling. `Producer.KMSKeyID` is kept and
+  now holds the key id returned by the API.
+
+### Removed
+- The environment variable older releases read to override where producer
+  configuration was looked up. It is ignored if still set.
+- One AWS SDK service dependency the SDK no longer uses.
+
 ## 2026-09-29 (v2.18.2)
 
 ### Fixed
@@ -923,7 +948,7 @@
 ## 2025-12-31
 
 ### Fixed
-- **SSM Path Fallbacks**: Producer now resolves per-customer parameters with legacy fallbacks and optional `HELIX_SSM_CUSTOMER_PREFIX` override.
+- **Producer Configuration Lookup**: Producer now resolves its per-customer configuration with fallbacks and an optional operator override (retired in v2.19.0).
 - **Dataset Registration**: Producer payload now includes `s3_bucket_name` and a default `access_tier` (Go API requirement) while keeping `s3_bucket` for compatibility.
 - **API Endpoint Default**: Producer/consumer now default to `HELIX_API_ENDPOINT` or `https://api-go.helix.tools` when no endpoint is provided.
 

@@ -126,14 +126,13 @@ func TestEncryptData_KMSCauseNeverLeaksIntoMessage(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
-// resolveKMSKeyID / NewProducer's bucket lookup (SSM GetParameter).
+// resolveEncryptionKeyID (GET /v1/self/producer-config).
 // ----------------------------------------------------------------------------
 
-func TestResolveKMSKeyID_SSMCauseNeverLeaksIntoMessage(t *testing.T) {
-	names := ssmParamCandidates("cust-1", "kms_key_id")
-	f := newFakeSSM(t, map[string]string{names[0]: "denied"})
+func TestResolveEncryptionKeyID_APICauseNeverLeaksIntoMessage(t *testing.T) {
+	api := newProducerConfigAPI(t, http.StatusForbidden, `{"error":"AccessDenied for `+arnAccountService+`"}`)
 
-	_, err := resolveKMSKeyID(context.Background(), f.client(), "cust-1")
+	_, err := newTestProducer(api.server.URL).resolveEncryptionKeyID(context.Background())
 
 	if err == nil {
 		t.Fatal("expected an error")
@@ -142,9 +141,10 @@ func TestResolveKMSKeyID_SSMCauseNeverLeaksIntoMessage(t *testing.T) {
 		t.Fatalf("Error() = %q, want the authored message unchanged", err.Error())
 	}
 	if strings.Contains(err.Error(), "AccessDenied") {
-		t.Fatalf("Error() = %q, leaks the raw upstream SSM error", err.Error())
+		t.Fatalf("Error() = %q, leaks the raw upstream API error", err.Error())
 	}
-	assertCauseReachable(t, err, "AccessDenied")
+	assertClean(t, err, errEncryptionKeyUnresolved)
+	assertCauseReachable(t, err, arnAccountService)
 }
 
 // ----------------------------------------------------------------------------

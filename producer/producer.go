@@ -39,18 +39,26 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/aws-sdk-go-v2/service/ssm"
-	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
 // Producer handles uploading and managing datasets on Helix Connect platform.
 type Producer struct {
 	APIEndpoint string
-	BucketName  string
-	CustomerID  string
-	KMSKeyID    string
-	Region      string
+
+	// Deprecated: the platform now owns the upload destination, so
+	// NewProducer leaves BucketName empty and dataset creation no longer
+	// sends it. The field stays only so existing code keeps compiling.
+	BucketName string
+
+	CustomerID string
+
+	// This producer's own encryption key id, supplied by the Helix API
+	// when the Producer is created. Empty means it could not be
+	// resolved, and every UploadDataset call fails until it is.
+	KMSKeyID string
+
+	Region string
 
 	awsConfig  aws.Config
 	httpClient *http.Client
@@ -114,7 +122,6 @@ func NewUploadOptions(datasetName string) UploadOptions {
 func NewProducer(cfg types.Config) (*Producer, error) {
 	// Basic validation.
 	if cfg.APIEndpoint == "" {
-		// TODO: Get this from AWS SSM.
 		envEndpoint := strings.TrimSpace(os.Getenv("HELIX_API_ENDPOINT"))
 		if envEndpoint != "" {
 			cfg.APIEndpoint = envEndpoint
@@ -124,7 +131,6 @@ func NewProducer(cfg types.Config) (*Producer, error) {
 	}
 
 	if cfg.Region == "" {
-		// TODO: Get this from AWS SSM.
 		cfg.Region = "us-east-1"
 	}
 
@@ -149,46 +155,64 @@ func NewProducer(cfg types.Config) (*Producer, error) {
 		return nil, err
 	}
 
-	// Get producer-specific resources from SSM.
-	ssmClient := ssm.NewFromConfig(awsCfg)
-
-	// Get S3 bucket name.
-	bucketParamCandidates := ssmParamCandidates(cfg.CustomerID, "s3_bucket")
-	bucketValue, err := getSSMParameterValue(context.Background(), ssmClient, bucketParamCandidates)
-	if err != nil {
-		return nil, sdkerr.Wrap(fmt.Sprintf("S3 bucket not found for producer %s", cfg.CustomerID), err)
-	}
-
-	// Get KMS key ID. Without one the Producer is still built (non-upload calls
-	// work) but every UploadDataset call fails: encryption is never skipped.
-	kmsKeyID, err := resolveKMSKeyID(context.Background(), ssmClient, cfg.CustomerID)
-	if err != nil {
-		fmt.Printf("Warning: %v\n", err)
-	}
-
-	return &Producer{
+	p := &Producer{
 		APIEndpoint: cfg.APIEndpoint,
-		BucketName:  bucketValue,
 		CustomerID:  cfg.CustomerID,
-		KMSKeyID:    kmsKeyID,
 		Region:      cfg.Region,
 
 		awsConfig:  awsCfg,
 		httpClient: &http.Client{},
 		kmsClient:  kms.NewFromConfig(awsCfg),
 		s3Client:   s3.NewFromConfig(awsCfg),
-	}, nil
-}
-
-// resolveKMSKeyID reads the producer's KMS key id from SSM. It returns an empty
-// key and an error that says plainly what a missing key means: uploads fail.
-func resolveKMSKeyID(ctx context.Context, client *ssm.Client, customerID string) (string, error) {
-	keyID, err := getSSMParameterValue(ctx, client, ssmParamCandidates(customerID, "kms_key_id"))
-	if err != nil {
-		return "", sdkerr.Wrap("encryption key configuration could not be resolved, uploads will fail until it is", err)
 	}
 
-	return keyID, nil
+	// Get the producer's encryption key id from the API. Without one the
+	// Producer is still built (non-upload calls work) but every UploadDataset
+	// call fails: encryption is never skipped.
+	kmsKeyID, err := p.resolveEncryptionKeyID(context.Background())
+	if err != nil {
+		fmt.Printf("Warning: %v\n", err)
+	}
+	p.KMSKeyID = kmsKeyID
+
+	return p, nil
+}
+
+// producerConfigPath is the API route that returns the calling producer's own
+// upload configuration.
+const producerConfigPath = "/v1/self/producer-config"
+
+// producerConfigTimeout bounds the producer-config call NewProducer makes, so
+// an unreachable API delays construction instead of hanging it.
+var producerConfigTimeout = 30 * time.Second
+
+// errEncryptionKeyUnresolved is what a producer without an encryption key is
+// told: uploads fail, they are never sent unencrypted.
+const errEncryptionKeyUnresolved = "encryption key configuration could not be resolved, uploads will fail until it is"
+
+// producerConfig is the body of GET /v1/self/producer-config.
+type producerConfig struct {
+	EncryptionKeyID string `json:"encryption_key_id"`
+}
+
+// resolveEncryptionKeyID asks the API for this producer's encryption key id.
+// Any failure (a non-2xx answer, an unreadable body, an empty value) returns
+// an empty key and an error that says plainly what it means: uploads fail. The
+// underlying cause stays reachable via errors.Unwrap/errors.As.
+func (p *Producer) resolveEncryptionKeyID(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, producerConfigTimeout)
+	defer cancel()
+
+	var cfg producerConfig
+	if err := p.makeAPIRequest(ctx, http.MethodGet, producerConfigPath, nil, &cfg); err != nil {
+		return "", sdkerr.Wrap(errEncryptionKeyUnresolved, err)
+	}
+
+	if strings.TrimSpace(cfg.EncryptionKeyID) == "" {
+		return "", errors.New(errEncryptionKeyUnresolved)
+	}
+
+	return cfg.EncryptionKeyID, nil
 }
 
 // loadAWSConfig wraps config.LoadDefaultConfig, an AWS SDK call: on failure
@@ -215,76 +239,6 @@ func validateCredentials(ctx context.Context, stsClient *sts.Client) error {
 		return sdkerr.Wrap("invalid AWS credentials", err)
 	}
 	return nil
-}
-
-func ssmParamCandidates(customerID, paramName string) []string {
-	if customerID == "" || paramName == "" {
-		return nil
-	}
-
-	env := os.Getenv("HELIX_ENVIRONMENT")
-	if env == "" {
-		env = os.Getenv("ENVIRONMENT")
-	}
-	if env == "" {
-		env = "production"
-	}
-
-	// Only an explicit operator override and the one deployed prefix. The
-	// legacy locations earlier releases also probed never held these
-	// parameters, and probing them made a real error on the live path
-	// indistinguishable from an error on a dead one.
-	prefixes := []string{}
-	if prefix := strings.TrimRight(os.Getenv("HELIX_SSM_CUSTOMER_PREFIX"), "/"); prefix != "" {
-		prefixes = append(prefixes, prefix)
-	}
-	prefixes = append(prefixes, fmt.Sprintf("/helix-tools/%s/customers", env))
-
-	seen := map[string]struct{}{}
-	candidates := []string{}
-	for _, prefix := range prefixes {
-		if prefix == "" {
-			continue
-		}
-		if _, ok := seen[prefix]; ok {
-			continue
-		}
-		seen[prefix] = struct{}{}
-		candidates = append(candidates, fmt.Sprintf("%s/%s/%s", prefix, customerID, paramName))
-	}
-	return candidates
-}
-
-// getSSMParameterValue resolves the first candidate parameter that exists.
-//
-// It fails closed: only a clean "parameter does not exist" answer moves on to
-// the next candidate. Any other error (access denied, throttling, network) is
-// the real problem with THIS candidate and is returned at once, so a later
-// candidate's unrelated failure can never mask it. When every candidate is
-// missing the error says so without repeating the parameter paths.
-func getSSMParameterValue(ctx context.Context, client *ssm.Client, names []string) (string, error) {
-	for _, name := range names {
-		resp, err := client.GetParameter(ctx, &ssm.GetParameterInput{
-			Name:           aws.String(name),
-			WithDecryption: aws.Bool(true),
-		})
-		if err != nil {
-			var notFound *ssmtypes.ParameterNotFound
-			if errors.As(err, &notFound) {
-				continue
-			}
-
-			return "", err
-		}
-
-		if resp.Parameter == nil || resp.Parameter.Value == nil {
-			return "", fmt.Errorf("SSM parameter has no value")
-		}
-
-		return aws.ToString(resp.Parameter.Value), nil
-	}
-
-	return "", errors.New("SSM parameter not found")
 }
 
 // compressData compresses data using gzip.
@@ -493,11 +447,15 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 	version := time.Now().UTC().Format("2006-01-02")
 
 	// Build dataset payload, now WITH size, version and record_count.
-	// s3_bucket_name and access_tier are also REQUIRED by the create validator
-	// (ValidateCreateDatasetRequest rejects an empty s3_bucket_name and an
-	// access_tier not in {free,premium,enterprise}); the Python/TS SDKs send them
-	// too. access_tier defaults to "free" (the only live tier) and stays
-	// overridable via DatasetOverrides below.
+	// access_tier is REQUIRED by the create validator (an access_tier not in
+	// {free,premium,enterprise} is rejected); the Python/TS SDKs send it too.
+	// It defaults to "free" (the only live tier) and stays overridable via
+	// DatasetOverrides below.
+	//
+	// s3_bucket_name is deliberately NOT sent: the platform owns the upload
+	// destination and resolves it server-side, matching Python/TS. A caller
+	// who passes it explicitly in DatasetOverrides still has it sent
+	// untouched, and the API validates it.
 	//
 	// visibility is sent explicitly as "private" to match Python/TS (both send
 	// it on create) even though the server defaults an empty/absent visibility
@@ -529,7 +487,6 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 		"category":       opts.Category,
 		"data_freshness": string(opts.DataFreshness),
 		"producer_id":    p.CustomerID,
-		"s3_bucket_name": p.BucketName,
 		"s3_key":         s3Key,
 		"access_tier":    "free",
 		"visibility":     "private",

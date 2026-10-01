@@ -67,7 +67,6 @@ func main() {
 	}
 	fmt.Printf("✅ Producer SDK initialized\n")
 	fmt.Printf("   Customer ID: %s\n", prod.CustomerID)
-	fmt.Printf("   S3 Bucket: %s\n", prod.BucketName)
 	fmt.Printf("   KMS Key: %s\n\n", prod.KMSKeyID)
 
 	// Step 2: Create test dataset file

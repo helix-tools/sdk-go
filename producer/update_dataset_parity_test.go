@@ -15,7 +15,7 @@ import (
 )
 
 // newTestProducer builds a *Producer wired to the given API endpoint without
-// calling NewProducer (which hits STS + SSM). Same-package access to
+// calling NewProducer (which calls STS and the producer-config route). Same-package access to
 // unexported fields is intentional, mirroring consumer's newTestConsumer.
 func newTestProducer(endpoint string) *Producer {
 	awsCfg := aws.Config{

@@ -19,7 +19,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/ssm"
 )
 
 // DefaultAPIEndpoint is the default API endpoint for production.
@@ -141,47 +140,6 @@ func (c TestConfig) RequireTestDatasetID(t *testing.T) {
 	}
 }
 
-// LoadCredentialsFromSSM loads a test customer's access key pair from the
-// secure parameter store, using the AWS helix profile. Test harness only.
-func LoadCredentialsFromSSM(ctx context.Context, customerID string) (Credentials, error) {
-	// Load AWS config with helix profile.
-	awsCfg, err := config.LoadDefaultConfig(ctx,
-		config.WithRegion(DefaultRegion),
-		config.WithSharedConfigProfile("helix"),
-	)
-	if err != nil {
-		return Credentials{}, fmt.Errorf("failed to load AWS config: %w", err)
-	}
-
-	ssmClient := ssm.NewFromConfig(awsCfg)
-
-	// Get access key ID.
-	accessKeyParam := fmt.Sprintf("/helix/production/customers/%s/aws_access_key_id", customerID)
-	accessKeyResp, err := ssmClient.GetParameter(ctx, &ssm.GetParameterInput{
-		Name:           aws.String(accessKeyParam),
-		WithDecryption: aws.Bool(true),
-	})
-	if err != nil {
-		return Credentials{}, fmt.Errorf("failed to get access key from SSM: %w", err)
-	}
-
-	// Get secret access key.
-	secretKeyParam := fmt.Sprintf("/helix/production/customers/%s/aws_secret_access_key", customerID)
-	secretKeyResp, err := ssmClient.GetParameter(ctx, &ssm.GetParameterInput{
-		Name:           aws.String(secretKeyParam),
-		WithDecryption: aws.Bool(true),
-	})
-	if err != nil {
-		return Credentials{}, fmt.Errorf("failed to get secret key from SSM: %w", err)
-	}
-
-	return Credentials{
-		CustomerID:         customerID,
-		AWSAccessKeyID:     *accessKeyResp.Parameter.Value,
-		AWSSecretAccessKey: *secretKeyResp.Parameter.Value,
-	}, nil
-}
-
 // NewAWSConfig creates an AWS config with static credentials.
 func NewAWSConfig(ctx context.Context, creds Credentials, region string) (aws.Config, error) {
 	return config.LoadDefaultConfig(ctx,
@@ -203,8 +161,8 @@ func NewAWSConfig(ctx context.Context, creds Credentials, region string) (aws.Co
 //
 // Test/e2e utility only, mirroring NewAWSConfig's signature — production SDK
 // callers get this wiring automatically via types.Config.CredentialMode
-// "sts" in consumer.NewConsumer/producer.NewProducer. NewAWSConfig and
-// LoadCredentialsFromSSM are untouched.
+// "sts" in consumer.NewConsumer/producer.NewProducer. NewAWSConfig is
+// untouched.
 func NewAWSConfigSTS(ctx context.Context, apiEndpoint string, creds Credentials, region string) (aws.Config, error) {
 	provider, err := stscreds.NewProvider(stscreds.BrokerConfig{
 		APIEndpoint:        apiEndpoint,

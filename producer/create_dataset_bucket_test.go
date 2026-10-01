@@ -12,15 +12,15 @@ import (
 	"testing"
 )
 
-// TestCreateDatasetRecord_IncludesS3BucketName drives the real createDatasetRecord
-// (the POST-first path UploadDataset uses) and pins that the POST /v1/datasets
-// body carries s3_bucket_name == the producer's BucketName.
+// TestCreateDatasetRecord_OmitsS3BucketNameByDefault drives the real
+// createDatasetRecord (the path UploadDataset uses) and pins the POST
+// /v1/datasets body.
 //
-// The Go API's dataset-create validator REJECTS an empty s3_bucket_name; this
-// path previously omitted the field, so Go UploadDataset 400'd against the
-// deployed API while Python/TS succeeded. Regression guard for that cross-SDK
-// create-payload drift (found 2026-07-05 by the SDK-only E2E suite).
-func TestCreateDatasetRecord_IncludesS3BucketName(t *testing.T) {
+// The platform owns the upload destination: the API resolves it server-side,
+// so the SDK no longer sends s3_bucket_name (nor its legacy alias s3_bucket),
+// matching Python/TS. The test producer has a non-empty BucketName on purpose:
+// even a caller who set the deprecated field by hand must not have it sent.
+func TestCreateDatasetRecord_OmitsS3BucketNameByDefault(t *testing.T) {
 	var gotPath, gotMethod string
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -50,12 +50,10 @@ func TestCreateDatasetRecord_IncludesS3BucketName(t *testing.T) {
 	if gotMethod != http.MethodPost || gotPath != "/v1/datasets" {
 		t.Fatalf("expected POST /v1/datasets, got %s %s", gotMethod, gotPath)
 	}
-	got, ok := gotBody["s3_bucket_name"]
-	if !ok {
-		t.Fatalf("create-dataset body is MISSING s3_bucket_name; keys=%v", keysOf(gotBody))
-	}
-	if got != "example-bucket-9" {
-		t.Fatalf("expected s3_bucket_name=%q, got %q", "example-bucket-9", got)
+	for _, key := range []string{"s3_bucket_name", "s3_bucket"} {
+		if got, present := gotBody[key]; present {
+			t.Fatalf("create-dataset body carries %s=%v; the platform owns the destination and the SDK must not send it", key, got)
+		}
 	}
 
 	// access_tier is likewise required by the create validator (free/premium/enterprise).
@@ -89,6 +87,35 @@ func TestCreateDatasetRecord_IncludesS3BucketName(t *testing.T) {
 	}
 	if md["compression_enabled"] != true {
 		t.Fatalf("expected metadata.compression_enabled=true, got %v", md["compression_enabled"])
+	}
+}
+
+// TestCreateDatasetRecord_S3BucketNameOverridePassesThrough is the edge case:
+// a caller who explicitly passes s3_bucket_name in DatasetOverrides still has
+// it sent untouched — the API, not the SDK, decides whether it is acceptable.
+func TestCreateDatasetRecord_S3BucketNameOverridePassesThrough(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ds-1","upload_url":"https://example.invalid/put"}`))
+	}))
+	defer server.Close()
+
+	p := newTestProducer(server.URL)
+
+	opts := NewUploadOptions("bucket-override-test")
+	opts.DatasetOverrides = map[string]any{"s3_bucket_name": "caller-chosen-bucket"}
+	if _, err := p.createDatasetRecord(context.Background(), writeNDJSON(t, 3), opts, fakeProcessedFileData()); err != nil {
+		t.Fatalf("createDatasetRecord returned error: %v", err)
+	}
+
+	if gotBody["s3_bucket_name"] != "caller-chosen-bucket" {
+		t.Fatalf("s3_bucket_name = %v, want the caller's explicit override %q", gotBody["s3_bucket_name"], "caller-chosen-bucket")
+	}
+	if _, present := gotBody["s3_bucket"]; present {
+		t.Fatalf("create-dataset body carries s3_bucket=%v; only the caller's own override key may be sent", gotBody["s3_bucket"])
 	}
 }
 

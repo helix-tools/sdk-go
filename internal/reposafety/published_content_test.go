@@ -18,7 +18,7 @@ import (
 // pattern's behavior (decoded once below) while keeping this source file
 // itself free of any banned literal, so it needs no self-exemption from
 // the scan it runs.
-const bannedContentPatternB64 = "KD9pKXJpbmdib29zdHxwaG9uZVwuY29tfGNsaWNrID91cHxkaXNjb3JkfFxiODZbMC05YS16XXs3fVxifC9Vc2Vycy9bQS1aYS16XXwvcHJpdmF0ZS90bXAvY2xhdWRlfGRtZS1wcm9kdWNlci18aGVsaXhbLV8uXSthZG1pbg=="
+const bannedContentPatternB64 = "KD9pKXJpbmdib29zdHxwaG9uZVwuY29tfGNsaWNrID91cHxkaXNjb3JkfFxiODZbMC05YS16XXs3fVxifC9Vc2Vycy9bQS1aYS16XXwvcHJpdmF0ZS90bXAvY2xhdWRlfGRtZS1wcm9kdWNlci18aGVsaXhbLV8uXSthZG1pbnxoZWxpeC1wcm9kdWNlci18aGVsaXhfc3NtX3wvaGVsaXgoLXRvb2xzKT8vW2EtejAtOSV7fSRfLV0rL2N1c3RvbWVyc1xi"
 
 // bannedContentPattern is the exact banned-content list applied to every
 // published Helix SDK artifact (this module's zip, the npm tarball, the
@@ -32,7 +32,11 @@ const bannedContentPatternB64 = "KD9pKXJpbmdib29zdHxwaG9uZVwuY29tfGNsaWNrID91cHx
 // package name and must be caught, not just the single-separator form; the
 // admin SDK is never published, so pointing at its package name anywhere
 // in a public artifact is a dependency-confusion risk, not just an
-// internals leak). Case-insensitive throughout — none of these belong in
+// internals leak), and the platform's internal producer-configuration
+// layout — the lookup prefix older releases read, the environment variable
+// that overrode it, and the producer bucket naming convention — which no
+// published artifact needs now that the API supplies that configuration.
+// Case-insensitive throughout — none of these belong in
 // the published tree in any casing. See bannedContentPatternB64's doc
 // comment for why it's encoded, and
 // TestBannedContentPatternMatchesAdminPackageVariants for the separator
@@ -136,6 +140,40 @@ func TestBannedContentPatternMatchesAdminPackageVariants(t *testing.T) {
 
 	if unrelated := prefix + suffix; bannedContentPattern.MatchString(unrelated) {
 		t.Errorf("bannedContentPattern unexpectedly matched %q (no separator) — it should require a separator between %q and %q, not flag an unrelated word", unrelated, prefix, suffix)
+	}
+}
+
+// TestBannedContentPatternMatchesProducerConfigLayout is a regression test
+// for the producer-configuration alternatives in bannedContentPatternB64: the
+// old lookup prefix (literal environment segment or a format verb), the
+// override variable, and the bucket naming convention must each be caught,
+// while an ordinary module import path that shares the organization name is
+// not. Every sample is assembled at runtime from separate fragments, so no
+// banned string appears contiguously in this file.
+func TestBannedContentPatternMatchesProducerConfigLayout(t *testing.T) {
+	org := "helix" + "-tools"
+	mustMatch := []string{
+		"/" + org + "/production/" + "customers/c-1/kms_key_id",
+		"/" + org + "/%s/" + "customers",
+		"/helix/production/" + "customers/c-1/aws_access_key_id",
+		"HELIX" + "_SSM_" + "CUSTOMER_PREFIX",
+		"helix" + "-producer-" + "company-123-production",
+	}
+	for _, s := range mustMatch {
+		if !bannedContentPattern.MatchString(s) {
+			t.Errorf("bannedContentPattern does not match %q, a piece of the internal producer-configuration layout", s)
+		}
+	}
+
+	mustNotMatch := []string{
+		"github.com/" + org + "/sdk-go/v2/producer",
+		"/v1/self/producer-config",
+		"example-bucket-company-123",
+	}
+	for _, s := range mustNotMatch {
+		if bannedContentPattern.MatchString(s) {
+			t.Errorf("bannedContentPattern unexpectedly matched %q, which is public and must stay allowed", s)
+		}
 	}
 }
 
