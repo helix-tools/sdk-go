@@ -1948,7 +1948,7 @@ func TestSelectProvider_Warnings(t *testing.T) {
 		if _, err := SelectProvider("https://api-go.helix.tools", cfg); err != nil {
 			t.Fatalf("SelectProvider: %v", err)
 		}
-		if n := countOccurrences(buf.String(), warnStaticKeysIgnoredAPIKeySet); n != 1 {
+		if n := countOccurrences(buf.String(), warnMsgStaticFieldsIgnoredWhenKeySet); n != 1 {
 			t.Errorf("warning count = %d, want exactly 1 (output: %q)", n, buf.String())
 		}
 	})
@@ -1965,7 +1965,7 @@ func TestSelectProvider_Warnings(t *testing.T) {
 		if _, err := SelectProvider("https://api-go.helix.tools", cfg); err != nil {
 			t.Fatalf("SelectProvider: %v", err)
 		}
-		if n := countOccurrences(buf.String(), warnAPIKeyIgnoredStaticMode); n != 1 {
+		if n := countOccurrences(buf.String(), warnMsgKeyFieldIgnoredInStaticMode); n != 1 {
 			t.Errorf("warning count = %d, want exactly 1 (output: %q)", n, buf.String())
 		}
 	})
@@ -1982,7 +1982,7 @@ func TestSelectProvider_Warnings(t *testing.T) {
 		if _, err := SelectProvider("https://api-go.helix.tools", cfg); err != nil {
 			t.Fatalf("SelectProvider: %v", err)
 		}
-		if n := countOccurrences(buf.String(), warnStaticKeysIgnoredAPIKeySet); n != 1 {
+		if n := countOccurrences(buf.String(), warnMsgStaticFieldsIgnoredWhenKeySet); n != 1 {
 			t.Errorf("warning count = %d, want exactly 1 (output: %q)", n, buf.String())
 		}
 	})

@@ -22,6 +22,8 @@
   rejected, revoked, or expired API key, or for AWS access keys retired on
   a company that has moved to API keys — existing error handling for every
   other mint failure is unchanged.
+- `json.Marshal` of `types.Config` no longer emits the `APIKey` field (it
+  used to emit `"APIKey":""`), so the key can never be serialized.
 
 ## 2026-10-01 (v2.19.0)
 

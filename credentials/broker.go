@@ -880,8 +880,8 @@ var warningWriter io.Writer = os.Stderr
 // package's usual "helix sdk-go: " convention (see
 // producer.deprecationWriter's callers).
 const (
-	warnAPIKeyIgnoredStaticMode    = "apiKey is ignored because credentialMode is 'static'"
-	warnStaticKeysIgnoredAPIKeySet = "AWS access keys are ignored because apiKey is set"
+	warnMsgKeyFieldIgnoredInStaticMode   = "apiKey is ignored because credentialMode is 'static'"
+	warnMsgStaticFieldsIgnoredWhenKeySet = "AWS access keys are ignored because apiKey is set"
 )
 
 func warn(message string) {
@@ -897,13 +897,13 @@ func warn(message string) {
 //
 //  1. Explicit CredentialMode:
 //     - "static" requires static keys; a set APIKey is ignored, with the
-//     warnAPIKeyIgnoredStaticMode warning.
+//     warnMsgKeyFieldIgnoredInStaticMode warning.
 //     - "sts" bootstraps with APIKey if set (ignoring static keys, if also
-//     set, with the warnStaticKeysIgnoredAPIKeySet warning), else with
+//     set, with the warnMsgStaticFieldsIgnoredWhenKeySet warning), else with
 //     static keys (today's existing behavior, unchanged).
 //  2. No mode set:
 //     - APIKey set -> sts via the key; static keys, if also set, are
-//     ignored with the warnStaticKeysIgnoredAPIKeySet warning.
+//     ignored with the warnMsgStaticFieldsIgnoredWhenKeySet warning.
 //     - else static keys set -> "static" (preserves every existing
 //     caller's behavior exactly — bootstrap-by-static-key "sts" is NEVER
 //     inferred, only explicit opt-in).
@@ -922,7 +922,7 @@ func SelectProvider(apiEndpoint string, cfg types.Config) (aws.CredentialsProvid
 	if mode == "" {
 		if hasAPIKey {
 			if hasStaticKeys {
-				warn(warnStaticKeysIgnoredAPIKeySet)
+				warn(warnMsgStaticFieldsIgnoredWhenKeySet)
 			}
 			return newAPIKeyProvider(apiEndpoint, cfg.CustomerID, cfg.Region, apiKey)
 		}
@@ -939,14 +939,14 @@ func SelectProvider(apiEndpoint string, cfg types.Config) (aws.CredentialsProvid
 			return nil, fmt.Errorf("credentials: CredentialMode %q requires AWSAccessKeyID and AWSSecretAccessKey", types.CredentialModeStatic)
 		}
 		if hasAPIKey {
-			warn(warnAPIKeyIgnoredStaticMode)
+			warn(warnMsgKeyFieldIgnoredInStaticMode)
 		}
 		return awscreds.NewStaticCredentialsProvider(cfg.AWSAccessKeyID, cfg.AWSSecretAccessKey, ""), nil
 
 	case types.CredentialModeSTS:
 		if hasAPIKey {
 			if hasStaticKeys {
-				warn(warnStaticKeysIgnoredAPIKeySet)
+				warn(warnMsgStaticFieldsIgnoredWhenKeySet)
 			}
 			return newAPIKeyProvider(apiEndpoint, cfg.CustomerID, cfg.Region, apiKey)
 		}
