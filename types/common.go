@@ -51,7 +51,10 @@ type Config struct {
 	// credentials.SelectProvider's mode-resolution rule); the unused
 	// credential is ignored with a one-time warning, never silently mixed.
 	// Additive field: the zero value is a complete no-op for every existing
-	// caller.
+	// caller. Excluded from json.Marshal entirely (see Config.MarshalJSON)
+	// so an incidental marshal (logging, a debug dump) never serializes the
+	// raw key — String/GoString redaction alone does not cover
+	// encoding/json, which never consults fmt.Stringer/GoStringer.
 	APIKey string
 
 	// CredentialMode selects "static" (default; existing AKIA behavior,
@@ -81,6 +84,42 @@ func (c Config) String() string {
 	return fmt.Sprintf(
 		"Config{APIEndpoint:%q, AWSAccessKeyID:%q, AWSSecretAccessKey:%q, CustomerID:%q, Region:%q, APIKey:%q, CredentialMode:%q}",
 		c.APIEndpoint, c.AWSAccessKeyID, secret, c.CustomerID, c.Region, key, c.CredentialMode)
+}
+
+// GoString implements fmt.GoStringer. Go's fmt package only consults
+// Stringer for %v/%+v — %#v bypasses it entirely and reflects every field
+// verbatim via reflection. Without this method, "%#v" of a Config would
+// print the raw AWSSecretAccessKey and APIKey.
+func (c Config) GoString() string {
+	return c.String()
+}
+
+// MarshalJSON implements json.Marshaler, omitting APIKey from the encoded
+// output entirely (never present, not merely an empty string) — see the
+// field's own doc comment for why. The shadow type below is an ANONYMOUS
+// struct literal, not a named type declaration, so it is never mistaken for
+// one of the API's wire payloads by this package's own TestWireStructs
+// (wire_names_test.go), which treats every named struct declared in this
+// package as a wire type needing a snake_case json tag on each field unless
+// explicitly exempted — Config is SDK-side configuration, not a wire
+// payload, and a struct tag on APIKey alone would otherwise flip that
+// classification for the whole type.
+func (c Config) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		APIEndpoint        string
+		AWSAccessKeyID     string
+		AWSSecretAccessKey string
+		CustomerID         string
+		Region             string
+		CredentialMode     CredentialMode
+	}{
+		APIEndpoint:        c.APIEndpoint,
+		AWSAccessKeyID:     c.AWSAccessKeyID,
+		AWSSecretAccessKey: c.AWSSecretAccessKey,
+		CustomerID:         c.CustomerID,
+		Region:             c.Region,
+		CredentialMode:     c.CredentialMode,
+	})
 }
 
 // DataFreshness enumerates allowed dataset update cadences.

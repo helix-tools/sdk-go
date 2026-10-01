@@ -31,6 +31,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -186,7 +187,17 @@ func friendlyMintErrorMessage(statusCode int, code string, usedAPIKey bool) stri
 // message, static or API-key bootstrapped: if a server bug ever echoed a
 // submitted key back in an error body, it must never reach a caller's error
 // text or logs.
-var apiKeyPattern = regexp.MustCompile(`\bhlx_[A-Za-z0-9_-]{43}\b`)
+//
+// Matches "hlx_" plus a run of one or more base64url characters, rather than
+// a fixed {43} bounded by \b: \b asserts a transition between a word and a
+// non-word character, and '-' is NOT a word character, so a trailing \b
+// fails to match — and therefore fails to redact — any real key that
+// happens to end in '-'. Matching the whole contiguous base64url run
+// instead needs no boundary assertion: it stops at the first character
+// outside the key alphabet, whatever that character is (end of string,
+// whitespace, a URL delimiter like '&' or '?', etc.), so it can never
+// under-redact a trailing character the way the \b version did.
+var apiKeyPattern = regexp.MustCompile(`hlx_[A-Za-z0-9_-]{43,}`)
 
 func redactAPIKeys(s string) string {
 	return apiKeyPattern.ReplaceAllString(s, "hlx_<redacted>")
@@ -203,6 +214,42 @@ func IsCustomerSuspended(err error) bool { return hasCode(err, ErrCodeCustomerSu
 func hasCode(err error, code string) bool {
 	me, ok := err.(*MintError)
 	return ok && me.Code == code
+}
+
+// isLatchableMintError reports whether err is a *MintError representing a
+// permanent problem with THIS Provider's own bootstrap credential — a
+// rejected signature/key (401), or one of the specific 403 causes design
+// §4.11 maps to a friendly message (a revoked/expired/not-enabled/retired
+// key; see friendlyMintErrorMessage). These are properties of the
+// credential value baked into BrokerConfig at construction time, which
+// never changes for the lifetime of a Provider, so retrying — or simply
+// waiting — can never produce a different outcome; see Provider.latchedErr.
+//
+// Every OTHER 4xx (subscription_expired, subscription_window_too_short,
+// role_not_provisioned, customer_suspended, insufficient_scope, and any
+// other 403/400) is deliberately NOT latched: those reflect ACCOUNT-level
+// state that can change independently of the credential — a renewed
+// subscription, a lifted suspension, a provisioned role — while the caller
+// keeps using the very same Provider. Latching those would wrongly keep
+// surfacing a stale failure forever, even after the account-side condition
+// that caused it is resolved.
+func isLatchableMintError(err error) bool {
+	var me *MintError
+	if !errors.As(err, &me) {
+		return false
+	}
+	if me.StatusCode == http.StatusUnauthorized {
+		return true
+	}
+	if me.StatusCode != http.StatusForbidden {
+		return false
+	}
+	switch me.Code {
+	case "api key revoked", "api_key_expired", "feature not enabled: sts_broker", "static_credentials_retired":
+		return true
+	default:
+		return false
+	}
 }
 
 // mintSuccessResponse mirrors credential_session.schema.json's "success"
@@ -282,11 +329,18 @@ type BrokerConfig struct {
 	// ignored by this Provider. Leading/trailing whitespace (e.g. a
 	// trailing newline from an env file) is trimmed. NewProvider refuses to
 	// construct a Provider that would send this over an insecure transport
-	// — see allowsAPIKeyTransport.
+	// — see allowsAPIKeyTransport. Excluded from json.Marshal entirely (see
+	// BrokerConfig.MarshalJSON) so an incidental marshal (logging, a debug
+	// dump) never serializes the raw key — String/GoString redaction alone
+	// does not cover encoding/json, which does not consult
+	// fmt.Stringer/GoStringer at all.
 	APIKey string
 
 	// HTTPClient overrides the client used for mint HTTP calls (tests).
-	// Defaults to a client with defaultMintTimeout when nil.
+	// Defaults to a client with defaultMintTimeout when nil. Its Transport,
+	// Timeout and Jar are honored, but its CheckRedirect is always replaced
+	// with one that refuses every redirect on the mint call — see
+	// refuseMintRedirect for why.
 	HTTPClient *http.Client
 
 	// now overrides the clock (tests only, unexported). Defaults to
@@ -309,6 +363,42 @@ func (c BrokerConfig) String() string {
 	return fmt.Sprintf(
 		"BrokerConfig{APIEndpoint:%q, CustomerID:%q, Region:%q, AWSAccessKeyID:%q, AWSSecretAccessKey:%q, APIKey:%q}",
 		c.APIEndpoint, c.CustomerID, c.Region, c.AWSAccessKeyID, secret, key)
+}
+
+// GoString implements fmt.GoStringer. Go's fmt package only consults
+// Stringer for %v/%+v — %#v bypasses it entirely and reflects every field,
+// including unexported ones, verbatim. Without this method, "%#v" of a
+// BrokerConfig (or a *Provider holding one, see Provider.GoString) would
+// print the raw AWSSecretAccessKey and APIKey.
+func (c BrokerConfig) GoString() string {
+	return c.String()
+}
+
+// MarshalJSON implements json.Marshaler, omitting APIKey from the encoded
+// output entirely (never present, not merely an empty string) — see the
+// field's own doc comment, and Config.MarshalJSON in package types for why
+// the shadow type below is an anonymous struct literal rather than a named
+// type: this package's own TestWireStructs (types/wire_names_test.go) walks
+// every named struct declared in a wire-facing package and would otherwise
+// treat a tagged BrokerConfig as a wire payload requiring every field to
+// carry a snake_case json tag, which BrokerConfig (SDK-side configuration,
+// never itself serialized to the API) is not.
+func (c BrokerConfig) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		APIEndpoint        string
+		CustomerID         string
+		Region             string
+		AWSAccessKeyID     string
+		AWSSecretAccessKey string
+		HTTPClient         *http.Client
+	}{
+		APIEndpoint:        c.APIEndpoint,
+		CustomerID:         c.CustomerID,
+		Region:             c.Region,
+		AWSAccessKeyID:     c.AWSAccessKeyID,
+		AWSSecretAccessKey: c.AWSSecretAccessKey,
+		HTTPClient:         c.HTTPClient,
+	})
 }
 
 // allowsAPIKeyTransport reports whether apiEndpoint is safe to carry a
@@ -336,6 +426,33 @@ func allowsAPIKeyTransport(apiEndpoint string) bool {
 	}
 }
 
+// errMintRedirectRefused is returned by refuseMintRedirect to fail closed on
+// ANY redirect from a mint response. The mint endpoint is a fixed,
+// fully-qualified URL (BrokerConfig.APIEndpoint + MintPath) that never
+// legitimately redirects; Go's default http.Client would otherwise replay
+// this request's Authorization header (a SigV4 signature or a raw Helix API
+// key) at whatever scheme/host a Location header names — including an
+// https-> http downgrade, which would then carry the credential in
+// cleartext. Go's own redirect handling only strips sensitive headers when
+// the redirect target's HOST differs (see net/http's
+// shouldCopyHeaderOnRedirect); it does not consider the scheme at all, so a
+// same-host https->http redirect would otherwise sail through with
+// Authorization intact. Refusing every redirect (not just scheme/host
+// changes) also covers a same-host, same-scheme redirect — see
+// refuseMintRedirect's doc comment for why that case is refused too.
+var errMintRedirectRefused = errors.New("credentials: refusing to follow a redirect on a credential mint request")
+
+// refuseMintRedirect is installed as every mint HTTP client's CheckRedirect,
+// unconditionally. The mint endpoint (BrokerConfig.APIEndpoint + MintPath)
+// is a fixed URL with no legitimate reason to redirect at all, so refusing
+// every redirect — not just a scheme downgrade or a host change — is the
+// correct, simplest fail-closed policy: a legitimate API move should update
+// APIEndpoint/MintPath in configuration, never rely on silently following a
+// redirect from a credential-minting endpoint.
+func refuseMintRedirect(*http.Request, []*http.Request) error {
+	return errMintRedirectRefused
+}
+
 // Provider implements aws.CredentialsProvider by minting a fresh AWS STS
 // session credential from the Helix credential broker on every Retrieve
 // call. Provider itself never caches — wrap it with NewCredentialsCache for
@@ -358,6 +475,16 @@ type Provider struct {
 	mu             sync.Mutex
 	lastHardExpiry time.Time
 	haveHardExpiry bool
+
+	// latchedErr negative-caches a mint failure that reflects a permanent
+	// problem with THIS Provider's own bootstrap credential — see
+	// isLatchableMintError — rather than account-level state that could
+	// resolve on its own. BrokerConfig's credential fields are immutable
+	// after NewProvider, so once this Provider's own credential is
+	// confirmed bad, retrying can never produce a different outcome: every
+	// later Retrieve returns the same error without a network call. A fresh
+	// Provider (a new credential) always starts with this unset.
+	latchedErr error
 }
 
 // String implements fmt.Stringer, delegating to cfg's own redaction. Go's
@@ -367,6 +494,13 @@ type Provider struct {
 // relying on that implementation detail.
 func (p *Provider) String() string {
 	return fmt.Sprintf("Provider{%s}", p.cfg.String())
+}
+
+// GoString implements fmt.GoStringer, delegating to cfg's own redaction —
+// see BrokerConfig.GoString for why %#v needs its own, separate coverage
+// from String/Stringer.
+func (p *Provider) GoString() string {
+	return p.String()
 }
 
 // NewProvider validates cfg and returns a Provider. It performs no network
@@ -393,10 +527,25 @@ func NewProvider(cfg BrokerConfig) (*Provider, error) {
 		return nil, fmt.Errorf("credentials: refusing to send a Helix API key to endpoint %q — APIEndpoint must be https://, or host localhost/127.0.0.1", cfg.APIEndpoint)
 	}
 
-	httpClient := cfg.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: defaultMintTimeout}
+	baseClient := cfg.HTTPClient
+	if baseClient == nil {
+		baseClient = &http.Client{Timeout: defaultMintTimeout}
 	}
+	// A fresh *http.Client, never the caller-supplied one mutated in place:
+	// mutating cfg.HTTPClient's own CheckRedirect would silently change the
+	// behavior of any OTHER code sharing that same *http.Client pointer.
+	// Transport/Timeout/Jar are carried over so a caller-supplied client
+	// (tests, a custom Transport) still behaves as configured; CheckRedirect
+	// is always refuseMintRedirect regardless of what the caller set, since
+	// this is a Provider-owned security invariant, not something to leave to
+	// chance in a client documented as a test override.
+	httpClient := &http.Client{
+		Transport:     baseClient.Transport,
+		Jar:           baseClient.Jar,
+		Timeout:       baseClient.Timeout,
+		CheckRedirect: refuseMintRedirect,
+	}
+
 	now := cfg.now
 	if now == nil {
 		now = time.Now
@@ -413,8 +562,13 @@ func NewProvider(cfg BrokerConfig) (*Provider, error) {
 // credential's effective client-side lifetime beyond what the server
 // actually granted.
 func (p *Provider) Retrieve(ctx context.Context) (aws.Credentials, error) {
+	if err := p.getLatchedError(); err != nil {
+		return aws.Credentials{}, err
+	}
+
 	resp, err := p.mintWithRetry(ctx)
 	if err != nil {
+		p.latchIfPermanent(err)
 		return aws.Credentials{}, err
 	}
 
@@ -448,6 +602,28 @@ func (p *Provider) Retrieve(ctx context.Context) (aws.Credentials, error) {
 		Expires:         expires,
 		Source:          "HelixCredentialBroker",
 	}, nil
+}
+
+// getLatchedError returns the negative-cached mint error, if any — see
+// Provider.latchedErr.
+func (p *Provider) getLatchedError() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.latchedErr
+}
+
+// latchIfPermanent negative-caches err in p.latchedErr if isLatchableMintError
+// reports it reflects a permanent problem with this Provider's own bootstrap
+// credential. A no-op for every other error (retryable transport/5xx
+// failures that exhausted mintWithRetry's bounded retries, and account-level
+// 4xx refusals that could resolve independently of the credential).
+func (p *Provider) latchIfPermanent(err error) {
+	if !isLatchableMintError(err) {
+		return
+	}
+	p.mu.Lock()
+	p.latchedErr = err
+	p.mu.Unlock()
 }
 
 // HandleFailToRefresh implements aws.HandleFailRefreshCredentialsCacheStrategy.

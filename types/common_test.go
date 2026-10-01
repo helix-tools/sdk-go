@@ -136,3 +136,63 @@ func TestConfig_String_RedactsSecrets(t *testing.T) {
 		t.Errorf("String() on a zero-value Config = %q, want no redaction placeholder when there is nothing to redact", emptyOut)
 	}
 }
+
+// TestConfig_GoString_RedactsSecrets proves %#v does not bypass redaction:
+// Go's fmt package only consults fmt.Stringer for %v/%+v — %#v bypasses it
+// entirely and reflects every field (including unexported ones) verbatim,
+// so TestConfig_String_RedactsSecrets passing is not sufficient on its own.
+func TestConfig_GoString_RedactsSecrets(t *testing.T) {
+	cfg := Config{
+		APIEndpoint:        "https://api-go.helix.tools",
+		AWSAccessKeyID:     "AKIA-VISIBLE-NOT-SECRET",
+		AWSSecretAccessKey: "aStaticSecretThatMustNeverBePrinted12345",
+		CustomerID:         "customer-redaction-test",
+		Region:             "us-east-1",
+		APIKey:             "hlx_oHBvRPOIvGrv5iFlbCBFNOgmBjMtpsiaOclRz3AwzKs",
+		CredentialMode:     CredentialModeSTS,
+	}
+
+	out := fmt.Sprintf("%#v", cfg)
+	if strings.Contains(out, cfg.APIKey) {
+		t.Fatalf("%%#v = %q, leaked the raw API key", out)
+	}
+	if strings.Contains(out, cfg.AWSSecretAccessKey) {
+		t.Fatalf("%%#v = %q, leaked the raw AWS secret access key", out)
+	}
+	// Negative control: a non-secret field must still be visible.
+	if !strings.Contains(out, cfg.AWSAccessKeyID) {
+		t.Errorf("%%#v = %q, want the non-secret AWSAccessKeyID still visible", out)
+	}
+}
+
+// TestConfig_JSONMarshal_OmitsAPIKey proves json.Marshal — which never
+// consults String/GoString at all — also never emits the raw key, and that
+// the fix changes nothing else about the JSON shape for a config with no key
+// set (byte-identical to what this type emitted before APIKey existed).
+func TestConfig_JSONMarshal_OmitsAPIKey(t *testing.T) {
+	withKey := Config{
+		APIEndpoint: "https://api-go.helix.tools",
+		Region:      "us-east-1",
+		APIKey:      "hlx_oHBvRPOIvGrv5iFlbCBFNOgmBjMtpsiaOclRz3AwzKs",
+	}
+	out, err := json.Marshal(withKey)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if strings.Contains(string(out), withKey.APIKey) {
+		t.Fatalf("json.Marshal(Config) = %s, leaked the raw API key", out)
+	}
+	if strings.Contains(string(out), "APIKey") {
+		t.Fatalf("json.Marshal(Config) = %s, want the APIKey field entirely absent, not merely empty", out)
+	}
+
+	noKey := Config{APIEndpoint: "https://api-go.helix.tools", Region: "us-east-1"}
+	got, err := json.Marshal(noKey)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	want := `{"APIEndpoint":"https://api-go.helix.tools","AWSAccessKeyID":"","AWSSecretAccessKey":"","CustomerID":"","Region":"us-east-1","CredentialMode":""}`
+	if string(got) != want {
+		t.Fatalf("json.Marshal(Config{no key}) = %s, want %s (byte-identical to the pre-APIKey-field JSON shape)", got, want)
+	}
+}
