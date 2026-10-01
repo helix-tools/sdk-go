@@ -56,10 +56,13 @@ func newProducerConfigAPI(t *testing.T, status int, body string) *producerConfig
 				return
 			}
 			if cut {
-				// Promise more body than is sent, then drop the connection.
+				// Send a complete, valid object but promise more bytes than
+				// that, then drop the connection: only the read error can
+				// refuse it.
 				w.Header().Set("Content-Length", "100")
 				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte(`{"encryption_key_id":"key-cut`))
+				_, _ = w.Write([]byte(`{"encryption_key_id":"key-cut"}`))
+				w.(http.Flusher).Flush()
 				if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
 					_ = conn.Close()
 				}
@@ -328,6 +331,10 @@ func TestNewProducer_UnresolvedKeyFailsUploadsClosed(t *testing.T) {
 		{name: "200 empty value", status: http.StatusOK, body: `{"encryption_key_id":""}`},
 		{name: "200 blank value", status: http.StatusOK, body: `{"encryption_key_id":"   "}`},
 		{name: "200 valid object then trailing data", status: http.StatusOK, body: `{"encryption_key_id":"key-prefix"}{"garbage":true}`},
+		{name: "200 valid object, padding past the read cap, then trailing data", status: http.StatusOK,
+			body: `{"encryption_key_id":"key-padded"}` + strings.Repeat(" ", maxProducerConfigBytes) + `{"garbage":true}`},
+		{name: "200 valid object padded to one byte over the cap", status: http.StatusOK,
+			body: `{"encryption_key_id":"key-oversized"}` + strings.Repeat(" ", maxProducerConfigBytes+1-len(`{"encryption_key_id":"key-oversized"}`))},
 		{name: "201 instead of 200", status: http.StatusCreated, body: `{"encryption_key_id":"key-201"}`},
 		{name: "302 redirect to a key", status: http.StatusFound},
 		{name: "no answer in time", hang: true},

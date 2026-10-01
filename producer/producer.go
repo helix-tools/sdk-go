@@ -213,9 +213,14 @@ func (p *Producer) resolveEncryptionKeyID(ctx context.Context) (string, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxProducerConfigBytes))
+	// Read one byte past the cap so an oversized answer is refused rather
+	// than silently truncated into something that parses.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxProducerConfigBytes+1))
 	if err != nil {
 		return "", sdkerr.Wrap(errEncryptionKeyUnresolved, err)
+	}
+	if len(raw) > maxProducerConfigBytes {
+		return "", sdkerr.Wrap(errEncryptionKeyUnresolved, errors.New("producer configuration answer is too large"))
 	}
 
 	// Only the route's own 200 answer counts: not another 2xx, and not an
