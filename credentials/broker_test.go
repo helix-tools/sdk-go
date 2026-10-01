@@ -472,7 +472,7 @@ func TestProvider_Retrieve_403CustomerSuspended(t *testing.T) {
 
 func TestProvider_Retrieve_401Unauthorized(t *testing.T) {
 	broker := newFakeBroker(t, func(int) (int, string) {
-		return http.StatusUnauthorized, `{"error": "unauthorized"}`
+		return http.StatusUnauthorized, errorBody("unauthorized", "unauthorized: invalid credentials", "req-401-static")
 	})
 	p, err := NewProvider(testBrokerConfig(broker.server.URL))
 	if err != nil {
@@ -806,7 +806,7 @@ func TestProvider_Retrieve_429RetriesThenSucceeds(t *testing.T) {
 	wantExpiry := time.Now().Add(15 * time.Minute)
 	broker := newFakeBroker(t, func(n int) (int, string) {
 		if n < mintMaxAttempts {
-			return http.StatusTooManyRequests, `{"error":"rate_limited","message":"slow down"}`
+			return http.StatusTooManyRequests, errorBody("rate_limited", "slow down", "req-429-retry")
 		}
 		return http.StatusOK, successBody(wantExpiry, 900)
 	})
@@ -835,7 +835,7 @@ func TestProvider_Retrieve_429RetriesThenSucceeds(t *testing.T) {
 
 func TestProvider_Retrieve_429RetriesExhausted(t *testing.T) {
 	broker := newFakeBroker(t, func(int) (int, string) {
-		return http.StatusTooManyRequests, `{"error":"rate_limited","message":"slow down"}`
+		return http.StatusTooManyRequests, errorBody("rate_limited", "slow down", "req-429-exhausted")
 	})
 	p, err := NewProvider(testBrokerConfig(broker.server.URL))
 	if err != nil {
@@ -875,7 +875,7 @@ func TestProvider_Retrieve_NonRetryable4xxDoesNotRetry(t *testing.T) {
 	// 400 is neither a typed authz refusal nor 429/5xx — a permanent
 	// client-error class that retrying cannot fix.
 	broker := newFakeBroker(t, func(int) (int, string) {
-		return http.StatusBadRequest, `{"error":"bad_request","message":"malformed scopes"}`
+		return http.StatusBadRequest, errorBody("bad_request", "malformed scopes", "req-400-bad-request")
 	})
 	p, err := NewProvider(testBrokerConfig(broker.server.URL))
 	if err != nil {
@@ -1854,6 +1854,52 @@ func TestMintError_FriendlyMessages(t *testing.T) {
 	}
 }
 
+// TestMintError_StaticCredentialsRetired_StaticKeyProvider confirms the
+// static_credentials_retired mapping (TestMintError_FriendlyMessages'
+// "403_retired" case, exercised there via an API-key-bootstrapped Provider)
+// also fires for the realistic caller the message is actually written for:
+// a Provider bootstrapped with static AWS keys, which is exactly who
+// "Configure apiKey (Helix API key) instead" is telling to switch.
+func TestMintError_StaticCredentialsRetired_StaticKeyProvider(t *testing.T) {
+	const wantMsg = "AWS access keys have been retired for this account. Configure apiKey (Helix API key) instead."
+	broker := newFakeBroker(t, func(int) (int, string) {
+		return http.StatusForbidden, errorBody("static_credentials_retired", "static AWS credentials have been retired for this account", "req-static-retired")
+	})
+	p, err := NewProvider(testBrokerConfig(broker.server.URL)) // static/SigV4 bootstrap
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+
+	_, err = p.Retrieve(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if err.Error() != wantMsg {
+		t.Errorf("Error() = %q, want exactly %q", err.Error(), wantMsg)
+	}
+	if broker.calls() != 1 {
+		t.Errorf("broker calls = %d, want 1 (a 403 must never be retried)", broker.calls())
+	}
+
+	mErr, ok := err.(*MintError)
+	if !ok {
+		t.Fatalf("err type = %T, want *MintError", err)
+	}
+	if !mErr.Friendly {
+		t.Error("Friendly = false, want true for a mapped design-§4.11 message")
+	}
+
+	// Latching: a second, independent Retrieve must surface the same
+	// message WITHOUT a second broker call.
+	_, err = p.Retrieve(context.Background())
+	if err == nil || err.Error() != wantMsg {
+		t.Errorf("second Retrieve error = %v, want the same message %q", err, wantMsg)
+	}
+	if broker.calls() != 1 {
+		t.Errorf("broker calls after second Retrieve = %d, want still 1 (latched)", broker.calls())
+	}
+}
+
 // TestMintError_401FriendlyMessage_OnlyForAPIKeyBootstrap proves the 401
 // mapping is scoped to the API-key bootstrap path: a SigV4-bootstrapped
 // (static-key) mint that gets a plain 401 keeps its EXISTING generic error
@@ -1861,7 +1907,7 @@ func TestMintError_FriendlyMessages(t *testing.T) {
 // behavior for any existing caller.
 func TestMintError_401FriendlyMessage_OnlyForAPIKeyBootstrap(t *testing.T) {
 	broker := newFakeBroker(t, func(int) (int, string) {
-		return http.StatusUnauthorized, `{"error": "unauthorized"}`
+		return http.StatusUnauthorized, errorBody("unauthorized", "unauthorized: invalid credentials", "req-401-static-bootstrap")
 	})
 	p, err := NewProvider(testBrokerConfig(broker.server.URL)) // static/SigV4 bootstrap
 	if err != nil {
