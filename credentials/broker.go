@@ -19,9 +19,11 @@
 //     by NewCredentialsCache and call its exported Invalidate() method to
 //     force the next Retrieve to re-mint ("force_refresh()").
 //
-// Bootstrap authentication: mint requests are SigV4-signed with the caller's
-// existing static AWS key (AWSAccessKeyID/AWSSecretAccessKey); there is no
-// bearer/API-key auth path yet.
+// Bootstrap authentication: a mint request is either SigV4-signed with the
+// caller's existing static AWS key (AWSAccessKeyID/AWSSecretAccessKey) or
+// sent with a Helix API key ("Authorization: HLX-API-Key <key>", no SigV4
+// signature on that request) — see BrokerConfig.APIKey and SelectProvider's
+// mode-resolution rule for which one wins when both are configured.
 package credentials
 
 import (
@@ -32,6 +34,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -123,15 +128,68 @@ type MintError struct {
 	Code       string
 	Message    string
 	RequestID  string
+
+	// Friendly marks Message as one of the exact customer-facing strings
+	// from design §4.11's error table (friendlyMintErrorMessage) — Error()
+	// returns it verbatim, with no status/code/request_id decoration, so
+	// every Helix SDK (TS, Python, Go) surfaces identical text for the same
+	// server response.
+	Friendly bool
 }
 
 // Error implements the error interface.
 func (e *MintError) Error() string {
+	if e.Friendly {
+		return e.Message
+	}
 	if e.Code != "" {
 		return fmt.Sprintf("helix credential broker: mint refused (%s): %s [status %d, request_id %s]",
 			e.Code, e.Message, e.StatusCode, e.RequestID)
 	}
 	return fmt.Sprintf("helix credential broker: mint failed: %s [status %d]", e.Message, e.StatusCode)
+}
+
+// friendlyMintErrorMessage returns the exact customer-facing message from
+// design §4.11's error table for a mint failure, or "" when this (status,
+// code) combination has no mapped message — the caller then keeps
+// MintError's generic formatting. usedAPIKey distinguishes the two possible
+// causes of a 401: today's existing "bad static key" failure (unchanged,
+// not mapped here) vs. a rejected API key (newly mapped) — a 401 is only
+// ever mapped to the API-key message when the mint was actually
+// API-key-bootstrapped, so no existing static/SigV4 caller's error text
+// changes. These strings are shared verbatim across the TypeScript, Python
+// and Go SDKs; never edit one without the other two.
+func friendlyMintErrorMessage(statusCode int, code string, usedAPIKey bool) string {
+	if usedAPIKey && statusCode == http.StatusUnauthorized {
+		return "Helix API key was rejected. Create a new key in the Helix portal under API Keys."
+	}
+	if statusCode != http.StatusForbidden {
+		return ""
+	}
+	switch code {
+	case "api key revoked":
+		return "This Helix API key has been revoked. Create a new key in the Helix portal under API Keys."
+	case "api_key_expired":
+		return "This Helix API key has expired. Create a new key in the Helix portal under API Keys."
+	case "feature not enabled: sts_broker":
+		return "API keys are not enabled for this account yet. Keep using your AWS access keys, or contact Helix support."
+	case "static_credentials_retired":
+		return "AWS access keys have been retired for this account. Configure apiKey (Helix API key) instead."
+	default:
+		return ""
+	}
+}
+
+// apiKeyPattern matches a raw Helix API key (design §4.2: "hlx_" + 43
+// base64url characters), mirroring the redaction pattern the design
+// prescribes for server-side logs. Applied defensively to every mint error
+// message, static or API-key bootstrapped: if a server bug ever echoed a
+// submitted key back in an error body, it must never reach a caller's error
+// text or logs.
+var apiKeyPattern = regexp.MustCompile(`\bhlx_[A-Za-z0-9_-]{43}\b`)
+
+func redactAPIKeys(s string) string {
+	return apiKeyPattern.ReplaceAllString(s, "hlx_<redacted>")
 }
 
 // IsSubscriptionExpired reports whether err is a *MintError carrying the
@@ -213,9 +271,19 @@ type BrokerConfig struct {
 	Region string
 
 	// AWSAccessKeyID / AWSSecretAccessKey SigV4-sign the mint request,
-	// using the caller's existing static AWS key. Both required.
+	// using the caller's existing static AWS key. Required unless APIKey is
+	// set.
 	AWSAccessKeyID     string
 	AWSSecretAccessKey string
+
+	// APIKey, when set, bootstraps the mint request with
+	// "Authorization: HLX-API-Key <key>" instead of a SigV4 signature —
+	// AWSAccessKeyID/AWSSecretAccessKey are then not required and are
+	// ignored by this Provider. Leading/trailing whitespace (e.g. a
+	// trailing newline from an env file) is trimmed. NewProvider refuses to
+	// construct a Provider that would send this over an insecure transport
+	// — see allowsAPIKeyTransport.
+	APIKey string
 
 	// HTTPClient overrides the client used for mint HTTP calls (tests).
 	// Defaults to a client with defaultMintTimeout when nil.
@@ -224,6 +292,48 @@ type BrokerConfig struct {
 	// now overrides the clock (tests only, unexported). Defaults to
 	// time.Now when nil.
 	now func() time.Time
+}
+
+// String implements fmt.Stringer. AWSSecretAccessKey and APIKey are
+// redacted so a BrokerConfig (and, by extension, a *Provider holding one —
+// see Provider.String) is safe to appear in an incidental %v/%+v.
+func (c BrokerConfig) String() string {
+	secret := ""
+	if c.AWSSecretAccessKey != "" {
+		secret = "<redacted>"
+	}
+	key := ""
+	if c.APIKey != "" {
+		key = "<redacted>"
+	}
+	return fmt.Sprintf(
+		"BrokerConfig{APIEndpoint:%q, CustomerID:%q, Region:%q, AWSAccessKeyID:%q, AWSSecretAccessKey:%q, APIKey:%q}",
+		c.APIEndpoint, c.CustomerID, c.Region, c.AWSAccessKeyID, secret, key)
+}
+
+// allowsAPIKeyTransport reports whether apiEndpoint is safe to carry a
+// Helix API key (design §4.11's transport guard): either an https:// URL
+// (the key travels encrypted regardless of the destination host), or a URL
+// whose host is EXACTLY "localhost" or "127.0.0.1" (the escape hatch for a
+// non-TLS local dev server). The hostname check is an exact match on
+// url.URL.Hostname(), never a substring/suffix/prefix match, so a lookalike
+// host such as "localhost.evil.example" cannot smuggle an insecure (http://)
+// request past the guard — that host is only allowed over https://, same as
+// any other host.
+func allowsAPIKeyTransport(apiEndpoint string) bool {
+	u, err := url.Parse(apiEndpoint)
+	if err != nil {
+		return false
+	}
+	if u.Scheme == "https" {
+		return true
+	}
+	switch u.Hostname() {
+	case "localhost", "127.0.0.1":
+		return true
+	default:
+		return false
+	}
 }
 
 // Provider implements aws.CredentialsProvider by minting a fresh AWS STS
@@ -250,10 +360,20 @@ type Provider struct {
 	haveHardExpiry bool
 }
 
+// String implements fmt.Stringer, delegating to cfg's own redaction. Go's
+// fmt package already checks nested struct fields for Stringer during
+// %v/%+v recursion, so BrokerConfig.String alone would cover this — this
+// method exists as an explicit, version-independent guarantee rather than
+// relying on that implementation detail.
+func (p *Provider) String() string {
+	return fmt.Sprintf("Provider{%s}", p.cfg.String())
+}
+
 // NewProvider validates cfg and returns a Provider. It performs no network
 // I/O: validation is local and synchronous, so a bad BrokerConfig (missing
-// endpoint/region/bootstrap credentials) surfaces immediately at
-// construction, before any broker round-trip is attempted.
+// endpoint/region/bootstrap credentials, an API key over an insecure
+// transport) surfaces immediately at construction, before any broker
+// round-trip is attempted.
 func NewProvider(cfg BrokerConfig) (*Provider, error) {
 	if strings.TrimSpace(cfg.APIEndpoint) == "" {
 		return nil, fmt.Errorf("credentials: BrokerConfig.APIEndpoint is required")
@@ -261,8 +381,16 @@ func NewProvider(cfg BrokerConfig) (*Provider, error) {
 	if strings.TrimSpace(cfg.Region) == "" {
 		return nil, fmt.Errorf("credentials: BrokerConfig.Region is required")
 	}
-	if cfg.AWSAccessKeyID == "" || cfg.AWSSecretAccessKey == "" {
-		return nil, fmt.Errorf("credentials: BrokerConfig requires AWSAccessKeyID and AWSSecretAccessKey to bootstrap-authenticate mint requests")
+
+	cfg.APIKey = strings.TrimSpace(cfg.APIKey)
+	hasAPIKey := cfg.APIKey != ""
+	hasStatic := cfg.AWSAccessKeyID != "" && cfg.AWSSecretAccessKey != ""
+
+	if !hasAPIKey && !hasStatic {
+		return nil, fmt.Errorf("credentials: BrokerConfig requires AWSAccessKeyID and AWSSecretAccessKey (or APIKey) to bootstrap mint requests")
+	}
+	if hasAPIKey && !allowsAPIKeyTransport(cfg.APIEndpoint) {
+		return nil, fmt.Errorf("credentials: refusing to send a Helix API key to endpoint %q — APIEndpoint must be https://, or host localhost/127.0.0.1", cfg.APIEndpoint)
 	}
 
 	httpClient := cfg.HTTPClient
@@ -483,16 +611,26 @@ func (p *Provider) mint(ctx context.Context) (*mintSuccessResponse, bool, error)
 	} else {
 		mErr.Message = strings.TrimSpace(string(body))
 	}
+	mErr.Message = redactAPIKeys(mErr.Message)
+
+	usedAPIKey := p.cfg.APIKey != ""
+	if friendly := friendlyMintErrorMessage(resp.StatusCode, mErr.Code, usedAPIKey); friendly != "" {
+		mErr.Message = friendly
+		mErr.Friendly = true
+	}
 
 	retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
 	return nil, retryable, mErr
 }
 
-// buildRequest builds the SigV4-signed mint POST. The broker's request body
-// is entirely optional (helix-tools/api PR #129's session_controller.go
-// only binds when Content-Length != 0; an absent body defaults to "all
-// owned planes, standard TTL") and this SDK version has no per-request
-// scoping config surface, so the request carries no body — the same
+// buildRequest builds the mint POST, bootstrap-authenticated either with
+// the Helix API key (Authorization: HLX-API-Key <key>, no SigV4 signature)
+// or, when no APIKey is configured, with a SigV4 signature from the static
+// AWS key — see BrokerConfig.APIKey. The broker's request body is entirely
+// optional (helix-tools/api PR #129's session_controller.go only binds when
+// Content-Length != 0; an absent body defaults to "all owned planes,
+// standard TTL") and this SDK version has no per-request scoping config
+// surface, so the request carries no body in either case — the same
 // zero-body pattern already used by every other signed GET/DELETE call in
 // this SDK (types.EmptyPayloadHash).
 func (p *Provider) buildRequest(ctx context.Context) (*http.Request, error) {
@@ -505,8 +643,22 @@ func (p *Provider) buildRequest(ctx context.Context) (*http.Request, error) {
 
 	// SigV4 ignores User-Agent when building its signed-headers set (see
 	// aws-sdk-go-v2's signer/internal/v4.IgnoredHeaders), so setting it
-	// before signing is safe — mirrors consumer.makeAPIRequest.
+	// before signing is safe — mirrors consumer.makeAPIRequest. Harmless
+	// (and unsigned) on the API-key path too.
 	req.Header.Set("User-Agent", useragent.String())
+
+	if p.cfg.APIKey != "" {
+		// NewProvider already trimmed APIKey and verified the transport
+		// guard (allowsAPIKeyTransport) at construction time, so no
+		// per-request re-check is needed here — p.cfg.APIEndpoint never
+		// changes after construction. http.Header.Set would itself reject
+		// a value containing a raw CR/LF (net/http's header-write path
+		// returns "invalid header field value"), but NewProvider's
+		// TrimSpace already strips the common case (a trailing newline from
+		// an env file) before it ever reaches here.
+		req.Header.Set("Authorization", "HLX-API-Key "+p.cfg.APIKey)
+		return req, nil
+	}
 
 	bootstrap := awscreds.NewStaticCredentialsProvider(p.cfg.AWSAccessKeyID, p.cfg.AWSSecretAccessKey, "")
 	bootstrapCreds, err := bootstrap.Retrieve(ctx)
@@ -539,24 +691,69 @@ func NewCredentialsCache(p *Provider, optFns ...func(*aws.CredentialsCacheOption
 	return aws.NewCredentialsCache(p, opts...)
 }
 
+// warningWriter receives mode-resolution warnings emitted by SelectProvider
+// (design §4.11's "exactly one warning" rule). It is a package-level
+// variable, mirroring producer.deprecationWriter, so tests can capture the
+// output instead of scraping os.Stderr; defaults to os.Stderr for real
+// callers.
+var warningWriter io.Writer = os.Stderr
+
+// The exact warning message bodies from design §4.11's mode-resolution
+// rule. These are shared verbatim across the TypeScript, Python and Go
+// SDKs — never edit one without the other two. warn prefixes them with the
+// package's usual "helix sdk-go: " convention (see
+// producer.deprecationWriter's callers).
+const (
+	warnAPIKeyIgnoredStaticMode    = "apiKey is ignored because credentialMode is 'static'"
+	warnStaticKeysIgnoredAPIKeySet = "AWS access keys are ignored because apiKey is set"
+)
+
+func warn(message string) {
+	fmt.Fprintln(warningWriter, "helix sdk-go: "+message)
+}
+
 // SelectProvider infers/validates cfg's credential mode and returns the
 // aws.CredentialsProvider NewConsumer/NewProducer should use. It performs no
 // network I/O — safe to unit test exhaustively without a broker or AWS STS.
 //
-// Mode-inference matrix (empty CredentialMode): static keys present ->
-// static (preserves every existing caller's behavior exactly — "sts" is
-// NEVER inferred, only explicit opt-in); nothing present -> construction
-// error. An explicit CredentialMode always wins, but is still validated
-// against whatever credentials are actually present.
+// Mode-resolution rule (design §4.11), identical across the TS/Python/Go
+// SDKs:
+//
+//  1. Explicit CredentialMode:
+//     - "static" requires static keys; a set APIKey is ignored, with the
+//     warnAPIKeyIgnoredStaticMode warning.
+//     - "sts" bootstraps with APIKey if set (ignoring static keys, if also
+//     set, with the warnStaticKeysIgnoredAPIKeySet warning), else with
+//     static keys (today's existing behavior, unchanged).
+//  2. No mode set:
+//     - APIKey set -> sts via the key; static keys, if also set, are
+//     ignored with the warnStaticKeysIgnoredAPIKeySet warning.
+//     - else static keys set -> "static" (preserves every existing
+//     caller's behavior exactly — bootstrap-by-static-key "sts" is NEVER
+//     inferred, only explicit opt-in).
+//     - else: construction error.
+//
+// There is no silent fallback from a failed API-key mint to static keys in
+// either branch: the sts-mode providers constructed here simply return the
+// broker's error from Retrieve — nothing catches that error and substitutes
+// a different provider.
 func SelectProvider(apiEndpoint string, cfg types.Config) (aws.CredentialsProvider, error) {
+	apiKey := strings.TrimSpace(cfg.APIKey)
+	hasAPIKey := apiKey != ""
 	hasStaticKeys := cfg.AWSAccessKeyID != "" && cfg.AWSSecretAccessKey != ""
 
 	mode := cfg.CredentialMode
 	if mode == "" {
+		if hasAPIKey {
+			if hasStaticKeys {
+				warn(warnStaticKeysIgnoredAPIKeySet)
+			}
+			return newAPIKeyProvider(apiEndpoint, cfg.CustomerID, cfg.Region, apiKey)
+		}
 		if hasStaticKeys {
 			mode = types.CredentialModeStatic
 		} else {
-			return nil, fmt.Errorf("credentials: no credentials configured — set AWSAccessKeyID and AWSSecretAccessKey")
+			return nil, fmt.Errorf("credentials: no credentials configured — set AWSAccessKeyID and AWSSecretAccessKey, or APIKey")
 		}
 	}
 
@@ -565,14 +762,20 @@ func SelectProvider(apiEndpoint string, cfg types.Config) (aws.CredentialsProvid
 		if !hasStaticKeys {
 			return nil, fmt.Errorf("credentials: CredentialMode %q requires AWSAccessKeyID and AWSSecretAccessKey", types.CredentialModeStatic)
 		}
+		if hasAPIKey {
+			warn(warnAPIKeyIgnoredStaticMode)
+		}
 		return awscreds.NewStaticCredentialsProvider(cfg.AWSAccessKeyID, cfg.AWSSecretAccessKey, ""), nil
 
 	case types.CredentialModeSTS:
-		if !hasStaticKeys {
-			if cfg.APIKey != "" {
-				return nil, fmt.Errorf("credentials: CredentialMode %q with APIKey is not yet supported by this SDK version — the credential broker currently accepts only the AWS-key bootstrap path; set AWSAccessKeyID/AWSSecretAccessKey instead", types.CredentialModeSTS)
+		if hasAPIKey {
+			if hasStaticKeys {
+				warn(warnStaticKeysIgnoredAPIKeySet)
 			}
-			return nil, fmt.Errorf("credentials: CredentialMode %q requires AWSAccessKeyID and AWSSecretAccessKey to bootstrap the broker mint request", types.CredentialModeSTS)
+			return newAPIKeyProvider(apiEndpoint, cfg.CustomerID, cfg.Region, apiKey)
+		}
+		if !hasStaticKeys {
+			return nil, fmt.Errorf("credentials: CredentialMode %q requires AWSAccessKeyID and AWSSecretAccessKey to bootstrap the broker mint request, or APIKey", types.CredentialModeSTS)
 		}
 		provider, err := NewProvider(BrokerConfig{
 			APIEndpoint:        apiEndpoint,
@@ -589,4 +792,19 @@ func SelectProvider(apiEndpoint string, cfg types.Config) (aws.CredentialsProvid
 	default:
 		return nil, fmt.Errorf("credentials: invalid CredentialMode %q: must be %q, %q, or empty", mode, types.CredentialModeStatic, types.CredentialModeSTS)
 	}
+}
+
+// newAPIKeyProvider builds the sts-mode provider for the API-key bootstrap
+// path, shared by both SelectProvider branches that resolve to it.
+func newAPIKeyProvider(apiEndpoint, customerID, region, apiKey string) (aws.CredentialsProvider, error) {
+	provider, err := NewProvider(BrokerConfig{
+		APIEndpoint: apiEndpoint,
+		CustomerID:  customerID,
+		Region:      region,
+		APIKey:      apiKey,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return NewCredentialsCache(provider), nil
 }

@@ -176,3 +176,26 @@ func TestSelectProvider_WiresIntoProducerConfig(t *testing.T) {
 		t.Error("provider for a mode-omitted, static-keys-only Config must NOT be an *aws.CredentialsCache")
 	}
 }
+
+// TestSelectProvider_APIKeyOnly_WiresIntoProducerConfig is the API-key
+// analogue of TestSelectProvider_WiresIntoProducerConfig (design §4.11,
+// acceptance question 5): a Producer configured with ONLY an API key — no
+// AWS access keys at all — resolves to an sts-mode *aws.CredentialsCache.
+// Deep mint-mechanics coverage lives in credentials/broker_test.go; this
+// only pins the wiring for a real caller's Config shape.
+func TestSelectProvider_APIKeyOnly_WiresIntoProducerConfig(t *testing.T) {
+	cfg := types.Config{
+		APIEndpoint: "https://api-go.helix.tools",
+		APIKey:      "hlx_wiringTestKeyNotARealCredential1234567",
+		CustomerID:  "producer-apikey-wiring-test",
+		Region:      "us-east-1",
+	}
+
+	provider, err := stscreds.SelectProvider(cfg.APIEndpoint, cfg)
+	if err != nil {
+		t.Fatalf("SelectProvider: %v", err)
+	}
+	if _, ok := provider.(*aws.CredentialsCache); !ok {
+		t.Errorf("provider type = %T, want *aws.CredentialsCache for an API-key-only Config", provider)
+	}
+}

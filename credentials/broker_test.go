@@ -617,13 +617,19 @@ func TestProvider_Retrieve_NetworkErrorRetryable(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSelectProvider_ModeMatrix(t *testing.T) {
-	const endpoint = "https://api-go.helix.tools"
+	const defaultEndpoint = "https://api-go.helix.tools"
 
 	cases := []struct {
-		name    string
-		cfg     types.Config
-		wantErr string // substring; empty means "no error"
-		wantSTS bool   // asserted only when wantErr == ""
+		name string
+		cfg  types.Config
+		// endpoint overrides defaultEndpoint when non-empty — SelectProvider
+		// resolves the mint target from its own apiEndpoint parameter, not
+		// cfg.APIEndpoint (mirroring how producer.go/consumer.go call it:
+		// SelectProvider(cfg.APIEndpoint, cfg)), so the transport-guard
+		// cases below need to vary it independently of cfg.
+		endpoint string
+		wantErr  string // substring; empty means "no error"
+		wantSTS  bool   // asserted only when wantErr == ""
 	}{
 		{
 			name: "static_keys_only_mode_empty_infers_static",
@@ -668,24 +674,119 @@ func TestSelectProvider_ModeMatrix(t *testing.T) {
 			wantErr: "requires AWSAccessKeyID and AWSSecretAccessKey",
 		},
 		{
-			name: "api_key_alone_explicit_sts_mode_not_yet_supported",
+			// Design §4.11, rule 1: explicit "sts" bootstraps with APIKey
+			// when it is set — this is now a real, functioning bootstrap
+			// path (superseding the pre-API-key placeholder behavior).
+			name: "api_key_alone_explicit_sts_mode_bootstraps_via_key",
 			cfg: types.Config{
 				Region:         testRegion,
-				APIKey:         "hlx_reserved_for_p5",
+				APIKey:         testAPIKey,
 				CredentialMode: types.CredentialModeSTS,
 			},
-			wantErr: "not yet supported",
+			wantSTS: true,
 		},
 		{
-			name: "api_key_alone_mode_empty_is_generic_no_credentials",
+			// Design §4.11, rule 2: with no mode set, APIKey alone infers
+			// "sts via the key" — "sts" bootstrapped by a key IS inferred
+			// (only bootstrap-by-static-key is never inferred).
+			name: "api_key_alone_mode_empty_infers_sts_via_key",
 			cfg: types.Config{
 				Region: testRegion,
-				APIKey: "hlx_reserved_for_p5",
+				APIKey: testAPIKey,
 			},
-			// Mode is never inferred from APIKey alone in this SDK version
-			// (it is not yet a functioning bootstrap) — the generic message
-			// applies, NOT the APIKey-specific one.
+			wantSTS: true,
+		},
+		{
+			// Self-attack: an API key that is only whitespace (e.g. an env
+			// var set to a single space) must be treated as absent, not as
+			// a malformed-but-present key — falls through to the generic
+			// no-credentials error exactly like a truly empty APIKey.
+			name: "api_key_whitespace_only_treated_as_absent",
+			cfg: types.Config{
+				Region: testRegion,
+				APIKey: "   \t  ",
+			},
 			wantErr: "no credentials configured",
+		},
+		{
+			// Design §4.11 transport guard: an API key must never be sent
+			// to a non-https, non-loopback endpoint. This must surface as
+			// a construction error, not a network attempt.
+			name:     "api_key_alone_insecure_endpoint_rejected",
+			endpoint: "http://evil.example",
+			cfg: types.Config{
+				Region: testRegion,
+				APIKey: testAPIKey,
+			},
+			wantErr: "refusing to send a Helix API key",
+		},
+		{
+			// Bypass attempt for the transport guard: a hostname that only
+			// CONTAINS "localhost" as a substring (a dotted suffix/prefix
+			// lookalike) must NOT be treated as the localhost exception —
+			// the match is exact, so this plain-http endpoint is rejected
+			// exactly like any other non-https host.
+			name:     "api_key_localhost_lookalike_hostname_rejected",
+			endpoint: "http://localhost.evil.example",
+			cfg: types.Config{
+				Region: testRegion,
+				APIKey: testAPIKey,
+			},
+			wantErr: "refusing to send a Helix API key",
+		},
+		{
+			// Self-attack answer: https:// is unconditionally allowed
+			// regardless of hostname (the key travels encrypted either
+			// way), so this lookalike host is NOT a bypass of the guard —
+			// it is allowed on the same basis as any other https endpoint.
+			name:     "api_key_localhost_lookalike_hostname_allowed_over_https",
+			endpoint: "https://localhost.evil.example",
+			cfg: types.Config{
+				Region: testRegion,
+				APIKey: testAPIKey,
+			},
+			wantSTS: true,
+		},
+		{
+			// Design §4.11 "no mode" rule: APIKey set + static keys also
+			// set -> the key wins, static keys are ignored (warning
+			// coverage lives in TestSelectProvider_Warnings).
+			name: "api_key_and_static_keys_mode_empty_prefers_key",
+			cfg: types.Config{
+				Region:             testRegion,
+				APIKey:             testAPIKey,
+				AWSAccessKeyID:     "AKIATESTKEY",
+				AWSSecretAccessKey: "testSecret",
+			},
+			wantSTS: true,
+		},
+		{
+			// Design §4.11, rule 1: explicit "sts" + both credential types
+			// set -> the key still wins over static-key bootstrap.
+			name: "api_key_and_static_keys_explicit_sts_mode_prefers_key",
+			cfg: types.Config{
+				Region:             testRegion,
+				APIKey:             testAPIKey,
+				AWSAccessKeyID:     "AKIATESTKEY",
+				AWSSecretAccessKey: "testSecret",
+				CredentialMode:     types.CredentialModeSTS,
+			},
+			wantSTS: true,
+		},
+		{
+			// Design §4.11, rule 1: explicit "static" + a set APIKey ->
+			// APIKey is ignored, static keys are used (warning coverage in
+			// TestSelectProvider_Warnings). Not an *aws.CredentialsCache —
+			// same byte-identical static path as every other static case.
+			name: "api_key_and_static_keys_explicit_static_mode_ignores_key",
+			cfg: types.Config{
+				Region:             testRegion,
+				APIKey:             testAPIKey,
+				AWSAccessKeyID:     "AKIATESTKEY",
+				AWSSecretAccessKey: "testSecret",
+				CredentialMode:     types.CredentialModeStatic,
+			},
+			wantSTS: false,
 		},
 		{
 			name: "explicit_static_mode_without_static_keys_errors",
@@ -717,6 +818,10 @@ func TestSelectProvider_ModeMatrix(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			endpoint := tc.endpoint
+			if endpoint == "" {
+				endpoint = defaultEndpoint
+			}
 			provider, err := SelectProvider(endpoint, tc.cfg)
 
 			if tc.wantErr != "" {
@@ -1155,5 +1260,580 @@ func TestConstants_RefreshPolicyDerivedFromTTLFloor(t *testing.T) {
 	}
 	if mintMaxAttempts != 3 {
 		t.Errorf("mintMaxAttempts = %d, want 3 (1 initial + 2 retries — C.1 bullet 3 'mint retry 2x')", mintMaxAttempts)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// API-key bootstrap (design §4.11)
+// ---------------------------------------------------------------------------
+
+// testAPIKey matches the real key shape from design §4.2 exactly ("hlx_" +
+// 43 base64url characters, 47 total) so redactAPIKeys's pattern — which is
+// anchored to that exact length — exercises the real matching logic rather
+// than a shorter placeholder that would happen to not match. Deliberately
+// low-entropy (repeated 'A', not random) so it reads as an obvious fixture
+// and never trips a secret scanner's entropy heuristic on this source file.
+const testAPIKey = "hlx_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+func testAPIKeyBrokerConfig(endpoint string) BrokerConfig {
+	return BrokerConfig{
+		APIEndpoint: endpoint,
+		CustomerID:  "customer-test-1",
+		Region:      testRegion,
+		APIKey:      testAPIKey,
+		HTTPClient:  &http.Client{Timeout: 5 * time.Second},
+	}
+}
+
+// TestProvider_BuildRequest_APIKeySentNoSigV4 is acceptance question 1's
+// request-shape half: an API-key-bootstrapped mint must carry
+// "Authorization: HLX-API-Key <key>" and NEVER a SigV4 signature or a
+// session token on the mint request itself.
+func TestProvider_BuildRequest_APIKeySentNoSigV4(t *testing.T) {
+	broker := newFakeBroker(t, func(int) (int, string) {
+		return http.StatusOK, successBody(time.Now().Add(15*time.Minute), 900)
+	})
+
+	p, err := NewProvider(testAPIKeyBrokerConfig(broker.server.URL))
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	if _, err := p.Retrieve(context.Background()); err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+
+	req := broker.lastRequest()
+	if req == nil {
+		t.Fatal("broker never received a request")
+	}
+	wantAuth := "HLX-API-Key " + testAPIKey
+	if got := req.Header.Get("Authorization"); got != wantAuth {
+		t.Errorf("Authorization = %q, want %q", got, wantAuth)
+	}
+	if strings.HasPrefix(req.Header.Get("Authorization"), "AWS4-HMAC-SHA256") {
+		t.Error("Authorization header must not be a SigV4 signature for an API-key bootstrap")
+	}
+	if req.Header.Get("X-Amz-Security-Token") != "" {
+		t.Error("API-key-bootstrapped mint request must not carry X-Amz-Security-Token")
+	}
+	if req.ContentLength > 0 {
+		t.Errorf("ContentLength = %d, want 0", req.ContentLength)
+	}
+}
+
+// TestNewProvider_APIKeyAloneIsSufficient proves BrokerConfig.APIKey alone
+// (no AWSAccessKeyID/AWSSecretAccessKey at all) is a valid, complete
+// bootstrap — the two credential paths are genuine alternatives, not
+// APIKey-as-an-addition-to-static-keys.
+func TestNewProvider_APIKeyAloneIsSufficient(t *testing.T) {
+	cfg := testAPIKeyBrokerConfig("https://example.invalid")
+	if cfg.AWSAccessKeyID != "" || cfg.AWSSecretAccessKey != "" {
+		t.Fatal("test fixture must not set static keys")
+	}
+	if _, err := NewProvider(cfg); err != nil {
+		t.Fatalf("NewProvider with APIKey alone: %v", err)
+	}
+}
+
+// TestNewProvider_APIKeyTrimmed is the self-attack answer for "a key with
+// surrounding whitespace or a trailing newline from an env file": it is
+// trimmed, not rejected, and the TRIMMED value is what reaches the wire —
+// never a raw value carrying a newline (which net/http's header writer
+// would itself refuse to send as "invalid header field value").
+func TestNewProvider_APIKeyTrimmed(t *testing.T) {
+	broker := newFakeBroker(t, func(int) (int, string) {
+		return http.StatusOK, successBody(time.Now().Add(15*time.Minute), 900)
+	})
+
+	cfg := testAPIKeyBrokerConfig(broker.server.URL)
+	cfg.APIKey = "  " + testAPIKey + "\n"
+
+	p, err := NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	if _, err := p.Retrieve(context.Background()); err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+
+	req := broker.lastRequest()
+	if req == nil {
+		t.Fatal("broker never received a request")
+	}
+	wantAuth := "HLX-API-Key " + testAPIKey
+	if got := req.Header.Get("Authorization"); got != wantAuth {
+		t.Errorf("Authorization = %q, want trimmed %q", got, wantAuth)
+	}
+}
+
+// TestNewProvider_APIKeyWhitespaceOnlyRejected is the companion to the
+// trim behavior above: a key that is NOTHING BUT whitespace trims to empty,
+// which must fail the same "no credentials" validation as a truly absent
+// APIKey — not silently send an empty Authorization value.
+func TestNewProvider_APIKeyWhitespaceOnlyRejected(t *testing.T) {
+	cfg := BrokerConfig{
+		APIEndpoint: "https://example.invalid",
+		Region:      testRegion,
+		APIKey:      "   \t  ",
+	}
+	_, err := NewProvider(cfg)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "requires AWSAccessKeyID and AWSSecretAccessKey (or APIKey)") {
+		t.Errorf("error = %q, want the no-bootstrap-credentials message", err.Error())
+	}
+}
+
+// TestAllowsAPIKeyTransport is a direct unit test of the transport guard,
+// including the self-attack question ("https://localhost.evil.example: is
+// the guard fooled?" — no, https is unconditionally allowed) and its
+// bypass-test counterpart (a plain-http lookalike host must still be
+// rejected — the hostname match is exact, never a substring/suffix match).
+func TestAllowsAPIKeyTransport(t *testing.T) {
+	cases := []struct {
+		endpoint string
+		want     bool
+	}{
+		{"https://api-go.helix.tools", true},
+		{"https://anything-at-all.example", true},
+		{"https://localhost.evil.example", true}, // https is always safe transport, regardless of host
+		{"http://localhost", true},
+		{"http://localhost:8080", true},
+		{"http://127.0.0.1", true},
+		{"http://127.0.0.1:9090", true},
+		{"http://evil.example", false},
+		{"http://localhost.evil.example", false}, // bypass attempt: NOT exactly "localhost"
+		{"http://evil.example.localhost", false}, // bypass attempt: "localhost" as a suffix, not the whole host
+		{"http://1270.0.1", false},
+		{"not a url at all \x00", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.endpoint, func(t *testing.T) {
+			got := allowsAPIKeyTransport(tc.endpoint)
+			if got != tc.want {
+				t.Errorf("allowsAPIKeyTransport(%q) = %v, want %v", tc.endpoint, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNewProvider_RefusesInsecureEndpointForAPIKey is the NEGATIVE CONTROL
+// for the transport guard: see broker_test.go's companion comment in the
+// PR description for the revert-and-watch-it-fail evidence. With the guard
+// in place, constructing a Provider for an API key against a plain-http,
+// non-loopback endpoint must fail fast, with NO network attempt.
+func TestNewProvider_RefusesInsecureEndpointForAPIKey(t *testing.T) {
+	// A non-loopback, non-TLS host that is NOT network-reachable: this
+	// proves the guard fires at construction, before any dial is attempted
+	// — NewProvider performs no network I/O, so a DNS/connection failure
+	// here would mean the guard let the request through.
+	_, err := NewProvider(BrokerConfig{
+		APIEndpoint: "http://credentials-guard-test.invalid",
+		Region:      testRegion,
+		APIKey:      testAPIKey,
+	})
+	if err == nil {
+		t.Fatal("expected a transport-guard error, got nil")
+	}
+	if !strings.Contains(err.Error(), "refusing to send a Helix API key") {
+		t.Errorf("error = %q, want transport-guard message", err.Error())
+	}
+}
+
+// TestMintError_FriendlyMessages is acceptance question 4: every one of the
+// five server responses must surface the EXACT design §4.11 message, via
+// Error(), and — because none of these five codes is in the retryable set
+// (429/5xx) — must do so after exactly ONE broker call, never a retry
+// storm (see also TestProvider_Retrieve_APIKeyRevoked_NoRetryStorm for the
+// "race a refresh" self-attack angle on the revoked case specifically).
+func TestMintError_FriendlyMessages(t *testing.T) {
+	cases := []struct {
+		name       string
+		statusCode int
+		code       string
+		wantMsg    string
+	}{
+		{
+			name:       "401_key_rejected",
+			statusCode: http.StatusUnauthorized,
+			code:       "invalid credentials",
+			wantMsg:    "Helix API key was rejected. Create a new key in the Helix portal under API Keys.",
+		},
+		{
+			name:       "403_revoked",
+			statusCode: http.StatusForbidden,
+			code:       "api key revoked",
+			wantMsg:    "This Helix API key has been revoked. Create a new key in the Helix portal under API Keys.",
+		},
+		{
+			name:       "403_expired",
+			statusCode: http.StatusForbidden,
+			code:       "api_key_expired",
+			wantMsg:    "This Helix API key has expired. Create a new key in the Helix portal under API Keys.",
+		},
+		{
+			name:       "403_not_enabled",
+			statusCode: http.StatusForbidden,
+			code:       "feature not enabled: sts_broker",
+			wantMsg:    "API keys are not enabled for this account yet. Keep using your AWS access keys, or contact Helix support.",
+		},
+		{
+			name:       "403_retired",
+			statusCode: http.StatusForbidden,
+			code:       "static_credentials_retired",
+			wantMsg:    "AWS access keys have been retired for this account. Configure apiKey (Helix API key) instead.",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			broker := newFakeBroker(t, func(int) (int, string) {
+				return tc.statusCode, errorBody(tc.code, "server detail that must not leak verbatim", "req-"+tc.name)
+			})
+			p, err := NewProvider(testAPIKeyBrokerConfig(broker.server.URL))
+			if err != nil {
+				t.Fatalf("NewProvider: %v", err)
+			}
+
+			_, err = p.Retrieve(context.Background())
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if err.Error() != tc.wantMsg {
+				t.Errorf("Error() = %q, want exactly %q", err.Error(), tc.wantMsg)
+			}
+			if broker.calls() != 1 {
+				t.Errorf("broker calls = %d, want 1 (a 401/403 must never be retried — no retry storm)", broker.calls())
+			}
+
+			mErr, ok := err.(*MintError)
+			if !ok {
+				t.Fatalf("err type = %T, want *MintError", err)
+			}
+			if !mErr.Friendly {
+				t.Error("Friendly = false, want true for a mapped design-§4.11 message")
+			}
+		})
+	}
+}
+
+// TestMintError_401FriendlyMessage_OnlyForAPIKeyBootstrap proves the 401
+// mapping is scoped to the API-key bootstrap path: a SigV4-bootstrapped
+// (static-key) mint that gets a plain 401 keeps its EXISTING generic error
+// text unchanged — this PR must not alter today's static/SigV4 error
+// behavior for any existing caller.
+func TestMintError_401FriendlyMessage_OnlyForAPIKeyBootstrap(t *testing.T) {
+	broker := newFakeBroker(t, func(int) (int, string) {
+		return http.StatusUnauthorized, `{"error": "unauthorized"}`
+	})
+	p, err := NewProvider(testBrokerConfig(broker.server.URL)) // static/SigV4 bootstrap
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+
+	_, err = p.Retrieve(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if strings.Contains(err.Error(), "Helix API key") {
+		t.Errorf("Error() = %q, must NOT use the API-key-specific message for a static-bootstrapped mint", err.Error())
+	}
+	mErr, ok := err.(*MintError)
+	if !ok {
+		t.Fatalf("err type = %T, want *MintError", err)
+	}
+	if mErr.Friendly {
+		t.Error("Friendly = true, want false — this is today's existing unmapped static-bootstrap 401")
+	}
+}
+
+// TestMintError_RedactsLeakedKeyInMessage is defense-in-depth for
+// requirement 5 ("the key never appears in ... error text"): if a server
+// bug ever echoed the submitted raw key back in an error body, the SDK
+// must scrub it before it ever reaches a caller's error text or logs.
+func TestMintError_RedactsLeakedKeyInMessage(t *testing.T) {
+	leaking := "rejected key " + testAPIKey + " was not recognized"
+	broker := newFakeBroker(t, func(int) (int, string) {
+		return http.StatusForbidden, errorBody("some_other_code", leaking, "req-leak")
+	})
+	p, err := NewProvider(testAPIKeyBrokerConfig(broker.server.URL))
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+
+	_, err = p.Retrieve(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if strings.Contains(err.Error(), testAPIKey) {
+		t.Fatalf("Error() = %q, leaked the raw API key", err.Error())
+	}
+	if !strings.Contains(err.Error(), "hlx_<redacted>") {
+		t.Errorf("Error() = %q, want the redacted placeholder in place of the leaked key", err.Error())
+	}
+}
+
+// TestProvider_Retrieve_APIKeyRevoked_NoRetryStorm is the self-attack
+// answer for "a refresh that races a revoke": a freshly-constructed
+// Provider (no prior successful mint to ride through on) that gets 403
+// "api key revoked" on its FIRST Retrieve surfaces that exact message
+// immediately — one broker call, no retry, nothing resembling an infinite
+// retry loop.
+func TestProvider_Retrieve_APIKeyRevoked_NoRetryStorm(t *testing.T) {
+	broker := newFakeBroker(t, func(int) (int, string) {
+		return http.StatusForbidden, errorBody("api key revoked", "revoked", "req-revoke-1")
+	})
+	p, err := NewProvider(testAPIKeyBrokerConfig(broker.server.URL))
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+
+	_, err = p.Retrieve(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	wantMsg := "This Helix API key has been revoked. Create a new key in the Helix portal under API Keys."
+	if err.Error() != wantMsg {
+		t.Errorf("Error() = %q, want %q", err.Error(), wantMsg)
+	}
+	if broker.calls() != 1 {
+		t.Fatalf("broker calls = %d, want exactly 1 (no retry storm on a revoked key)", broker.calls())
+	}
+
+	// A second, independent Retrieve (simulating a later refresh attempt
+	// after the cache's window elapses) must surface the SAME message
+	// again, not something different and not panic/hang.
+	_, err = p.Retrieve(context.Background())
+	if err == nil || err.Error() != wantMsg {
+		t.Errorf("second Retrieve error = %v, want the same revoked message", err)
+	}
+	if broker.calls() != 2 {
+		t.Errorf("broker calls after second Retrieve = %d, want 2 (one call per Retrieve, still no retry storm)", broker.calls())
+	}
+}
+
+// TestProvider_Retrieve_APIKey_MultipleCallsAlwaysMintWithKey is acceptance
+// question 5's "and use them for every later call" half, at the Provider
+// level: a Provider configured with ONLY an API key must mint via the key
+// EVERY time Retrieve is invoked (as aws.CredentialsCache does on every
+// due refresh) — never fall back to a different bootstrap on a later call.
+func TestProvider_Retrieve_APIKey_MultipleCallsAlwaysMintWithKey(t *testing.T) {
+	broker := newFakeBroker(t, func(int) (int, string) {
+		return http.StatusOK, successBody(time.Now().Add(15*time.Minute), 900)
+	})
+	p, err := NewProvider(testAPIKeyBrokerConfig(broker.server.URL))
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+
+	for i := 1; i <= 3; i++ {
+		if _, err := p.Retrieve(context.Background()); err != nil {
+			t.Fatalf("Retrieve #%d: %v", i, err)
+		}
+		req := broker.lastRequest()
+		wantAuth := "HLX-API-Key " + testAPIKey
+		if got := req.Header.Get("Authorization"); got != wantAuth {
+			t.Errorf("call #%d: Authorization = %q, want %q", i, got, wantAuth)
+		}
+	}
+	if broker.calls() != 3 {
+		t.Errorf("broker calls = %d, want 3", broker.calls())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Mode-resolution warnings (design §4.11's "exactly one warning" rule)
+// ---------------------------------------------------------------------------
+
+// captureWarnings temporarily redirects warningWriter to a buffer, mirroring
+// producer.deprecationWriter's test pattern, and returns a restore func.
+func captureWarnings(t *testing.T) *strings.Builder {
+	t.Helper()
+	var buf strings.Builder
+	prev := warningWriter
+	warningWriter = &buf
+	t.Cleanup(func() { warningWriter = prev })
+	return &buf
+}
+
+func countOccurrences(s, substr string) int {
+	return strings.Count(s, substr)
+}
+
+// TestSelectProvider_Warnings covers acceptance questions 2 and 3's warning
+// half ("exactly one warning is emitted"), for both directions of the
+// conflict, plus a negative control proving the capture mechanism itself
+// can observe ZERO warnings when only one credential type is configured
+// (i.e. the assertion isn't vacuously true for any output).
+func TestSelectProvider_Warnings(t *testing.T) {
+	t.Run("both_set_no_mode_warns_once_static_ignored", func(t *testing.T) {
+		buf := captureWarnings(t)
+		cfg := types.Config{
+			Region:             testRegion,
+			APIKey:             testAPIKey,
+			AWSAccessKeyID:     "AKIATESTKEY",
+			AWSSecretAccessKey: "testSecret",
+		}
+		if _, err := SelectProvider("https://api-go.helix.tools", cfg); err != nil {
+			t.Fatalf("SelectProvider: %v", err)
+		}
+		if n := countOccurrences(buf.String(), warnStaticKeysIgnoredAPIKeySet); n != 1 {
+			t.Errorf("warning count = %d, want exactly 1 (output: %q)", n, buf.String())
+		}
+	})
+
+	t.Run("static_mode_plus_key_warns_once_key_ignored", func(t *testing.T) {
+		buf := captureWarnings(t)
+		cfg := types.Config{
+			Region:             testRegion,
+			APIKey:             testAPIKey,
+			AWSAccessKeyID:     "AKIATESTKEY",
+			AWSSecretAccessKey: "testSecret",
+			CredentialMode:     types.CredentialModeStatic,
+		}
+		if _, err := SelectProvider("https://api-go.helix.tools", cfg); err != nil {
+			t.Fatalf("SelectProvider: %v", err)
+		}
+		if n := countOccurrences(buf.String(), warnAPIKeyIgnoredStaticMode); n != 1 {
+			t.Errorf("warning count = %d, want exactly 1 (output: %q)", n, buf.String())
+		}
+	})
+
+	t.Run("sts_mode_plus_both_warns_once_static_ignored", func(t *testing.T) {
+		buf := captureWarnings(t)
+		cfg := types.Config{
+			Region:             testRegion,
+			APIKey:             testAPIKey,
+			AWSAccessKeyID:     "AKIATESTKEY",
+			AWSSecretAccessKey: "testSecret",
+			CredentialMode:     types.CredentialModeSTS,
+		}
+		if _, err := SelectProvider("https://api-go.helix.tools", cfg); err != nil {
+			t.Fatalf("SelectProvider: %v", err)
+		}
+		if n := countOccurrences(buf.String(), warnStaticKeysIgnoredAPIKeySet); n != 1 {
+			t.Errorf("warning count = %d, want exactly 1 (output: %q)", n, buf.String())
+		}
+	})
+
+	// Negative control: proves the capture mechanism actually detects
+	// ABSENCE, not just presence — a config with only one credential type
+	// set must emit NO warning at all.
+	t.Run("negative_control_single_credential_no_warning", func(t *testing.T) {
+		buf := captureWarnings(t)
+		cfg := types.Config{
+			Region: testRegion,
+			APIKey: testAPIKey,
+		}
+		if _, err := SelectProvider("https://api-go.helix.tools", cfg); err != nil {
+			t.Fatalf("SelectProvider: %v", err)
+		}
+		if buf.String() != "" {
+			t.Errorf("warnings = %q, want none when only one credential type is configured", buf.String())
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// No silent fallback from a failed API-key mint to static keys
+// ---------------------------------------------------------------------------
+
+// TestSelectProvider_NoSilentFallback_OnMintFailure is acceptance questions
+// 4 and 5's "never falls back to static" half: even when VALID static keys
+// are also configured, a failed API-key mint must surface the broker's
+// error — never silently retry with, or switch to, the static keys.
+func TestSelectProvider_NoSilentFallback_OnMintFailure(t *testing.T) {
+	broker := newFakeBroker(t, func(int) (int, string) {
+		return http.StatusForbidden, errorBody("api key revoked", "revoked", "req-no-fallback")
+	})
+
+	cfg := types.Config{
+		Region:             testRegion,
+		APIKey:             testAPIKey,
+		AWSAccessKeyID:     "AKIAVALIDSTATICKEY1",
+		AWSSecretAccessKey: "aValidStaticSecretAccessKeyThatWouldWork12",
+	}
+	_ = captureWarnings(t) // silence the expected "static keys ignored" warning from this test's output
+
+	provider, err := SelectProvider(broker.server.URL, cfg)
+	if err != nil {
+		t.Fatalf("SelectProvider: %v", err)
+	}
+
+	_, err = provider.Retrieve(context.Background())
+	if err == nil {
+		t.Fatal("expected the mint failure to surface, got nil — looks like a silent fallback occurred")
+	}
+	// provider is the *aws.CredentialsCache SelectProvider returns, so
+	// aws-sdk-go-v2's own cache wraps the underlying *MintError with its
+	// own "failed to refresh cached credentials, ..." prefix (the same
+	// wrapping every other error type already gets at this layer) — assert
+	// the exact design §4.11 text is PRESENT, not that it's the entire
+	// string.
+	wantMsg := "This Helix API key has been revoked. Create a new key in the Helix portal under API Keys."
+	if !strings.Contains(err.Error(), wantMsg) {
+		t.Errorf("Error() = %q, want it to contain %q", err.Error(), wantMsg)
+	}
+
+	// Exactly one request must have reached the broker, and it must be the
+	// API-key mint — never a second, SigV4-signed attempt using the valid
+	// static keys.
+	if broker.calls() != 1 {
+		t.Fatalf("broker calls = %d, want 1 (no fallback retry with static keys)", broker.calls())
+	}
+	req := broker.lastRequest()
+	if strings.HasPrefix(req.Header.Get("Authorization"), "AWS4-HMAC-SHA256") {
+		t.Error("the single broker request must never be SigV4-signed — that would mean a fallback attempt occurred")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Secret redaction in string representations (requirement 5)
+// ---------------------------------------------------------------------------
+
+func TestBrokerConfig_String_RedactsAPIKey(t *testing.T) {
+	cfg := testAPIKeyBrokerConfig("https://api-go.helix.tools")
+	cfg.AWSAccessKeyID = "AKIA-VISIBLE-NOT-SECRET"
+	cfg.AWSSecretAccessKey = "aStaticSecretThatMustNeverBePrinted12345"
+
+	out := fmt.Sprintf("%v", cfg)
+	if strings.Contains(out, testAPIKey) {
+		t.Fatalf("String() = %q, leaked the raw API key", out)
+	}
+	if strings.Contains(out, cfg.AWSSecretAccessKey) {
+		t.Fatalf("String() = %q, leaked the raw AWS secret access key", out)
+	}
+	if n := strings.Count(out, "<redacted>"); n != 2 {
+		t.Errorf("String() = %q, want exactly 2 redacted placeholders (APIKey and AWSSecretAccessKey), got %d", out, n)
+	}
+	// Negative control: a non-secret field must still be visible — proves
+	// String() targets specific fields rather than redacting everything
+	// (which would make the "leaked" assertions above vacuously true).
+	if !strings.Contains(out, "AKIA-VISIBLE-NOT-SECRET") {
+		t.Errorf("String() = %q, want the non-secret AWSAccessKeyID still visible", out)
+	}
+
+	outPlus := fmt.Sprintf("%+v", cfg)
+	if strings.Contains(outPlus, testAPIKey) || strings.Contains(outPlus, cfg.AWSSecretAccessKey) {
+		t.Fatalf("%%+v = %q, leaked a secret", outPlus)
+	}
+}
+
+func TestProvider_String_RedactsAPIKey(t *testing.T) {
+	p, err := NewProvider(testAPIKeyBrokerConfig("https://api-go.helix.tools"))
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+
+	out := fmt.Sprintf("%v", p)
+	if strings.Contains(out, testAPIKey) {
+		t.Fatalf("String() = %q, leaked the raw API key", out)
+	}
+
+	outPlus := fmt.Sprintf("%+v", p)
+	if strings.Contains(outPlus, testAPIKey) {
+		t.Fatalf("%%+v = %q, leaked the raw API key", outPlus)
 	}
 }

@@ -2,6 +2,8 @@ package types
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -84,5 +86,53 @@ func TestDataset_LastUpdatedDataAbsentDecodesToNil(t *testing.T) {
 	}
 	if ds.TotalFiles != 0 || ds.AccessCount != 0 {
 		t.Errorf("expected zero-value storage stats when absent, got TotalFiles=%d AccessCount=%d", ds.TotalFiles, ds.AccessCount)
+	}
+}
+
+// TestConfig_String_RedactsSecrets is requirement 5 of the API-key feature
+// (design §4.11): APIKey must never appear in a %v/%+v of a Config — an
+// incidental debug print, or an error wrapped with %w. AWSSecretAccessKey
+// is redacted on the same basis (both are bootstrap secrets); CustomerID,
+// Region and APIEndpoint are deliberately left visible.
+func TestConfig_String_RedactsSecrets(t *testing.T) {
+	cfg := Config{
+		APIEndpoint:        "https://api-go.helix.tools",
+		AWSAccessKeyID:     "AKIA-VISIBLE-NOT-SECRET",
+		AWSSecretAccessKey: "aStaticSecretThatMustNeverBePrinted12345",
+		CustomerID:         "customer-redaction-test",
+		Region:             "us-east-1",
+		APIKey:             "hlx_oHBvRPOIvGrv5iFlbCBFNOgmBjMtpsiaOclRz3AwzKs",
+		CredentialMode:     CredentialModeSTS,
+	}
+
+	out := fmt.Sprintf("%v", cfg)
+	if strings.Contains(out, cfg.APIKey) {
+		t.Fatalf("String() = %q, leaked the raw API key", out)
+	}
+	if strings.Contains(out, cfg.AWSSecretAccessKey) {
+		t.Fatalf("String() = %q, leaked the raw AWS secret access key", out)
+	}
+	if n := strings.Count(out, "<redacted>"); n != 2 {
+		t.Errorf("String() = %q, want exactly 2 redacted placeholders, got %d", out, n)
+	}
+	// Negative control: non-secret fields must still be visible — proves
+	// String() targets specific fields rather than redacting everything.
+	for _, want := range []string{cfg.APIEndpoint, cfg.AWSAccessKeyID, cfg.CustomerID, cfg.Region, string(cfg.CredentialMode)} {
+		if !strings.Contains(out, want) {
+			t.Errorf("String() = %q, want it to still contain non-secret value %q", out, want)
+		}
+	}
+
+	outPlus := fmt.Sprintf("%+v", cfg)
+	if strings.Contains(outPlus, cfg.APIKey) || strings.Contains(outPlus, cfg.AWSSecretAccessKey) {
+		t.Fatalf("%%+v = %q, leaked a secret", outPlus)
+	}
+
+	// Zero-value Config: both secret fields absent must redact to nothing
+	// (empty string, not a stray "<redacted>"), confirming the guard is on
+	// presence, not unconditional.
+	emptyOut := fmt.Sprintf("%v", Config{})
+	if strings.Contains(emptyOut, "<redacted>") {
+		t.Errorf("String() on a zero-value Config = %q, want no redaction placeholder when there is nothing to redact", emptyOut)
 	}
 }
