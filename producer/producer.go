@@ -186,6 +186,9 @@ const producerConfigPath = "/v1/self/producer-config"
 // an unreachable API delays construction instead of hanging it.
 var producerConfigTimeout = 30 * time.Second
 
+// maxProducerConfigBytes caps how much of the producer-config answer is read.
+const maxProducerConfigBytes = 64 << 10
+
 // errEncryptionKeyUnresolved is what a producer without an encryption key is
 // told: uploads fail, they are never sent unencrypted.
 const errEncryptionKeyUnresolved = "encryption key configuration could not be resolved, uploads will fail until it is"
@@ -196,15 +199,38 @@ type producerConfig struct {
 }
 
 // resolveEncryptionKeyID asks the API for this producer's encryption key id.
-// Any failure (a non-2xx answer, an unreadable body, an empty value) returns
+// Any failure (an answer other than a direct 200, a body that is not exactly
+// one JSON object, an empty value) returns
 // an empty key and an error that says plainly what it means: uploads fail. The
 // underlying cause stays reachable via errors.Unwrap/errors.As.
 func (p *Producer) resolveEncryptionKeyID(ctx context.Context) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, producerConfigTimeout)
 	defer cancel()
 
+	resp, err := p.sendSignedRequest(ctx, http.MethodGet, producerConfigPath, nil)
+	if err != nil {
+		return "", sdkerr.Wrap(errEncryptionKeyUnresolved, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxProducerConfigBytes))
+	if err != nil {
+		return "", sdkerr.Wrap(errEncryptionKeyUnresolved, err)
+	}
+
+	// Only the route's own 200 answer counts: not another 2xx, and not an
+	// answer reached by following a redirect.
+	if resp.StatusCode != http.StatusOK {
+		return "", sdkerr.Wrap(errEncryptionKeyUnresolved, &APIError{StatusCode: resp.StatusCode, Body: string(raw)})
+	}
+	if resp.Request != nil && resp.Request.Response != nil {
+		return "", sdkerr.Wrap(errEncryptionKeyUnresolved, errors.New("producer configuration request was redirected"))
+	}
+
+	// json.Unmarshal, unlike a streaming decode, refuses trailing data after
+	// the object.
 	var cfg producerConfig
-	if err := p.makeAPIRequest(ctx, http.MethodGet, producerConfigPath, nil, &cfg); err != nil {
+	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return "", sdkerr.Wrap(errEncryptionKeyUnresolved, err)
 	}
 
@@ -803,70 +829,9 @@ func (p *Producer) UploadDataset(ctx context.Context, filePath string, opts Uplo
 
 // makeAPIRequest makes an authenticated API request.
 func (p *Producer) makeAPIRequest(ctx context.Context, method, path string, body, response any) error {
-	apiURL, err := url.Parse(p.APIEndpoint + path)
+	resp, err := p.sendSignedRequest(ctx, method, path, body)
 	if err != nil {
-		return fmt.Errorf("invalid API URL: %w", err)
-	}
-
-	var (
-		reqBody  io.Reader
-		jsonData []byte
-	)
-
-	if body != nil {
-		var err error
-		jsonData, err = json.Marshal(body)
-		if err != nil {
-			return fmt.Errorf("failed to marshal request body: %w", err)
-		}
-
-		reqBody = bytes.NewReader(jsonData)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, method, apiURL.String(), reqBody)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	// SigV4 ignores User-Agent when building its signed-headers set (see
-	// aws-sdk-go-v2's signer/internal/v4.IgnoredHeaders), so setting it
-	// before signing is safe — TestMakeAPIRequest_UserAgentNotInSignedHeaders
-	// pins that it never leaks into SignedHeaders regardless.
-	req.Header.Set("User-Agent", useragent.String())
-
-	// Sign request with AWS SigV4.
-	creds, err := p.awsConfig.Credentials.Retrieve(ctx)
-	if err != nil {
-		return sdkerr.Wrap("failed to retrieve credentials", err)
-	}
-
-	// Calculate payload hash for SigV4.
-	var payloadHash string
-
-	if body != nil {
-		// Hash the actual JSON body.
-		h := crypto.SHA256.New()
-
-		h.Write(jsonData)
-
-		payloadHash = fmt.Sprintf("%x", h.Sum(nil))
-	} else {
-		// Empty payload hash for GET requests.
-		payloadHash = types.EmptyPayloadHash
-	}
-
-	signer := v4.NewSigner()
-	if err := signer.SignHTTP(ctx, creds, req, payloadHash, "execute-api", p.Region, time.Now()); err != nil {
-		return sdkerr.Wrap("failed to sign request", err)
-	}
-
-	// Execute request.
-	resp, err := p.httpClient.Do(req)
-	if err != nil {
-		return sdkerr.Wrap("request failed", err)
+		return err
 	}
 
 	defer resp.Body.Close()
@@ -890,6 +855,78 @@ func (p *Producer) makeAPIRequest(ctx context.Context, method, path string, body
 	}
 
 	return nil
+}
+
+// sendSignedRequest builds, SigV4-signs and sends an API request. The caller
+// owns the returned response and must close its body.
+func (p *Producer) sendSignedRequest(ctx context.Context, method, path string, body any) (*http.Response, error) {
+	apiURL, err := url.Parse(p.APIEndpoint + path)
+	if err != nil {
+		return nil, fmt.Errorf("invalid API URL: %w", err)
+	}
+
+	var (
+		reqBody  io.Reader
+		jsonData []byte
+	)
+
+	if body != nil {
+		var err error
+		jsonData, err = json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request body: %w", err)
+		}
+
+		reqBody = bytes.NewReader(jsonData)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, apiURL.String(), reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	// SigV4 ignores User-Agent when building its signed-headers set (see
+	// aws-sdk-go-v2's signer/internal/v4.IgnoredHeaders), so setting it
+	// before signing is safe — TestMakeAPIRequest_UserAgentNotInSignedHeaders
+	// pins that it never leaks into SignedHeaders regardless.
+	req.Header.Set("User-Agent", useragent.String())
+
+	// Sign request with AWS SigV4.
+	creds, err := p.awsConfig.Credentials.Retrieve(ctx)
+	if err != nil {
+		return nil, sdkerr.Wrap("failed to retrieve credentials", err)
+	}
+
+	// Calculate payload hash for SigV4.
+	var payloadHash string
+
+	if body != nil {
+		// Hash the actual JSON body.
+		h := crypto.SHA256.New()
+
+		h.Write(jsonData)
+
+		payloadHash = fmt.Sprintf("%x", h.Sum(nil))
+	} else {
+		// Empty payload hash for GET requests.
+		payloadHash = types.EmptyPayloadHash
+	}
+
+	signer := v4.NewSigner()
+	if err := signer.SignHTTP(ctx, creds, req, payloadHash, "execute-api", p.Region, time.Now()); err != nil {
+		return nil, sdkerr.Wrap("failed to sign request", err)
+	}
+
+	// Execute request.
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return nil, sdkerr.Wrap("request failed", err)
+	}
+
+	return resp, nil
 }
 
 // maxListPages caps how many pages paginateAll will follow for a single

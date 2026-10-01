@@ -27,6 +27,7 @@ type producerConfigAPI struct {
 	configStatus int
 	configBody   string
 	configHang   bool
+	configCut    bool
 
 	configCalls []*http.Request
 	postBodies  []map[string]any
@@ -45,7 +46,7 @@ func newProducerConfigAPI(t *testing.T, status int, body string) *producerConfig
 		case r.Method == http.MethodGet && r.URL.Path == producerConfigPath:
 			a.mu.Lock()
 			a.configCalls = append(a.configCalls, r.Clone(context.Background()))
-			hang := a.configHang
+			hang, cut := a.configHang, a.configCut
 			a.mu.Unlock()
 			if hang {
 				select {
@@ -54,9 +55,26 @@ func newProducerConfigAPI(t *testing.T, status int, body string) *producerConfig
 				}
 				return
 			}
+			if cut {
+				// Promise more body than is sent, then drop the connection.
+				w.Header().Set("Content-Length", "100")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"encryption_key_id":"key-cut`))
+				if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+					_ = conn.Close()
+				}
+				return
+			}
+			if a.configStatus == http.StatusFound {
+				http.Redirect(w, r, "/redirected-config", http.StatusFound)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(a.configStatus)
 			_, _ = w.Write([]byte(a.configBody))
+		case r.Method == http.MethodGet && r.URL.Path == "/redirected-config":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"encryption_key_id":"key-behind-a-redirect"}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/datasets":
 			var body map[string]any
 			raw, _ := io.ReadAll(r.Body)
@@ -298,6 +316,7 @@ func TestNewProducer_UnresolvedKeyFailsUploadsClosed(t *testing.T) {
 		status int
 		body   string
 		hang   bool
+		cut    bool
 	}{
 		{name: "404 no key configured", status: http.StatusNotFound, body: `{"error":"not found"}`},
 		{name: "403 consumer-only caller", status: http.StatusForbidden, body: `{"error":"forbidden ` + internalDetail + `"}`},
@@ -308,13 +327,17 @@ func TestNewProducer_UnresolvedKeyFailsUploadsClosed(t *testing.T) {
 		{name: "200 missing field", status: http.StatusOK, body: `{}`},
 		{name: "200 empty value", status: http.StatusOK, body: `{"encryption_key_id":""}`},
 		{name: "200 blank value", status: http.StatusOK, body: `{"encryption_key_id":"   "}`},
+		{name: "200 valid object then trailing data", status: http.StatusOK, body: `{"encryption_key_id":"key-prefix"}{"garbage":true}`},
+		{name: "201 instead of 200", status: http.StatusCreated, body: `{"encryption_key_id":"key-201"}`},
+		{name: "302 redirect to a key", status: http.StatusFound},
 		{name: "no answer in time", hang: true},
+		{name: "connection dropped mid-body", cut: true},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			api := newProducerConfigAPI(t, tc.status, tc.body)
-			api.configHang = tc.hang
+			api.configHang, api.configCut = tc.hang, tc.cut
 			if tc.hang {
 				orig := producerConfigTimeout
 				producerConfigTimeout = 200 * time.Millisecond
