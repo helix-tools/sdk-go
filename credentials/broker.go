@@ -38,6 +38,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -100,6 +101,12 @@ const (
 	// retries are already gated by mintMaxAttempts.
 	mintRetryBaseDelay = 200 * time.Millisecond
 
+	// mintRetryAfterCap bounds how long a 429's Retry-After (header, or the
+	// API's "retry after N seconds" message) can stretch one wait between
+	// mint attempts, so a large server value cannot stall a caller for
+	// minutes. Same cap as the Python SDK.
+	mintRetryAfterCap = 5 * time.Second
+
 	// defaultMintTimeout bounds a single mint HTTP round-trip.
 	defaultMintTimeout = 10 * time.Second
 
@@ -143,6 +150,12 @@ type MintError struct {
 	// isLatchableMintError's doc comment for why the decision cannot be
 	// safely re-derived later from this struct's own exported fields.
 	latchable bool
+
+	// retryAfter is how long a 429 asked us to wait before the next attempt
+	// (already capped at mintRetryAfterCap), parsed in mint() from the
+	// Retry-After header or the RAW message before any friendly-text
+	// substitution. Zero when the response did not say, or was not a 429.
+	retryAfter time.Duration
 }
 
 // Error implements the error interface.
@@ -518,6 +531,9 @@ type Provider struct {
 	cfg        BrokerConfig
 	httpClient *http.Client
 	now        func() time.Time
+	// sleep waits between mint attempts, returning early with ctx's error
+	// if ctx ends first. Tests replace it so they never really sleep.
+	sleep func(ctx context.Context, d time.Duration) error
 
 	mu             sync.Mutex
 	lastHardExpiry time.Time
@@ -598,7 +614,19 @@ func NewProvider(cfg BrokerConfig) (*Provider, error) {
 		now = time.Now
 	}
 
-	return &Provider{cfg: cfg, httpClient: httpClient, now: now}, nil
+	return &Provider{cfg: cfg, httpClient: httpClient, now: now, sleep: sleepContext}, nil
+}
+
+// sleepContext waits for d, or until ctx ends (returning ctx's error).
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // Retrieve implements aws.CredentialsProvider. It mints a fresh session
@@ -742,8 +770,13 @@ func (p *Provider) AdjustExpiresBy(creds aws.Credentials, dur time.Duration) (aw
 // exponential backoff+jitter between attempts, and stops immediately on a
 // non-retryable failure (a definitive auth/authz decision or a permanently
 // malformed response — retrying either wastes the retry budget on an
-// outcome that cannot change).
+// outcome that cannot change). A 429 that says how long to wait stretches
+// the next wait to at least that long, capped at mintRetryAfterCap.
 func (p *Provider) mintWithRetry(ctx context.Context) (*mintSuccessResponse, error) {
+	sleep := p.sleep
+	if sleep == nil {
+		sleep = sleepContext
+	}
 	var lastErr error
 	for attempt := 0; attempt < mintMaxAttempts; attempt++ {
 		if attempt > 0 {
@@ -751,10 +784,12 @@ func (p *Provider) mintWithRetry(ctx context.Context) (*mintSuccessResponse, err
 			if err != nil {
 				return nil, fmt.Errorf("credentials: failed to generate retry jitter: %w", err)
 			}
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(delay):
+			var mErr *MintError
+			if errors.As(lastErr, &mErr) && mErr.retryAfter > delay {
+				delay = mErr.retryAfter
+			}
+			if err := sleep(ctx, delay); err != nil {
+				return nil, err
 			}
 		}
 
@@ -790,9 +825,49 @@ func backoffDelayFrom(random io.Reader, attempt int) (time.Duration, error) {
 	return base + jitter, nil
 }
 
+// retryAfterMessage matches the wait the API states in a 429's message, e.g.
+// "rate limit exceeded: retry after 1 seconds".
+var retryAfterMessage = regexp.MustCompile(`(?i)retry after ([0-9]+) seconds?`)
+
+// retryAfterDelay returns how long a 429 asked us to wait, capped at
+// mintRetryAfterCap, or 0 when it did not say. The Retry-After header wins
+// when it is plain ASCII digits; otherwise the message is searched. Only
+// non-negative integer seconds are honoured — an HTTP-date, a negative,
+// fractional or non-numeric value falls back to the normal backoff — and an
+// over-long digit string is treated as the cap without ever being converted,
+// so no value can overflow or produce a negative wait.
+func retryAfterDelay(header, message string) time.Duration {
+	value := strings.TrimSpace(header)
+	if !isASCIIDigits(value) {
+		match := retryAfterMessage.FindStringSubmatch(message)
+		if match == nil {
+			return 0
+		}
+		value = match[1]
+	}
+	value = strings.TrimLeft(value, "0")
+	if len(value) > 3 {
+		return mintRetryAfterCap
+	}
+	seconds, _ := strconv.Atoi(value) // <= 3 ASCII digits ("" is 0): cannot fail
+	return min(time.Duration(seconds)*time.Second, mintRetryAfterCap)
+}
+
+func isASCIIDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // mint performs ONE mint HTTP round-trip. The second return value reports
-// whether the caller should retry: network/transport errors, 429, and 5xx
-// are retryable; everything else (2xx-but-malformed, a refused redirect,
+// whether the caller should retry: network/transport errors, 408, 429, and
+// 5xx are retryable; everything else (2xx-but-malformed, a refused redirect,
 // 4xx auth/authz decisions such as subscription_expired) is not.
 func (p *Provider) mint(ctx context.Context) (*mintSuccessResponse, bool, error) {
 	req, err := p.buildRequest(ctx)
@@ -847,6 +922,9 @@ func (p *Provider) mint(ctx context.Context) (*mintSuccessResponse, bool, error)
 	// substitution below can overwrite mErr.Message — see
 	// isLatchableMintError's doc comment.
 	mErr.latchable = isLatchableMintCode(mErr.StatusCode, mErr.Code, mErr.Message)
+	if resp.StatusCode == http.StatusTooManyRequests {
+		mErr.retryAfter = retryAfterDelay(resp.Header.Get("Retry-After"), mErr.Message)
+	}
 
 	usedAPIKey := p.cfg.APIKey != ""
 	if friendly := friendlyMintErrorMessage(resp.StatusCode, mErr.Code, mErr.Message, usedAPIKey); friendly != "" {
@@ -854,7 +932,8 @@ func (p *Provider) mint(ctx context.Context) (*mintSuccessResponse, bool, error)
 		mErr.Friendly = true
 	}
 
-	retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+	retryable := resp.StatusCode == http.StatusRequestTimeout ||
+		resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
 	return nil, retryable, mErr
 }
 
