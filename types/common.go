@@ -1,7 +1,10 @@
 // Package types defines common types used across the SDK.
 package types
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // EmptyPayloadHash is the SHA256 hash of an empty payload.
 const EmptyPayloadHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -22,10 +25,11 @@ const (
 	// CredentialModeSTS auto-refreshes short-lived AWS STS session
 	// credentials minted from the Helix Connect credential broker (POST
 	// /v1/credentials/session — see credential_session.schema.json,
-	// sdk-schemas #17). The mint request itself is bootstrap-authenticated
-	// with AWSAccessKeyID/AWSSecretAccessKey — the broker does not yet
-	// accept an API-key bootstrap. APIKey-based bootstrap is reserved for a
-	// later release and is not yet wired.
+	// sdk-schemas #17). The mint request is bootstrap-authenticated either
+	// with a Helix API key (APIKey, header "HLX-API-Key") or with
+	// AWSAccessKeyID/AWSSecretAccessKey (SigV4) — see APIKey and
+	// credentials.SelectProvider's mode-resolution rule for which one wins
+	// when both are set.
 	CredentialModeSTS CredentialMode = "sts"
 )
 
@@ -37,24 +41,85 @@ type Config struct {
 	CustomerID         string
 	Region             string
 
-	// APIKey is reserved for the platform-scoped Helix API key bootstrap
-	// (hlx_-prefixed). It is currently NOT wired to any authentication path
-	// — the credential broker accepts only the AWS-key bootstrap today
-	// (see CredentialModeSTS) — so setting APIKey without
-	// AWSAccessKeyID/AWSSecretAccessKey produces a clear construction-time
-	// error rather than silently sending an unauthenticated request.
+	// APIKey is a Helix API key (hlx_-prefixed, created in the Helix portal
+	// under API Keys), used to bootstrap CredentialModeSTS: the SDK sends it
+	// as "Authorization: HLX-API-Key <key>" when minting a broker session,
+	// with no SigV4 signature on that request. It is only ever sent to an
+	// https:// endpoint, or to localhost/127.0.0.1 for local development —
+	// see credentials.SelectProvider. When both APIKey and
+	// AWSAccessKeyID/AWSSecretAccessKey are set, APIKey wins (see
+	// credentials.SelectProvider's mode-resolution rule); the unused
+	// credential is ignored with a one-time warning, never silently mixed.
 	// Additive field: the zero value is a complete no-op for every existing
-	// caller.
+	// caller. Excluded from json.Marshal entirely (see Config.MarshalJSON)
+	// so an incidental marshal (logging, a debug dump) never serializes the
+	// raw key — String/GoString redaction alone does not cover
+	// encoding/json, which never consults fmt.Stringer/GoStringer.
 	APIKey string
 
 	// CredentialMode selects "static" (default; existing AKIA behavior,
 	// byte-identical) or "sts" (auto-refreshing broker-issued session
-	// credentials, opt-in). Left empty, the mode is inferred: static keys
-	// present -> "static" (preserves today's behavior exactly); nothing
-	// present -> construction error. "sts" is never inferred — it must be
+	// credentials, opt-in). Left empty, the mode is inferred: APIKey present
+	// -> "sts" via the key; else static keys present -> "static" (preserves
+	// today's behavior exactly); nothing present -> construction error.
+	// "sts" bootstrapped by static keys is never inferred — it must be
 	// requested explicitly, so no existing caller can silently start
-	// minting STS sessions.
+	// minting STS sessions. See credentials.SelectProvider for the full
+	// matrix.
 	CredentialMode CredentialMode
+}
+
+// String implements fmt.Stringer. AWSSecretAccessKey and APIKey are
+// redacted so a Config is safe to appear in an incidental %v/%+v — a debug
+// print, or an error wrapped with %w — without leaking either credential.
+func (c Config) String() string {
+	secret := ""
+	if c.AWSSecretAccessKey != "" {
+		secret = "<redacted>"
+	}
+	key := ""
+	if c.APIKey != "" {
+		key = "<redacted>"
+	}
+	return fmt.Sprintf(
+		"Config{APIEndpoint:%q, AWSAccessKeyID:%q, AWSSecretAccessKey:%q, CustomerID:%q, Region:%q, APIKey:%q, CredentialMode:%q}",
+		c.APIEndpoint, c.AWSAccessKeyID, secret, c.CustomerID, c.Region, key, c.CredentialMode)
+}
+
+// GoString implements fmt.GoStringer. Go's fmt package only consults
+// Stringer for %v/%+v — %#v bypasses it entirely and reflects every field
+// verbatim via reflection. Without this method, "%#v" of a Config would
+// print the raw AWSSecretAccessKey and APIKey.
+func (c Config) GoString() string {
+	return c.String()
+}
+
+// MarshalJSON implements json.Marshaler, omitting APIKey from the encoded
+// output entirely (never present, not merely an empty string) — see the
+// field's own doc comment for why. The shadow type below is an ANONYMOUS
+// struct literal, not a named type declaration, so it is never mistaken for
+// one of the API's wire payloads by this package's own TestWireStructs
+// (wire_names_test.go), which treats every named struct declared in this
+// package as a wire type needing a snake_case json tag on each field unless
+// explicitly exempted — Config is SDK-side configuration, not a wire
+// payload, and a struct tag on APIKey alone would otherwise flip that
+// classification for the whole type.
+func (c Config) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		APIEndpoint        string
+		AWSAccessKeyID     string
+		AWSSecretAccessKey string
+		CustomerID         string
+		Region             string
+		CredentialMode     CredentialMode
+	}{
+		APIEndpoint:        c.APIEndpoint,
+		AWSAccessKeyID:     c.AWSAccessKeyID,
+		AWSSecretAccessKey: c.AWSSecretAccessKey,
+		CustomerID:         c.CustomerID,
+		Region:             c.Region,
+		CredentialMode:     c.CredentialMode,
+	})
 }
 
 // DataFreshness enumerates allowed dataset update cadences.

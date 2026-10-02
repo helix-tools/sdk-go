@@ -208,3 +208,31 @@ func TestSelectProvider_WiresIntoConsumerConfig(t *testing.T) {
 		t.Error("provider for a mode-omitted, static-keys-only Config must NOT be an *aws.CredentialsCache")
 	}
 }
+
+// TestSelectProvider_APIKeyOnly_WiresIntoConsumerConfig is the API-key
+// analogue of TestSelectProvider_WiresIntoConsumerConfig (design §4.11,
+// acceptance question 5): a Consumer configured with ONLY an API key — no
+// AWS access keys at all — resolves to an sts-mode *aws.CredentialsCache,
+// the same provider type NewConsumer wires into config.WithCredentialsProvider
+// for every other sts-mode Config. Deep mint-mechanics coverage (that every
+// Retrieve call actually mints via the key, never falls back, maps server
+// errors to the exact design §4.11 messages) lives in
+// credentials/broker_test.go; this only pins that a Config shaped like a
+// real caller's ("just an API key, nothing else") resolves the way that
+// package's tests assume.
+func TestSelectProvider_APIKeyOnly_WiresIntoConsumerConfig(t *testing.T) {
+	cfg := types.Config{
+		APIEndpoint: "https://api-go.helix.tools",
+		APIKey:      "hlx_wiringTestKeyNotARealCredential1234567",
+		CustomerID:  "customer-apikey-wiring-test",
+		Region:      "us-east-1",
+	}
+
+	provider, err := stscreds.SelectProvider(cfg.APIEndpoint, cfg)
+	if err != nil {
+		t.Fatalf("SelectProvider: %v", err)
+	}
+	if _, ok := provider.(*aws.CredentialsCache); !ok {
+		t.Errorf("provider type = %T, want *aws.CredentialsCache for an API-key-only Config", provider)
+	}
+}

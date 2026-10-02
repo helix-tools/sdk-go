@@ -1,5 +1,37 @@
 # Changelog
 
+## 2026-10-01 (v2.20.0)
+
+### Added
+- API keys as an alternative way to bootstrap STS session credentials:
+  set `types.Config.APIKey` (created in the Helix portal under API Keys)
+  instead of your AWS access keys. With no `CredentialMode` set, a
+  configured `APIKey` now resolves to STS mode automatically (bootstrapped
+  with the key, no AWS access keys needed); `CredentialMode:
+  types.CredentialModeStatic` or `types.CredentialModeSTS` with AWS access
+  keys set keep working exactly as before. If both an API key and AWS
+  access keys are configured, the API key wins and the AWS access keys are
+  ignored, with a one-time warning explaining why. Your AWS access keys
+  keep working unchanged — this is purely opt-in. See the README's "API
+  keys" section.
+
+### Changed
+- `credentials.BrokerConfig` gained an `APIKey` field as an alternative to
+  `AWSAccessKeyID`/`AWSSecretAccessKey` for bootstrapping a mint request.
+  `credentials.MintError` now surfaces a precise, actionable message for a
+  rejected, revoked, or expired API key, or for AWS access keys retired on
+  a company that has moved to API keys — existing error handling for every
+  other mint failure is unchanged.
+- `json.Marshal` of `types.Config` no longer emits the `APIKey` field (it
+  used to emit `"APIKey":""`), so the key can never be serialized.
+- Fixed `credentials.MintError` detection of a revoked/expired/retired API
+  key: the real API returns the distinguishing text in `error.message`
+  (e.g. `"api key revoked"`, `"feature not enabled: sts_broker"`), not in
+  `error.code` as previously assumed, so those cases now latch and surface
+  the friendly message as intended. `api_key_expired` and
+  `static_credentials_retired` (both real `error.code` values) are
+  unaffected by this correction.
+
 ## 2026-10-01 (v2.19.0)
 
 ### Changed

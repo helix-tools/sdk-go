@@ -75,6 +75,34 @@ consumer, err := consumer.NewConsumer(cfg)
 See `CHANGELOG.md` for details and `credentials/broker.go`'s package doc for
 the lower-level `Provider`/`NewCredentialsCache` API.
 
+### API keys (opt-in, v2.20.0+)
+
+As of v2.20.0, you can bootstrap STS session credentials with a Helix API
+key instead of your AWS access keys. Create one in the Helix portal under
+**API Keys**, then set it via `types.Config.APIKey` (read it from an
+environment variable such as `HELIX_API_KEY` — the SDK does not read it for
+you):
+
+```go
+cfg := types.Config{
+	APIEndpoint: "https://api-go.helix.tools",
+	APIKey:      os.Getenv("HELIX_API_KEY"),
+	CustomerID:  os.Getenv("HELIX_CUSTOMER_ID"),
+	Region:      "us-east-1",
+}
+consumer, err := consumer.NewConsumer(cfg)
+```
+
+With `APIKey` set and no `CredentialMode`, the SDK mints session credentials
+using the key — no AWS access keys needed at all. If both `APIKey` and your
+AWS access keys are set, the key wins (with a one-time warning); set
+`CredentialMode: types.CredentialModeStatic` to use your AWS access keys
+instead. **Your AWS access keys keep working unchanged during this
+transition** — switching to an API key is entirely opt-in.
+
+The key is only ever sent to an `https://` endpoint (or `localhost` during
+local development) and never appears in logs or error messages.
+
 ## Quickstart — Producer
 
 ```go
