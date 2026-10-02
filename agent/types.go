@@ -1,26 +1,15 @@
 // Package agent provides a client for the Helix Connect agent-callable
-// HTTP surface (the /v1/agents/* routes described in ADR-0037 and
-// ADR-0038).
+// HTTP API (the /v1/agents/* routes).
 //
-// It is intended for use by:
+// It is intended for agents that have been issued a Helix agent token
+// (a JWT); the client doesn't care how the token was issued as long as it
+// verifies on the server side.
 //
-//   - Helix internal agents (Nova, helix-api-agent, etc.) that have
-//     been issued a JWT v2 token.
-//   - Customer-operated agents that have obtained a JWT (internal HS256
-//     or external RS256 — the client doesn't care which as long as the
-//     token verifies on the server side).
+// The client covers agent-callable operations only: operator-only
+// operations (kill-switch, token revocation, dead-letter handling, etc.)
+// are not part of this SDK.
 //
-// The client is admin-surface-free on purpose: admin-only endpoints
-// (kill-switch, token revocation, DLQ operations, etc.) remain
-// Python-SDK-exclusive per the cross-SDK parity decision recorded in
-// the project memory.
-//
-// The types in this file mirror the wire format of the server-side
-// types in:
-//
-//   - internal/resources/agents-api/types.go  (Phase 3 agent-callable)
-//   - internal/resources/agent-admin/types.go (for AgentRecord shape)
-//   - internal/pkg/agents/mcp.go              (MCP envelope wire shape)
+// The types in this file mirror the server's wire format.
 //
 // All json tags are snake_case and match the server wire format
 // exactly. If the server types change, these must be updated in
@@ -55,9 +44,8 @@ type RateLimitConfig struct {
 
 // AgentRecord describes a single agent registered with Helix.
 //
-// The on-the-wire shape mirrors agent-admin.AgentRecord (the admin
-// surface). List callers of the admin surface — if and when the Go SDK
-// grows one — reuse the same type.
+// The on-the-wire shape matches the server's agent record, so any future
+// call that lists agents reuses the same type.
 //
 // ActorClass is one of: "human_admin", "internal_agent", "external_agent".
 // TrustTier is one of:  "T0", "T1", "T2".

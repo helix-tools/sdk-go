@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-10-01 (v2.20.1)
+
+### Fixed
+- `NewConsumer` and `NewProducer` no longer report "invalid AWS credentials"
+  when the problem is with getting session credentials from Helix. If the
+  Helix credential service cannot be reached, the error now reads "could not
+  reach the Helix credential service: credential mint request failed before
+  a response", matching the Python SDK. If the service answers with one of
+  its customer-facing messages (for example a rejected, revoked or expired
+  API key), that message is returned as-is. Static AWS access keys that are
+  rejected keep the existing "invalid AWS credentials" message. The original
+  error stays reachable with `errors.Is`/`errors.As` for debugging.
+- The published module no longer includes repository-only files (contributor
+  tooling notes and the repository's own content checks), and a few doc
+  comments and docs were reworded to describe capabilities rather than
+  internal-only routes and tooling. No code changes for callers.
+
 ## 2026-10-01 (v2.20.0)
 
 ### Added
@@ -70,10 +87,9 @@
 ## 2026-09-29 (v2.18.1)
 
 ### Fixed
-- `MIGRATION_v2.md` no longer names the private admin SDK's package name;
-  the admin SDK is never published, so referencing it invited dependency
-  confusion. Reworded to describe the capability (no Go admin surface)
-  without naming any package.
+- `MIGRATION_v2.md` no longer names a private, unpublished package;
+  referencing it invited dependency confusion. Reworded to describe the
+  capability without naming any package.
 - Test fixtures in `types/` no longer use a real GitHub handle as a
   `created_by`/`enabled_by` sample value; replaced with a neutral
   placeholder.
@@ -110,9 +126,9 @@
   `CompanyStatus`, `ProducerInfo` and the onboarding link keys match the API.
 
 ### Changed (public surface)
-- The admin-only integration-test harness package
+- The operator-only integration-test harness package
   `github.com/helix-tools/sdk-go/v2/api` is no longer public; it moved to
-  `internal/api`. The admin company request/response types in `types` stay
+  `internal/api`. The operator company request/response types in `types` stay
   in place, marked Deprecated (see "Deprecated" and "Removed" below).
 
 ### Fixed
@@ -224,7 +240,7 @@
   warning and a later release will reject it.
 - `agent.Client.Me` — use `GetMe`; `Me` decodes the projection into the full
   `AgentRecord`, leaving fields the server never sends at zero (B-02).
-- The admin-only company request/response types in `types`
+- The operator-only company request/response types in `types`
   (`CreateCompanyRequest`, `UpdateCompanyRequest`, `CompaniesResponse`,
   `CreateCompanyResponse`, `InviteUserRequest`, `CompanyUsersResponse`), and
   `DatasetMarketplace.StripeProductID` / `StripePriceID` (always nil on API
@@ -233,7 +249,7 @@
 
 ### Removed
 - Package `github.com/helix-tools/sdk-go/v2/api` moved to `internal/api` (A-12).
-  It was an integration-test harness that drove admin-only routes and imported
+  It was an integration-test harness that drove operator-only routes and imported
   `testing` from library code, not SDK surface; no in-tree or known consumer
   imports it. Everything else in the previous public API still compiles
   (enforced by `internal/compat`).

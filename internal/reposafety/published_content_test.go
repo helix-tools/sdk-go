@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -11,13 +12,12 @@ import (
 )
 
 // bannedContentPatternB64 is bannedContentPattern's source, base64-encoded.
-// This test file is itself git-tracked, so it ships inside the very module
-// zip this guard exists to keep clean — spelling the banned terms out as a
-// literal regex here would put them in the published artifact just as
-// surely as if they appeared in application code. Encoding keeps the
-// pattern's behavior (decoded once below) while keeping this source file
-// itself free of any banned literal, so it needs no self-exemption from
-// the scan it runs.
+// This package is a nested module, so this file is not in the published
+// module zip (TestGuardIsNotPublished pins that). It is still in the public
+// git repository, so the pattern stays encoded: spelling the banned terms
+// out as a literal regex would put them in plain text in the repo. The
+// encoding hides the terms from a text search, not from a reader, which is
+// why the file must also stay out of the published module.
 const bannedContentPatternB64 = "KD9pKXJpbmdib29zdHxwaG9uZVwuY29tfGNsaWNrID91cHxkaXNjb3JkfFxiODZbMC05YS16XXs3fVxifC9Vc2Vycy9bQS1aYS16XXwvcHJpdmF0ZS90bXAvY2xhdWRlfGRtZS1wcm9kdWNlci18aGVsaXhbLV8uXSthZG1pbnxoZWxpeC1wcm9kdWNlci18aGVsaXhfc3NtX3wvaGVsaXgoLXRvb2xzKT8vW2EtejAtOSV7fSRfLV0rL2N1c3RvbWVyc1xi"
 
 // bannedContentPattern is the exact banned-content list applied to every
@@ -65,13 +65,16 @@ var bannedFilenames = map[string]bool{
 	"memory.md":    true,
 	"PLAN.md":      true,
 	"AGENTS.md":    true,
+	"CLAUDE.md":    true,
 }
 
 // publishedFiles returns exactly the file set this module publishes: for
 // a Go module, `go get`/the module proxy build the module zip from every
 // git-tracked file in the repo (there is no separate "files" allowlist
-// the way npm or a Python sdist has), so `git ls-files` is the
-// authoritative source of truth for "what ships." It skips (via t.Skip)
+// the way npm or a Python sdist has) except files under a subdirectory
+// that has its own go.mod (a nested module, such as this guard package and
+// .claude/). So `git ls-files` minus nested modules is the authoritative
+// source of truth for "what ships." It skips (via t.Skip)
 // when run outside a VCS checkout of this repo — e.g. against an
 // extracted module-cache copy with no .git metadata — since this guard's
 // job is this repo's own release hygiene, not something every downstream
@@ -88,16 +91,45 @@ func publishedFiles(t *testing.T, root string) []string {
 		t.Fatalf("published_content: git ls-files failed: %v", err)
 	}
 
-	var files []string
+	var tracked []string
 	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
 		if line != "" {
-			files = append(files, line)
+			tracked = append(tracked, line)
 		}
 	}
+	files := excludeNestedModules(tracked)
 	if len(files) == 0 {
 		t.Fatal("published_content: git ls-files returned no files — refusing to run a guard that would trivially pass")
 	}
 	return files
+}
+
+// excludeNestedModules drops every file under a directory that has its own
+// go.mod (other than the repo root's), mirroring the module zip rule that
+// such a directory is a separate module and is never published with this
+// one. Paths are git's slash-separated form.
+func excludeNestedModules(tracked []string) []string {
+	nested := map[string]bool{}
+	for _, f := range tracked {
+		if path.Base(f) == "go.mod" && f != "go.mod" {
+			nested[path.Dir(f)] = true
+		}
+	}
+
+	var published []string
+	for _, f := range tracked {
+		inNested := false
+		for dir := path.Dir(f); dir != "."; dir = path.Dir(dir) {
+			if nested[dir] {
+				inNested = true
+				break
+			}
+		}
+		if !inNested {
+			published = append(published, f)
+		}
+	}
+	return published
 }
 
 // TestNoBannedFilenamesAnywhere fails if a banned filename, or a
@@ -216,4 +248,40 @@ func lineContaining(text string, idx int) (lineNo int, line string) {
 		return lineNo, text[start:]
 	}
 	return lineNo, text[start : idx+end]
+}
+
+// TestExcludeNestedModules pins the module zip rule publishedFiles relies
+// on: files under a directory with its own go.mod are dropped, at any depth,
+// and nothing else is.
+func TestExcludeNestedModules(t *testing.T) {
+	tracked := []string{
+		"go.mod",
+		"README.md",
+		"producer/producer.go",
+		".claude/go.mod",
+		".claude/CLAUDE.md",
+		"internal/reposafety/go.mod",
+		"internal/reposafety/deep/x_test.go",
+		"internal/reposafetyish/kept.go", // a sibling sharing a name prefix
+		"internal/sdkerr/sdkerr.go",
+	}
+	got := strings.Join(excludeNestedModules(tracked), ",")
+	want := "go.mod,README.md,producer/producer.go,internal/reposafetyish/kept.go,internal/sdkerr/sdkerr.go"
+	if got != want {
+		t.Errorf("excludeNestedModules = %s\nwant %s", got, want)
+	}
+}
+
+// TestGuardIsNotPublished fails if this guard's own files, or the agent
+// instruction file, would ship in the published module — e.g. because a
+// nested go.mod was deleted.
+func TestGuardIsNotPublished(t *testing.T) {
+	root := repoRoot(t)
+	files := publishedFiles(t, root)
+
+	for _, f := range files {
+		if strings.HasPrefix(f, "internal/reposafety/") || path.Base(f) == "CLAUDE.md" {
+			t.Errorf("%s is in the published module; it must stay in a nested module", f)
+		}
+	}
 }

@@ -3,7 +3,7 @@
 // It includes a test HTTP client with AWS SigV4 authentication, configuration
 // loading, and cleanup utilities for managing test resources.
 //
-// It lives under internal/ on purpose: it drives admin-only routes (company
+// It lives under internal/ on purpose: it drives operator-only routes (company
 // fixtures and cleanup) and imports package testing, neither of which belongs
 // in the public SDK surface. It is not importable from outside this module.
 package api

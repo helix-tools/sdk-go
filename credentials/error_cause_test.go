@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/helix-tools/sdk-go/v2/internal/sdkerr"
 )
 
 const arnAccountService = "arn:aws:iam::123456789012:user/test"
@@ -42,6 +44,11 @@ func TestMint_TransportFailureCauseNeverLeaksIntoMessage(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "credentials: mint request failed") {
 		t.Fatalf("Error() = %q, want it to contain the clean authored message", err.Error())
+	}
+	// No response arrived, so the failure is marked as an unreachable
+	// credential service for NewConsumer/NewProducer to report as such.
+	if !errors.Is(err, sdkerr.ErrCredentialServiceUnreachable) {
+		t.Error("errors.Is(err, ErrCredentialServiceUnreachable) = false for a transport failure, want true")
 	}
 	// Unwrap through mintWithRetry's own "mint failed after N attempts" wrap
 	// (safe: it only embeds the already-clean inner message) down to the raw
@@ -108,6 +115,11 @@ func TestMint_ResponseBodyReadFailureCauseNeverLeaksIntoMessage(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "credentials: failed to read mint response") {
 		t.Fatalf("Error() = %q, want it to contain the clean authored message", err.Error())
+	}
+	// A response did arrive (only its body failed), so this is not an
+	// unreachable credential service.
+	if errors.Is(err, sdkerr.ErrCredentialServiceUnreachable) {
+		t.Error("errors.Is(err, ErrCredentialServiceUnreachable) = true after a response arrived, want false")
 	}
 	inner := errors.Unwrap(err)
 	if inner == nil {

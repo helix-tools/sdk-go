@@ -8,6 +8,16 @@
 // developer's own error-message logging can reach it.
 package sdkerr
 
+import "errors"
+
+// ErrCredentialServiceUnreachable marks a credential-session request that
+// failed before any response arrived (DNS, connection, TLS, or timeout). The
+// credentials package attaches it with WrapMarked; NewConsumer/NewProducer
+// check for it so a caller sees that the Helix credential service could not
+// be reached, instead of a message about AWS access keys they may never have
+// configured.
+var ErrCredentialServiceUnreachable = errors.New("could not reach the Helix credential service: credential mint request failed before a response")
+
 // Wrap returns an error whose Error() is exactly msg — cause's text is never
 // interpolated into it — and whose Unwrap() returns cause, so errors.Is and
 // errors.As still traverse to the original upstream error.
@@ -15,13 +25,25 @@ func Wrap(msg string, cause error) error {
 	return &wrapped{msg: msg, cause: cause}
 }
 
+// WrapMarked is Wrap plus a category marker: Error() is exactly msg,
+// Unwrap() is cause, and errors.Is(err, marker) also reports true, so a
+// caller further up can recognise the failure category without matching on
+// message text.
+func WrapMarked(msg string, marker, cause error) error {
+	return &wrapped{msg: msg, cause: cause, marker: marker}
+}
+
 type wrapped struct {
-	msg   string
-	cause error
+	msg    string
+	cause  error
+	marker error
 }
 
 func (w *wrapped) Error() string { return w.msg }
 func (w *wrapped) Unwrap() error { return w.cause }
+
+// Is reports whether target is this error's marker (see WrapMarked).
+func (w *wrapped) Is(target error) bool { return w.marker != nil && target == w.marker }
 
 // WrapSentinel returns an error whose Error() is exactly sentinel's message
 // and whose errors.Is/errors.As reach BOTH sentinel (so an existing exported

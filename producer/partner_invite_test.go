@@ -586,11 +586,11 @@ func TestDeactivateConsumer_PathEscapesID(t *testing.T) {
 
 	p := newTestProducer(server.URL)
 
-	if _, err := p.DeactivateConsumer(context.Background(), "cust/../admin"); err != nil {
+	if _, err := p.DeactivateConsumer(context.Background(), "cust/../other"); err != nil {
 		t.Fatalf("DeactivateConsumer: %v", err)
 	}
 
-	if gotEscapedPath != "/v1/self/consumers/cust%2F..%2Fadmin/deactivate" {
+	if gotEscapedPath != "/v1/self/consumers/cust%2F..%2Fother/deactivate" {
 		t.Errorf("expected path-escaped id, got %q", gotEscapedPath)
 	}
 }

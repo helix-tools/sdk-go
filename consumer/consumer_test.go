@@ -638,7 +638,7 @@ func TestSubscriptionRequestUnmarshalApproved(t *testing.T) {
 		"tier": "basic",
 		"status": "approved",
 		"approved_at": "2024-01-03T00:00:00Z",
-		"approved_by": "admin-user",
+		"approved_by": "reviewer-user",
 		"subscription_id": "sub-456",
 		"notes": "Approved for Q1 trial",
 		"created_at": "2024-01-01T00:00:00Z",
@@ -658,8 +658,8 @@ func TestSubscriptionRequestUnmarshalApproved(t *testing.T) {
 		t.Errorf("expected ApprovedAt '2024-01-03T00:00:00Z', got '%v'", request.ApprovedAt)
 	}
 
-	if request.ApprovedBy == nil || *request.ApprovedBy != "admin-user" {
-		t.Errorf("expected ApprovedBy 'admin-user', got '%v'", request.ApprovedBy)
+	if request.ApprovedBy == nil || *request.ApprovedBy != "reviewer-user" {
+		t.Errorf("expected ApprovedBy 'reviewer-user', got '%v'", request.ApprovedBy)
 	}
 
 	if request.SubscriptionID == nil || *request.SubscriptionID != "sub-456" {

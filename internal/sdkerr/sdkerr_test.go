@@ -101,3 +101,37 @@ func TestWrapSentinel_NestedTwoLevelsDeep(t *testing.T) {
 		t.Fatal("errors.Is(outer, cause) = false through a second wrap layer")
 	}
 }
+
+func TestWrapMarked_MarkerAndCauseReachableMessageUnchanged(t *testing.T) {
+	marker := errors.New("category marker")
+	err := WrapMarked("mint request failed", marker, errARNLaden)
+
+	if err.Error() != "mint request failed" {
+		t.Fatalf("Error() = %q, want exactly the authored message", err.Error())
+	}
+	if !errors.Is(err, marker) {
+		t.Fatal("errors.Is(err, marker) = false, want true")
+	}
+	if !errors.Is(err, errARNLaden) {
+		t.Fatal("errors.Is(err, cause) = false, want true")
+	}
+	if got := errors.Unwrap(err); got != errARNLaden {
+		t.Fatalf("errors.Unwrap(err) = %v, want the original cause (single-error chain unchanged)", got)
+	}
+	// Still reachable through further %w wrapping, as in mintWithRetry.
+	if outer := fmt.Errorf("mint failed after 3 attempts: %w", err); !errors.Is(outer, marker) {
+		t.Fatal("errors.Is(outer, marker) = false through a %w wrap, want true")
+	}
+}
+
+// TestWrap_CarriesNoMarker is the negative control for WrapMarked: a plain
+// Wrap must never report a marker, or every wrapped failure would be
+// mistaken for an unreachable credential service.
+func TestWrap_CarriesNoMarker(t *testing.T) {
+	if errors.Is(Wrap("mint request failed", errARNLaden), ErrCredentialServiceUnreachable) {
+		t.Fatal("errors.Is(Wrap(...), ErrCredentialServiceUnreachable) = true, want false")
+	}
+	if errors.Is(WrapMarked("x", nil, errARNLaden), ErrCredentialServiceUnreachable) {
+		t.Fatal("a nil marker must match nothing")
+	}
+}

@@ -1,5 +1,5 @@
 // Package contentpolicy enforces this repo's customer-visible content
-// policy (see CLAUDE.md, "Customer-visible content policy"): no runtime
+// policy: no runtime
 // message, and no doc comment on an exported symbol, may name an internal
 // mechanism such as the key-management service or the compression format.
 // Structural (AST-based) checks, not a bare substring grep, so the scan
@@ -19,7 +19,7 @@ import (
 )
 
 // forbiddenTerms names internals that customer-visible text must never
-// name directly (see CLAUDE.md rule 3: no encryption algorithms/mechanics,
+// name directly (the content policy: no encryption algorithms/mechanics,
 // never name key-management services; no compression format as mechanics).
 var forbiddenTerms = []string{"KMS", "gzip", "AES-GCM", "SNS"}
 

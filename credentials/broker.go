@@ -792,8 +792,8 @@ func backoffDelayFrom(random io.Reader, attempt int) (time.Duration, error) {
 
 // mint performs ONE mint HTTP round-trip. The second return value reports
 // whether the caller should retry: network/transport errors, 429, and 5xx
-// are retryable; everything else (2xx-but-malformed, 4xx auth/authz
-// decisions such as subscription_expired) is not.
+// are retryable; everything else (2xx-but-malformed, a refused redirect,
+// 4xx auth/authz decisions such as subscription_expired) is not.
 func (p *Provider) mint(ctx context.Context) (*mintSuccessResponse, bool, error) {
 	req, err := p.buildRequest(ctx)
 	if err != nil {
@@ -802,7 +802,14 @@ func (p *Provider) mint(ctx context.Context) (*mintSuccessResponse, bool, error)
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return nil, true, sdkerr.Wrap("credentials: mint request failed", err)
+		// A refused redirect (refuseMintRedirect) is the one Do error that
+		// comes back WITH a response: the service answered, so it is not
+		// unreachable, and the same redirect would come back on a retry.
+		if resp != nil {
+			_ = resp.Body.Close()
+			return nil, false, sdkerr.Wrap("credentials: the Helix credential service answered with a redirect, which was refused", err)
+		}
+		return nil, true, sdkerr.WrapMarked("credentials: mint request failed", sdkerr.ErrCredentialServiceUnreachable, err)
 	}
 	defer resp.Body.Close()
 

@@ -128,7 +128,7 @@ type UserPermissions struct {
 
 // CreateCompanyRequest is the payload for POST /v1/companies.
 //
-// Deprecated: an admin-only wire type (the /v1/companies routes require an
+// Deprecated: an operator-only wire type (the /v1/companies routes require an
 // administrator). The SDK itself no longer uses it; it is kept only so existing
 // code still compiles and will be removed in the next major version.
 type CreateCompanyRequest struct {
@@ -143,7 +143,7 @@ type CreateCompanyRequest struct {
 
 // UpdateCompanyRequest is the payload for PATCH /v1/companies/{id}.
 //
-// Deprecated: an admin-only wire type (see CreateCompanyRequest); kept only
+// Deprecated: an operator-only wire type (see CreateCompanyRequest); kept only
 // for source compatibility and removed in the next major version.
 type UpdateCompanyRequest struct {
 	CompanyName   *string          `json:"company_name,omitempty"`
@@ -158,7 +158,7 @@ type UpdateCompanyRequest struct {
 
 // CompaniesResponse is the response for GET /v1/companies.
 //
-// Deprecated: an admin-only wire type (see CreateCompanyRequest); kept only
+// Deprecated: an operator-only wire type (see CreateCompanyRequest); kept only
 // for source compatibility and removed in the next major version.
 type CompaniesResponse struct {
 	Companies []Company `json:"companies"`
@@ -167,7 +167,7 @@ type CompaniesResponse struct {
 
 // CreateCompanyResponse is the response for POST /v1/companies.
 //
-// Deprecated: an admin-only wire type (see CreateCompanyRequest); kept only
+// Deprecated: an operator-only wire type (see CreateCompanyRequest); kept only
 // for source compatibility and removed in the next major version.
 type CreateCompanyResponse struct {
 	Success   bool    `json:"success"`
@@ -177,7 +177,7 @@ type CreateCompanyResponse struct {
 
 // InviteUserRequest is the payload for POST /v1/companies/{id}/users.
 //
-// Deprecated: an admin-only wire type (see CreateCompanyRequest); kept only
+// Deprecated: an operator-only wire type (see CreateCompanyRequest); kept only
 // for source compatibility and removed in the next major version.
 type InviteUserRequest struct {
 	Email       string           `json:"email"`
@@ -191,7 +191,7 @@ type InviteUserRequest struct {
 
 // CompanyUsersResponse is the response for GET /v1/companies/{id}/users.
 //
-// Deprecated: an admin-only wire type (see CreateCompanyRequest); kept only
+// Deprecated: an operator-only wire type (see CreateCompanyRequest); kept only
 // for source compatibility and removed in the next major version.
 type CompanyUsersResponse struct {
 	Users []CompanyUser `json:"users"`

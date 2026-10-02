@@ -3,6 +3,7 @@ package credentials
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/helix-tools/sdk-go/v2/internal/sdkerr"
 	"github.com/helix-tools/sdk-go/v2/types"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -2461,6 +2463,80 @@ func TestProvider_Mint_RefusesSameHostHTTPSRedirect(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&redirectTargetHit); n != 0 {
 		t.Fatalf("redirect target was hit %d time(s) — a same-host, same-scheme redirect must not be followed either", n)
+	}
+}
+
+// TestProvider_Mint_RefusedRedirectIsNotUnreachable: when the mint endpoint
+// answers with a redirect, http.Client.Do returns the response AND the
+// CheckRedirect error together. The service DID answer, so the failure must
+// not be marked ErrCredentialServiceUnreachable ("failed before a
+// response"), and — a redirect being a fixed answer, not a blip — it must
+// not be retried either.
+func TestProvider_Mint_RefusedRedirectIsNotUnreachable(t *testing.T) {
+	var targetHit, mintHit int32
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&targetHit, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&mintHit, 1)
+		http.Redirect(w, r, target.URL+"/", http.StatusFound)
+	}))
+	defer server.Close()
+
+	cfg := testAPIKeyBrokerConfig(server.URL)
+	cfg.HTTPClient = server.Client()
+	p, err := NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+
+	_, err = p.Retrieve(context.Background())
+	if err == nil {
+		t.Fatal("expected an error for a refused redirect")
+	}
+	if errors.Is(err, sdkerr.ErrCredentialServiceUnreachable) {
+		t.Fatalf("Error() = %q is marked unreachable, but the credential service answered (with a refused redirect)", err.Error())
+	}
+	if !strings.Contains(err.Error(), "answered with a redirect, which was refused") {
+		t.Fatalf("Error() = %q, want it to say the service answered with a refused redirect", err.Error())
+	}
+	if !errors.Is(err, errMintRedirectRefused) {
+		t.Error("errors.Is(err, errMintRedirectRefused) = false, want the refusal reachable as the cause")
+	}
+	if n := atomic.LoadInt32(&mintHit); n != 1 {
+		t.Errorf("mint endpoint hit %d time(s), want 1 — a refused redirect must not be retried", n)
+	}
+	if n := atomic.LoadInt32(&targetHit); n != 0 {
+		t.Errorf("redirect target hit %d time(s), want 0 — redirects must stay refused", n)
+	}
+}
+
+// TestProvider_Mint_ConnectionRefusedIsUnreachable is the other side of the
+// classification: a real transport failure (nothing listening) has no
+// response, so it stays marked unreachable and is retried to the cap.
+func TestProvider_Mint_ConnectionRefusedIsUnreachable(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	cfg := testAPIKeyBrokerConfig(server.URL)
+	cfg.HTTPClient = server.Client()
+	server.Close() // nothing listens on the URL any more → connection refused
+
+	p, err := NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+
+	_, err = p.Retrieve(context.Background())
+	if err == nil {
+		t.Fatal("expected an error for a closed endpoint")
+	}
+	if !errors.Is(err, sdkerr.ErrCredentialServiceUnreachable) {
+		t.Fatalf("Error() = %q, want it marked ErrCredentialServiceUnreachable", err.Error())
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("after %d attempts", mintMaxAttempts)) {
+		t.Fatalf("Error() = %q, want the transport failure retried %d times", err.Error(), mintMaxAttempts)
 	}
 }
 
