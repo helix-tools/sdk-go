@@ -81,7 +81,7 @@ func fakeSTSAccessDenied(t *testing.T) *sts.Client {
 }
 
 func TestValidateCredentials_UpstreamCauseNeverLeaksIntoMessage(t *testing.T) {
-	err := validateCredentials(context.Background(), fakeSTSAccessDenied(t))
+	err := validateCredentials(context.Background(), fakeSTSAccessDenied(t), false)
 
 	assertClean(t, err, "invalid AWS credentials")
 	assertCauseReachable(t, err, arnAccountService)
