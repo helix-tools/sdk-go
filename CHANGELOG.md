@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-10-01 (v2.20.2)
+
+### Fixed
+- A rate-limited request for session credentials no longer fails the client
+  when Helix asks it to wait a moment. When the credential service answers
+  "rate limited" (HTTP 429) and says how long to wait (a `Retry-After`
+  header, or "retry after N seconds" in its message), the SDK now waits at
+  least that long before trying again, up to 5 seconds per pause. Before,
+  its short pauses could use up all 3 attempts inside the requested wait.
+  Still at most 3 attempts in total, and if every attempt fails, the error
+  from the last attempt is returned, as before.
+- A credential request that times out on the server side (HTTP 408) is now
+  retried like a rate-limited or server-error response. Rejected
+  credentials (HTTP 401 and the listed 403 cases) are still never retried,
+  and error messages still never include your API key.
+- If the credential service ever repeats your request's credentials back in
+  an error (your API key, the request's signature or session token), the SDK
+  now replaces them with `<redacted>` before returning the error, so they
+  never reach your error messages or logs. This also covers a successful
+  response the SDK cannot read, and it never changes whether a request is
+  retried, how long the SDK waits, or whether a rejected key stays rejected.
+
 ## 2026-10-01 (v2.20.1)
 
 ### Fixed

@@ -38,6 +38,8 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -100,6 +102,12 @@ const (
 	// retries are already gated by mintMaxAttempts.
 	mintRetryBaseDelay = 200 * time.Millisecond
 
+	// mintRetryAfterCap bounds how long a 429's Retry-After (header, or the
+	// API's "retry after N seconds" message) can stretch one wait between
+	// mint attempts, so a large server value cannot stall a caller for
+	// minutes. Same cap as the Python SDK.
+	mintRetryAfterCap = 5 * time.Second
+
 	// defaultMintTimeout bounds a single mint HTTP round-trip.
 	defaultMintTimeout = 10 * time.Second
 
@@ -143,6 +151,12 @@ type MintError struct {
 	// isLatchableMintError's doc comment for why the decision cannot be
 	// safely re-derived later from this struct's own exported fields.
 	latchable bool
+
+	// retryAfter is how long a 429 asked us to wait before the next attempt
+	// (already capped at mintRetryAfterCap), parsed in mint() from the
+	// Retry-After header or the RAW message before any friendly-text
+	// substitution. Zero when the response did not say, or was not a 429.
+	retryAfter time.Duration
 }
 
 // Error implements the error interface.
@@ -222,6 +236,47 @@ var apiKeyPattern = regexp.MustCompile(`hlx_[A-Za-z0-9_-]{43,}`)
 
 func redactAPIKeys(s string) string {
 	return apiKeyPattern.ReplaceAllString(s, "hlx_<redacted>")
+}
+
+// requestSecrets returns the exact secret values a mint request carried —
+// the whole Authorization header value, the SigV4 signature inside it, the
+// session token and the raw API key — longest first, so a whole header value
+// is replaced before any piece of it. Unlike apiKeyPattern this needs no
+// guess at a value's shape: if the credential service echoes any of them
+// back in an error body, scrubSecrets removes that exact text.
+func requestSecrets(req *http.Request, apiKey string) []string {
+	auth := req.Header.Get("Authorization")
+	candidates := []string{auth, req.Header.Get("X-Amz-Security-Token"), apiKey}
+	if i := strings.LastIndex(auth, "Signature="); i >= 0 {
+		candidates = append(candidates, auth[i+len("Signature="):])
+	}
+	secrets := make([]string, 0, len(candidates))
+	for _, s := range candidates {
+		if s != "" {
+			secrets = append(secrets, s)
+		}
+	}
+	sort.Slice(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
+	return secrets
+}
+
+// scrubSecrets replaces every exact occurrence of each secret in s.
+func scrubSecrets(s string, secrets []string) string {
+	for _, secret := range secrets {
+		s = strings.ReplaceAll(s, secret, "<redacted>")
+	}
+	return s
+}
+
+// scrubError returns err unchanged when its text carries no secret;
+// otherwise a plain error with the scrubbed text and NO wrapped cause, since
+// a cause (e.g. *time.ParseError's Value) would still hold the raw secret.
+func scrubError(err error, secrets []string) error {
+	text := err.Error()
+	if scrubbed := scrubSecrets(redactAPIKeys(text), secrets); scrubbed != text {
+		return errors.New(scrubbed)
+	}
+	return err
 }
 
 // IsSubscriptionExpired reports whether err is a *MintError carrying the
@@ -308,6 +363,11 @@ type mintSuccessResponse struct {
 	Expiration      string `json:"expiration"` // RFC3339
 	TTLSeconds      int64  `json:"ttl_seconds"`
 	Region          string `json:"region"`
+
+	// serverExpiry is Expiration parsed, set by mint() — which validates it
+	// there because only mint() knows the request's secrets to scrub from
+	// the error if the value is unparseable.
+	serverExpiry time.Time
 }
 
 // missingFields returns the names of any required-by-contract fields left
@@ -518,6 +578,9 @@ type Provider struct {
 	cfg        BrokerConfig
 	httpClient *http.Client
 	now        func() time.Time
+	// sleep waits between mint attempts, returning early with ctx's error
+	// if ctx ends first. Tests replace it so they never really sleep.
+	sleep func(ctx context.Context, d time.Duration) error
 
 	mu             sync.Mutex
 	lastHardExpiry time.Time
@@ -598,7 +661,19 @@ func NewProvider(cfg BrokerConfig) (*Provider, error) {
 		now = time.Now
 	}
 
-	return &Provider{cfg: cfg, httpClient: httpClient, now: now}, nil
+	return &Provider{cfg: cfg, httpClient: httpClient, now: now, sleep: sleepContext}, nil
+}
+
+// sleepContext waits for d, or until ctx ends (returning ctx's error).
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // Retrieve implements aws.CredentialsProvider. It mints a fresh session
@@ -619,17 +694,11 @@ func (p *Provider) Retrieve(ctx context.Context) (aws.Credentials, error) {
 		return aws.Credentials{}, err
 	}
 
-	serverExpiry, perr := time.Parse(time.RFC3339, resp.Expiration)
-	if perr != nil {
-		return aws.Credentials{}, fmt.Errorf("credentials: broker returned unparseable expiration %q: %w", resp.Expiration, perr)
-	}
-	if resp.TTLSeconds <= 0 {
-		return aws.Credentials{}, fmt.Errorf("credentials: broker returned non-positive ttl_seconds %d", resp.TTLSeconds)
-	}
-
+	// mint() has already validated Expiration (parsed into serverExpiry) and
+	// TTLSeconds.
 	expires := p.now().Add(time.Duration(resp.TTLSeconds) * time.Second)
-	if serverExpiry.Before(expires) {
-		expires = serverExpiry
+	if resp.serverExpiry.Before(expires) {
+		expires = resp.serverExpiry
 	}
 
 	// Record the TRUE (unadjusted) hard expiry of this mint, independent of
@@ -742,8 +811,13 @@ func (p *Provider) AdjustExpiresBy(creds aws.Credentials, dur time.Duration) (aw
 // exponential backoff+jitter between attempts, and stops immediately on a
 // non-retryable failure (a definitive auth/authz decision or a permanently
 // malformed response — retrying either wastes the retry budget on an
-// outcome that cannot change).
+// outcome that cannot change). A 429 that says how long to wait stretches
+// the next wait to at least that long, capped at mintRetryAfterCap.
 func (p *Provider) mintWithRetry(ctx context.Context) (*mintSuccessResponse, error) {
+	sleep := p.sleep
+	if sleep == nil {
+		sleep = sleepContext
+	}
 	var lastErr error
 	for attempt := 0; attempt < mintMaxAttempts; attempt++ {
 		if attempt > 0 {
@@ -751,10 +825,12 @@ func (p *Provider) mintWithRetry(ctx context.Context) (*mintSuccessResponse, err
 			if err != nil {
 				return nil, fmt.Errorf("credentials: failed to generate retry jitter: %w", err)
 			}
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(delay):
+			var mErr *MintError
+			if errors.As(lastErr, &mErr) && mErr.retryAfter > delay {
+				delay = mErr.retryAfter
+			}
+			if err := sleep(ctx, delay); err != nil {
+				return nil, err
 			}
 		}
 
@@ -790,9 +866,49 @@ func backoffDelayFrom(random io.Reader, attempt int) (time.Duration, error) {
 	return base + jitter, nil
 }
 
+// retryAfterMessage matches the wait the API states in a 429's message, e.g.
+// "rate limit exceeded: retry after 1 seconds".
+var retryAfterMessage = regexp.MustCompile(`(?i)retry after ([0-9]+) seconds?`)
+
+// retryAfterDelay returns how long a 429 asked us to wait, capped at
+// mintRetryAfterCap, or 0 when it did not say. The Retry-After header wins
+// when it is plain ASCII digits; otherwise the message is searched. Only
+// non-negative integer seconds are honoured — an HTTP-date, a negative,
+// fractional or non-numeric value falls back to the normal backoff — and an
+// over-long digit string is treated as the cap without ever being converted,
+// so no value can overflow or produce a negative wait.
+func retryAfterDelay(header, message string) time.Duration {
+	value := strings.TrimSpace(header)
+	if !isASCIIDigits(value) {
+		match := retryAfterMessage.FindStringSubmatch(message)
+		if match == nil {
+			return 0
+		}
+		value = match[1]
+	}
+	value = strings.TrimLeft(value, "0")
+	if len(value) > 3 {
+		return mintRetryAfterCap
+	}
+	seconds, _ := strconv.Atoi(value) // <= 3 ASCII digits ("" is 0): cannot fail
+	return min(time.Duration(seconds)*time.Second, mintRetryAfterCap)
+}
+
+func isASCIIDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // mint performs ONE mint HTTP round-trip. The second return value reports
-// whether the caller should retry: network/transport errors, 429, and 5xx
-// are retryable; everything else (2xx-but-malformed, a refused redirect,
+// whether the caller should retry: network/transport errors, 408, 429, and
+// 5xx are retryable; everything else (2xx-but-malformed, a refused redirect,
 // 4xx auth/authz decisions such as subscription_expired) is not.
 func (p *Provider) mint(ctx context.Context) (*mintSuccessResponse, bool, error) {
 	req, err := p.buildRequest(ctx)
@@ -818,14 +934,26 @@ func (p *Provider) mint(ctx context.Context) (*mintSuccessResponse, bool, error)
 		return nil, true, sdkerr.Wrap("credentials: failed to read mint response", err)
 	}
 
+	// Everything below decides on the RAW response; only what is surfaced —
+	// the returned error, its causes, MintError's fields — is scrubbed.
+	secrets := requestSecrets(req, p.cfg.APIKey)
+
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		var success mintSuccessResponse
 		if jerr := json.Unmarshal(body, &success); jerr != nil {
-			return nil, false, fmt.Errorf("credentials: malformed mint response JSON: %w", jerr)
+			return nil, false, scrubError(fmt.Errorf("credentials: malformed mint response JSON: %w", jerr), secrets)
 		}
 		if missing := success.missingFields(); len(missing) > 0 {
 			return nil, false, fmt.Errorf("credentials: mint response missing required field(s): %s", strings.Join(missing, ", "))
 		}
+		serverExpiry, perr := time.Parse(time.RFC3339, success.Expiration)
+		if perr != nil {
+			return nil, false, scrubError(fmt.Errorf("credentials: broker returned unparseable expiration %q: %w", success.Expiration, perr), secrets)
+		}
+		if success.TTLSeconds <= 0 {
+			return nil, false, fmt.Errorf("credentials: broker returned non-positive ttl_seconds %d", success.TTLSeconds)
+		}
+		success.serverExpiry = serverExpiry
 		return &success, false, nil
 	}
 
@@ -841,20 +969,26 @@ func (p *Provider) mint(ctx context.Context) (*mintSuccessResponse, bool, error)
 	} else {
 		mErr.Message = strings.TrimSpace(string(body))
 	}
-	mErr.Message = redactAPIKeys(mErr.Message)
-
 	// Decided from the RAW code/message pair, before the friendly-text
-	// substitution below can overwrite mErr.Message — see
+	// substitution and the scrubbing below can change them — see
 	// isLatchableMintError's doc comment.
 	mErr.latchable = isLatchableMintCode(mErr.StatusCode, mErr.Code, mErr.Message)
+	if resp.StatusCode == http.StatusTooManyRequests {
+		mErr.retryAfter = retryAfterDelay(resp.Header.Get("Retry-After"), mErr.Message)
+	}
 
 	usedAPIKey := p.cfg.APIKey != ""
 	if friendly := friendlyMintErrorMessage(resp.StatusCode, mErr.Code, mErr.Message, usedAPIKey); friendly != "" {
 		mErr.Message = friendly
 		mErr.Friendly = true
+	} else {
+		mErr.Message = scrubSecrets(redactAPIKeys(mErr.Message), secrets)
 	}
+	mErr.Code = scrubSecrets(redactAPIKeys(mErr.Code), secrets)
+	mErr.RequestID = scrubSecrets(redactAPIKeys(mErr.RequestID), secrets)
 
-	retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+	retryable := resp.StatusCode == http.StatusRequestTimeout ||
+		resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
 	return nil, retryable, mErr
 }
 

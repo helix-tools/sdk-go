@@ -54,6 +54,10 @@ type fakeBroker struct {
 	// channel before responding — used to widen the race window for
 	// single-flight tests.
 	block chan struct{}
+
+	// header, when non-nil, supplies extra response headers per call (e.g.
+	// Retry-After).
+	header func(callNum int) http.Header
 }
 
 func newFakeBroker(t *testing.T, respond func(callNum int) (status int, body string)) *fakeBroker {
@@ -76,6 +80,11 @@ func (f *fakeBroker) handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	status, body := f.respond(n)
+	if f.header != nil {
+		for name, values := range f.header(n) {
+			w.Header()[name] = values
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write([]byte(body))
