@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-10-01 (v2.20.3)
+
+### Fixed
+- If you use a Helix API key and the Helix credential service answers with an
+  error it has no specific message for (for example a temporary server
+  error), `NewConsumer` and `NewProducer` now say so, with the service's own
+  reason — e.g. "Helix credential service error (internal_error): ..." —
+  instead of "invalid AWS credentials", which pointed you at AWS keys you
+  never configured. With an API key, any other failure to get working
+  credentials (for example a reply that is cut off or unusable) also names
+  the Helix credential service rather than AWS credentials. The same applies to session-credential mode with AWS
+  keys; if the service rejects those AWS keys, the message is still "invalid
+  AWS credentials". Your API key and other request secrets are still never
+  shown in error messages.
+
 ## 2026-10-01 (v2.20.2)
 
 ### Fixed

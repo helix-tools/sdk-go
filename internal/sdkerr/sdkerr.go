@@ -8,7 +8,10 @@
 // developer's own error-message logging can reach it.
 package sdkerr
 
-import "errors"
+import (
+	"errors"
+	"strconv"
+)
 
 // ErrCredentialServiceUnreachable marks a credential-session request that
 // failed before any response arrived (DNS, connection, TLS, or timeout). The
@@ -17,6 +20,30 @@ import "errors"
 // be reached, instead of a message about AWS access keys they may never have
 // configured.
 var ErrCredentialServiceUnreachable = errors.New("could not reach the Helix credential service: credential mint request failed before a response")
+
+// CredentialServiceMessage is the customer-facing text for an error the
+// Helix credential service answered with but has no mapped message for (a
+// 5xx, or an unmapped 4xx): it names the service and carries the service's
+// own code and message, so an API-key caller is not told their AWS keys are
+// at fault. code and message must already be scrubbed of secrets; an empty
+// message falls back to the HTTP status.
+func CredentialServiceMessage(statusCode int, code, message string) string {
+	msg := "Helix credential service error"
+	if code != "" {
+		msg += " (" + code + ")"
+	}
+	if message == "" {
+		return msg + ": HTTP " + strconv.Itoa(statusCode)
+	}
+	return msg + ": " + message
+}
+
+// KeyCallerServiceFailure is the customer-facing text when an API-key caller
+// could not get working credentials for any other reason (e.g. the service
+// answered with something unusable, or the credentials it issued were
+// rejected): it names the credential service, never AWS keys the caller
+// never configured. Callers attach the real failure with Wrap.
+const KeyCallerServiceFailure = "Helix credential service error: could not get working credentials for this API key"
 
 // Wrap returns an error whose Error() is exactly msg — cause's text is never
 // interpolated into it — and whose Unwrap() returns cause, so errors.Is and

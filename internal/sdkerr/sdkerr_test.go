@@ -135,3 +135,21 @@ func TestWrap_CarriesNoMarker(t *testing.T) {
 		t.Fatal("a nil marker must match nothing")
 	}
 }
+
+func TestCredentialServiceMessage(t *testing.T) {
+	cases := []struct {
+		status        int
+		code, message string
+		want          string
+	}{
+		{500, "internal_error", "boom", "Helix credential service error (internal_error): boom"},
+		{503, "", "upstream unavailable", "Helix credential service error: upstream unavailable"},
+		{502, "", "", "Helix credential service error: HTTP 502"},
+		{500, "internal_error", "", "Helix credential service error (internal_error): HTTP 500"},
+	}
+	for _, tc := range cases {
+		if got := CredentialServiceMessage(tc.status, tc.code, tc.message); got != tc.want {
+			t.Errorf("CredentialServiceMessage(%d, %q, %q) = %q, want %q", tc.status, tc.code, tc.message, got, tc.want)
+		}
+	}
+}

@@ -931,6 +931,12 @@ func (p *Provider) mint(ctx context.Context) (*mintSuccessResponse, bool, error)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		// A non-2xx status already says the service refused or failed, so it
+		// stays a *MintError (status only — the cut-off body is not trusted)
+		// and callers can name the credential service rather than AWS keys.
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, true, &MintError{StatusCode: resp.StatusCode}
+		}
 		return nil, true, sdkerr.Wrap("credentials: failed to read mint response", err)
 	}
 

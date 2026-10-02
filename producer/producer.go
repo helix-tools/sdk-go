@@ -151,7 +151,7 @@ func NewProducer(cfg types.Config) (*Producer, error) {
 
 	// Validate credentials.
 	stsClient := sts.NewFromConfig(awsCfg)
-	if err := validateCredentials(context.Background(), stsClient); err != nil {
+	if err := validateCredentials(context.Background(), stsClient, strings.TrimSpace(cfg.APIKey) != ""); err != nil {
 		return nil, err
 	}
 
@@ -271,14 +271,31 @@ func loadAWSConfig(ctx context.Context, region string, credProvider aws.Credenti
 // service could not be reached, or it returned one of its customer-facing
 // messages (e.g. a revoked API key) — never as "invalid AWS credentials",
 // which would mislead an API-key caller who configured no AWS keys at all.
-func validateCredentials(ctx context.Context, stsClient *sts.Client) error {
+// Any other error the service answered with (a 5xx, or a 4xx with no mapped
+// message) is reported as a credential service error carrying the service's
+// scrubbed code and message. The one exception is a 401/403 to a static-key
+// caller (apiKeyConfigured false): the service rejected their AWS keys, so
+// "invalid AWS credentials" is the right advice for them. Any other failure
+// for an API-key caller (e.g. an unusable answer from the service, or its
+// credentials being rejected) still names the credential service.
+func validateCredentials(ctx context.Context, stsClient *sts.Client, apiKeyConfigured bool) error {
 	if _, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); err != nil {
 		if errors.Is(err, sdkerr.ErrCredentialServiceUnreachable) {
 			return sdkerr.WrapSentinel(sdkerr.ErrCredentialServiceUnreachable, err)
 		}
 		var mintErr *stscreds.MintError
-		if errors.As(err, &mintErr) && mintErr.Friendly {
-			return sdkerr.Wrap(mintErr.Message, err)
+		if errors.As(err, &mintErr) {
+			if mintErr.Friendly {
+				return sdkerr.Wrap(mintErr.Message, err)
+			}
+			rejectedAWSKeys := !apiKeyConfigured &&
+				(mintErr.StatusCode == http.StatusUnauthorized || mintErr.StatusCode == http.StatusForbidden)
+			if !rejectedAWSKeys {
+				return sdkerr.Wrap(sdkerr.CredentialServiceMessage(mintErr.StatusCode, mintErr.Code, mintErr.Message), err)
+			}
+		}
+		if apiKeyConfigured {
+			return sdkerr.Wrap(sdkerr.KeyCallerServiceFailure, err)
 		}
 		return sdkerr.Wrap("invalid AWS credentials", err)
 	}
