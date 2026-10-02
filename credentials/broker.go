@@ -802,7 +802,7 @@ func (p *Provider) mint(ctx context.Context) (*mintSuccessResponse, bool, error)
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return nil, true, sdkerr.Wrap("credentials: mint request failed", err)
+		return nil, true, sdkerr.WrapMarked("credentials: mint request failed", sdkerr.ErrCredentialServiceUnreachable, err)
 	}
 	defer resp.Body.Close()
 

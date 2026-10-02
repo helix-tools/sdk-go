@@ -446,8 +446,8 @@ func TestNewProducer_InvalidCredentialsStopBeforeProducerConfig(t *testing.T) {
 	isolateAWSEnv(t, identity.URL, "http://127.0.0.1:1")
 
 	p, err := NewProducer(testProducerConfig(api.server.URL))
-	if err == nil || p != nil || !strings.Contains(err.Error(), "invalid AWS credentials") {
-		t.Fatalf("NewProducer = %v, %v; want nil and an invalid-credentials error", p, err)
+	if err == nil || p != nil || err.Error() != "invalid AWS credentials" {
+		t.Fatalf("NewProducer = %v, %v; want nil and exactly the invalid-credentials error", p, err)
 	}
 	if configCalls, _, _ := api.counts(); configCalls != 0 {
 		t.Errorf("producer-config requested %d time(s) with invalid credentials, want 0", configCalls)

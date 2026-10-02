@@ -13,7 +13,7 @@ func TestFeatureFlagJSONTags(t *testing.T) {
 		"enabled": true,
 		"since": "2026-03-24T05:18:00Z",
 		"enabled_by": "user-1",
-		"disabled_by": "admin@helix.tools",
+		"disabled_by": "operator@example.com",
 		"disabled_at": "2026-04-01T00:00:00Z",
 		"reason": "beta access",
 		"expires_at": "2026-12-31T23:59:59Z"
@@ -33,8 +33,8 @@ func TestFeatureFlagJSONTags(t *testing.T) {
 	if ff.EnabledBy != "user-1" {
 		t.Errorf("EnabledBy = %q, want %q", ff.EnabledBy, "user-1")
 	}
-	if ff.DisabledBy != "admin@helix.tools" {
-		t.Errorf("DisabledBy = %q, want %q", ff.DisabledBy, "admin@helix.tools")
+	if ff.DisabledBy != "operator@example.com" {
+		t.Errorf("DisabledBy = %q, want %q", ff.DisabledBy, "operator@example.com")
 	}
 	if ff.DisabledAt != "2026-04-01T00:00:00Z" {
 		t.Errorf("DisabledAt = %q, want the schema disabled_at value", ff.DisabledAt)

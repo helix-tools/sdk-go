@@ -1,5 +1,9 @@
 // Package reposafety guards against internal-only planning/identity files
-// being reintroduced at the repo root of this public SDK repository.
+// being reintroduced at the repo root of this public SDK repository, and
+// against internal references reaching the published module.
+//
+// It is its own nested module (see go.mod here), so none of it is part of
+// the published module zip; CI runs it as a separate step.
 package reposafety
 
 import (
@@ -27,11 +31,14 @@ var forbiddenRootFiles = []string{
 	"PLAN.md",
 	"sdk-parity-analysis.json",
 	"AGENTS.md",
+	// Agent instruction file: it lives under .claude/, which has its own
+	// go.mod so it is never part of the published module.
+	"CLAUDE.md",
 }
 
-// repoRoot locates the module root by walking up from this file's directory
-// until it finds go.mod, so the check keeps working regardless of where in
-// the tree this test package lives.
+// repoRoot locates the published module's root by walking up from the
+// parent of this nested module's directory (which has its own go.mod)
+// until it finds go.mod.
 func repoRoot(t *testing.T) string {
 	t.Helper()
 
@@ -40,7 +47,7 @@ func repoRoot(t *testing.T) string {
 		t.Fatal("reposafety: could not determine this file's path via runtime.Caller")
 	}
 
-	dir := filepath.Dir(thisFile)
+	dir := filepath.Dir(filepath.Dir(thisFile))
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
 			return dir
@@ -64,7 +71,7 @@ func TestNoForbiddenRootFiles(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(root, name)
 			if _, err := os.Stat(path); err == nil {
-				t.Errorf("%s must not exist at the repo root: it is internal-only content that must not ship in this public repo (see CLAUDE.md's customer-visible content policy)", name)
+				t.Errorf("%s must not exist at the repo root: it is internal-only content that must not ship in this public repo (see the customer-visible content policy in .claude/CLAUDE.md)", name)
 			} else if !os.IsNotExist(err) {
 				t.Fatalf("unexpected error checking %s: %v", path, err)
 			}
@@ -79,7 +86,7 @@ func TestNoDocsPlansDirectory(t *testing.T) {
 	path := filepath.Join(root, "docs", "plans")
 
 	if info, err := os.Stat(path); err == nil {
-		t.Errorf("%s must not exist: docs/plans/ holds internal planning documents that must not ship in this public repo (see CLAUDE.md's customer-visible content policy); found %v", path, info.Mode())
+		t.Errorf("%s must not exist: docs/plans/ holds internal planning documents that must not ship in this public repo (see the customer-visible content policy in .claude/CLAUDE.md); found %v", path, info.Mode())
 	} else if !os.IsNotExist(err) {
 		t.Fatalf("unexpected error checking %s: %v", path, err)
 	}

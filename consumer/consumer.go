@@ -54,7 +54,7 @@ const emptyPayloadHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca49599
 // best-effort default for those dev-build cases; the wire-sent
 // sdk_version value for a normally-built consumer binary instead
 // reflects the actual resolved module version, which cannot drift.
-const SDKVersion = "2.20.0"
+const SDKVersion = "2.20.1"
 
 // SDKLanguage identifies this SDK's language in download outcome callbacks
 // (matches the dataset_download_event JSON Schema's sdk_language field).
@@ -375,8 +375,21 @@ func loadAWSConfig(ctx context.Context, region string, credProvider aws.Credenti
 // fail fast on bad credentials. On failure the customer sees a clean message
 // while the raw STS/IAM error (which can carry the account ID and an IAM
 // ARN) stays reachable via errors.Unwrap/errors.As for debugging.
+//
+// In STS mode the call first gets session credentials from the Helix
+// credential service, so a failure there is reported as what it is — the
+// service could not be reached, or it returned one of its customer-facing
+// messages (e.g. a revoked API key) — never as "invalid AWS credentials",
+// which would mislead an API-key caller who configured no AWS keys at all.
 func validateCredentials(ctx context.Context, stsClient *sts.Client) error {
 	if _, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); err != nil {
+		if errors.Is(err, sdkerr.ErrCredentialServiceUnreachable) {
+			return sdkerr.WrapSentinel(sdkerr.ErrCredentialServiceUnreachable, err)
+		}
+		var mintErr *stscreds.MintError
+		if errors.As(err, &mintErr) && mintErr.Friendly {
+			return sdkerr.Wrap(mintErr.Message, err)
+		}
 		return sdkerr.Wrap("invalid AWS credentials", err)
 	}
 	return nil

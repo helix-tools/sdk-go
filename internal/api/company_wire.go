@@ -2,7 +2,7 @@ package api
 
 import "github.com/helix-tools/sdk-go/v2/types"
 
-// The admin-only company request/response bodies the harness sends and reads.
+// The operator-only company request/response bodies the harness sends and reads.
 // They used to be exported from package types; that surface is deprecated
 // there (see types.CreateCompanyRequest) and the harness owns its copies.
 

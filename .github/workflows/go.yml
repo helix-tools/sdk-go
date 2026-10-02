@@ -58,6 +58,11 @@ jobs:
     - name: Test
       run: go test -short -race ./...
 
+    # The repository hygiene guards live in a nested module so they are not
+    # part of the published module zip; `./...` above does not reach them.
+    - name: Test repository hygiene guards
+      run: go -C internal/reposafety test -race ./...
+
   create-release:
     name: Create GitHub Release
     runs-on: ${{ vars.RUNNER == 'aws' && format('codebuild-helix-tools-{0}-runner-{1}-{2}', github.event.repository.name, github.run_id, github.run_attempt) || 'ubuntu-latest' }}

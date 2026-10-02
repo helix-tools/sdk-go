@@ -18,11 +18,10 @@ Coordinated with the other Helix SDKs:
 | SDK | v2.0.0 meaning |
 |---|---|
 | `@helix-tools/sdk-typescript` | version-only (already matched target contract) |
-| `helix-connect` (Python) | **breaking** — admin surface removed |
-| Python admin SDK (private, not published) | response dataclasses moved |
+| `helix-connect` (Python) | **breaking** — operator-only operations removed |
 | `sdk-go` (this) | version-only confirmation of full parity |
 
-From 2.0.0 forward, the schemas in `sdk/schemas/` are the single source of truth and CI blocks drift across any SDK.
+From 2.0.0 forward, the shared Helix SDK schemas are the single source of truth and CI blocks drift across any SDK.
 
 ## Verified full parity
 
@@ -36,13 +35,13 @@ This SDK was audited against schemas and the other SDKs on 2026-04-21. All expec
 
 ## What's not here
 
-- **No admin surface.** Admin operations are not part of this SDK; there is no Go admin SDK, and none is on the roadmap.
+- **No operator-only operations.** This SDK covers the producer, consumer and agent APIs; operator-only operations are not part of it, and none are on the roadmap.
 
 ## New CI guardrails (informational)
 
-From v2.0.0, the monorepo CI runs two new blocking jobs that help keep this SDK in sync:
+From v2.0.0, CI runs two blocking checks that help keep this SDK in sync:
 
-1. `admin-leak-scan` — rejects PRs that introduce `/v1/admin/*` URLs or admin method names into `sdk/go/agent`, `sdk/go/consumer`, `sdk/go/producer`.
-2. `validate-sdk-compliance --target=go-sdk` — continues enforcing schema field coverage per public struct.
+1. The public packages (`agent`, `consumer`, `producer`) may call only customer-facing routes.
+2. Every public struct must cover its schema's fields.
 
 No action needed from you — just be aware the CI is stricter now.

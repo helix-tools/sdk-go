@@ -8,7 +8,7 @@ import (
 )
 
 // TestCompanies runs CRUD integration tests for the companies resource.
-// These tests require admin credentials to create/update/delete companies.
+// These tests require operator credentials to create/update/delete companies.
 func TestCompanies(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
