@@ -428,7 +428,10 @@ func (c BrokerConfig) GoString() string {
 // every named struct declared in a wire-facing package and would otherwise
 // treat a tagged BrokerConfig as a wire payload requiring every field to
 // carry a snake_case json tag, which BrokerConfig (SDK-side configuration,
-// never itself serialized to the API) is not.
+// never itself serialized to the API) is not. HTTPClient is omitted too: it
+// carries no configuration a log reader needs, and encoding/json cannot
+// encode it at all once its CheckRedirect is set (a func value), which every
+// mint client in this package has (see refuseMintRedirect).
 func (c BrokerConfig) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		APIEndpoint        string
@@ -436,14 +439,12 @@ func (c BrokerConfig) MarshalJSON() ([]byte, error) {
 		Region             string
 		AWSAccessKeyID     string
 		AWSSecretAccessKey string
-		HTTPClient         *http.Client
 	}{
 		APIEndpoint:        c.APIEndpoint,
 		CustomerID:         c.CustomerID,
 		Region:             c.Region,
 		AWSAccessKeyID:     c.AWSAccessKeyID,
 		AWSSecretAccessKey: c.AWSSecretAccessKey,
-		HTTPClient:         c.HTTPClient,
 	})
 }
 
@@ -936,7 +937,7 @@ const (
 )
 
 func warn(message string) {
-	fmt.Fprintln(warningWriter, "helix sdk-go: "+message)
+	_, _ = fmt.Fprintln(warningWriter, "helix sdk-go: "+message)
 }
 
 // SelectProvider infers/validates cfg's credential mode and returns the

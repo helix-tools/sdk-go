@@ -2319,10 +2319,9 @@ func TestProvider_GoString_RedactsAPIKey(t *testing.T) {
 
 // TestBrokerConfig_JSONMarshal_OmitsAPIKey proves json.Marshal — which never
 // consults String/GoString at all — also never emits the raw key, and that
-// the fix changes nothing else about the JSON shape for a config with no
-// key set (byte-identical to what this type emitted before APIKey existed).
-// HTTPClient is left nil: a non-nil *http.Client is not JSON-encodable at
-// all (it holds a func-typed CheckRedirect field), independent of this fix.
+// the JSON shape for a config with no key set is pinned byte-for-byte: the
+// pre-APIKey-field shape minus HTTPClient, which MarshalJSON also omits (see
+// TestBrokerConfig_JSONMarshal_HTTPClientWithCheckRedirect).
 func TestBrokerConfig_JSONMarshal_OmitsAPIKey(t *testing.T) {
 	withKey := BrokerConfig{
 		APIEndpoint: "https://api-go.helix.tools",
@@ -2352,9 +2351,35 @@ func TestBrokerConfig_JSONMarshal_OmitsAPIKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
 	}
-	want := `{"APIEndpoint":"https://api-go.helix.tools","CustomerID":"customer-json-test","Region":"us-east-1","AWSAccessKeyID":"AKIA-VISIBLE-NOT-SECRET","AWSSecretAccessKey":"aStaticSecretThatMustNeverBePrinted12345","HTTPClient":null}`
+	want := `{"APIEndpoint":"https://api-go.helix.tools","CustomerID":"customer-json-test","Region":"us-east-1","AWSAccessKeyID":"AKIA-VISIBLE-NOT-SECRET","AWSSecretAccessKey":"aStaticSecretThatMustNeverBePrinted12345"}`
 	if string(got) != want {
-		t.Fatalf("json.Marshal(BrokerConfig{no key}) = %s, want %s (byte-identical to the pre-APIKey-field JSON shape)", got, want)
+		t.Fatalf("json.Marshal(BrokerConfig{no key}) = %s, want %s", got, want)
+	}
+}
+
+// TestBrokerConfig_JSONMarshal_HTTPClientWithCheckRedirect proves
+// json.Marshal succeeds for a BrokerConfig whose HTTPClient carries a
+// func-typed CheckRedirect — the shape every mint client in this package
+// has (see refuseMintRedirect) and a caller's own client may have too.
+// encoding/json cannot encode a func, so HTTPClient must be absent from the
+// output entirely; the APIKey guarantee must still hold alongside it.
+func TestBrokerConfig_JSONMarshal_HTTPClientWithCheckRedirect(t *testing.T) {
+	cfg := BrokerConfig{
+		APIEndpoint: "https://api-go.helix.tools",
+		CustomerID:  "customer-json-test",
+		Region:      testRegion,
+		APIKey:      testAPIKey,
+		HTTPClient:  &http.Client{CheckRedirect: refuseMintRedirect},
+	}
+	out, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("json.Marshal(BrokerConfig with CheckRedirect client): %v", err)
+	}
+	if strings.Contains(string(out), testAPIKey) {
+		t.Fatalf("json.Marshal(BrokerConfig) = %s, leaked the raw API key", out)
+	}
+	if strings.Contains(string(out), "HTTPClient") {
+		t.Fatalf("json.Marshal(BrokerConfig) = %s, want the HTTPClient field entirely absent", out)
 	}
 }
 
