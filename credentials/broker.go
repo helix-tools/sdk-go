@@ -38,6 +38,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -235,6 +236,36 @@ var apiKeyPattern = regexp.MustCompile(`hlx_[A-Za-z0-9_-]{43,}`)
 
 func redactAPIKeys(s string) string {
 	return apiKeyPattern.ReplaceAllString(s, "hlx_<redacted>")
+}
+
+// requestSecrets returns the exact secret values a mint request carried —
+// the whole Authorization header value, the SigV4 signature inside it, the
+// session token and the raw API key — longest first, so a whole header value
+// is replaced before any piece of it. Unlike apiKeyPattern this needs no
+// guess at a value's shape: if the credential service echoes any of them
+// back in an error body, scrubSecrets removes that exact text.
+func requestSecrets(req *http.Request, apiKey string) []string {
+	auth := req.Header.Get("Authorization")
+	candidates := []string{auth, req.Header.Get("X-Amz-Security-Token"), apiKey}
+	if i := strings.LastIndex(auth, "Signature="); i >= 0 {
+		candidates = append(candidates, auth[i+len("Signature="):])
+	}
+	secrets := make([]string, 0, len(candidates))
+	for _, s := range candidates {
+		if s != "" {
+			secrets = append(secrets, s)
+		}
+	}
+	sort.Slice(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
+	return secrets
+}
+
+// scrubSecrets replaces every exact occurrence of each secret in s.
+func scrubSecrets(s string, secrets []string) string {
+	for _, secret := range secrets {
+		s = strings.ReplaceAll(s, secret, "<redacted>")
+	}
+	return s
 }
 
 // IsSubscriptionExpired reports whether err is a *MintError carrying the
@@ -916,7 +947,10 @@ func (p *Provider) mint(ctx context.Context) (*mintSuccessResponse, bool, error)
 	} else {
 		mErr.Message = strings.TrimSpace(string(body))
 	}
-	mErr.Message = redactAPIKeys(mErr.Message)
+	secrets := requestSecrets(req, p.cfg.APIKey)
+	mErr.Code = scrubSecrets(redactAPIKeys(mErr.Code), secrets)
+	mErr.RequestID = scrubSecrets(redactAPIKeys(mErr.RequestID), secrets)
+	mErr.Message = scrubSecrets(redactAPIKeys(mErr.Message), secrets)
 
 	// Decided from the RAW code/message pair, before the friendly-text
 	// substitution below can overwrite mErr.Message — see

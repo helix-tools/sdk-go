@@ -15,6 +15,10 @@
   retried like a rate-limited or server-error response. Rejected
   credentials (HTTP 401 and the listed 403 cases) are still never retried,
   and error messages still never include your API key.
+- If the credential service ever repeats your request's credentials back in
+  an error (your API key, the request's signature or session token), the SDK
+  now replaces them with `<redacted>` before returning the error, so they
+  never reach your error messages or logs.
 
 ## 2026-10-01 (v2.20.1)
 
