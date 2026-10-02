@@ -295,7 +295,7 @@ func validateCredentials(ctx context.Context, stsClient *sts.Client, apiKeyConfi
 			}
 		}
 		if apiKeyConfigured {
-			return sdkerr.Wrap(sdkerr.APIKeyCredentialFailure, err)
+			return sdkerr.Wrap(sdkerr.KeyCallerServiceFailure, err)
 		}
 		return sdkerr.Wrap("invalid AWS credentials", err)
 	}

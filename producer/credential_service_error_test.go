@@ -123,9 +123,9 @@ func TestNewProducer_STSStaticKeys(t *testing.T) {
 	}
 }
 
-// wantAPIKeyCredentialFailure is what an API-key caller sees when getting
+// wantKeyCallerServiceFailure is what an API-key caller sees when getting
 // working credentials failed for a reason with no more specific message.
-const wantAPIKeyCredentialFailure = "Helix credential service error: could not get working credentials for this API key"
+const wantKeyCallerServiceFailure = "Helix credential service error: could not get working credentials for this API key"
 
 // credentialServiceTruncating answers every mint request with status and a
 // body cut short: it promises 4096 bytes, writes only body, then hangs up, so
@@ -210,8 +210,8 @@ func TestNewProducer_APIKeyOtherCredentialFailureNamesService(t *testing.T) {
 
 			_, err := NewProducer(types.Config{APIEndpoint: service.URL, APIKey: testAPIKeyForErrors, CustomerID: "cust-1"})
 
-			if err == nil || err.Error() != wantAPIKeyCredentialFailure {
-				t.Fatalf("NewProducer error = %v, want exactly %q", err, wantAPIKeyCredentialFailure)
+			if err == nil || err.Error() != wantKeyCallerServiceFailure {
+				t.Fatalf("NewProducer error = %v, want exactly %q", err, wantKeyCallerServiceFailure)
 			}
 			if errors.Is(err, sdkerr.ErrCredentialServiceUnreachable) {
 				t.Error("the service answered, so it is not unreachable")

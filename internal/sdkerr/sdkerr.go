@@ -38,12 +38,12 @@ func CredentialServiceMessage(statusCode int, code, message string) string {
 	return msg + ": " + message
 }
 
-// APIKeyCredentialFailure is the customer-facing text when an API-key caller
+// KeyCallerServiceFailure is the customer-facing text when an API-key caller
 // could not get working credentials for any other reason (e.g. the service
 // answered with something unusable, or the credentials it issued were
 // rejected): it names the credential service, never AWS keys the caller
 // never configured. Callers attach the real failure with Wrap.
-const APIKeyCredentialFailure = "Helix credential service error: could not get working credentials for this API key"
+const KeyCallerServiceFailure = "Helix credential service error: could not get working credentials for this API key"
 
 // Wrap returns an error whose Error() is exactly msg — cause's text is never
 // interpolated into it — and whose Unwrap() returns cause, so errors.Is and
