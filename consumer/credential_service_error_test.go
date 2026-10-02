@@ -184,3 +184,160 @@ func TestNewConsumer_STSStaticKeysRejectedKeepsMessage(t *testing.T) {
 		})
 	}
 }
+
+// wantAPIKeyCredentialFailure is what an API-key caller sees when getting
+// working credentials failed for a reason with no more specific message.
+const wantAPIKeyCredentialFailure = "Helix credential service error: could not get working credentials for this API key"
+
+// credentialServiceTruncating answers every mint request with status and a
+// body cut short: it promises 4096 bytes, writes only body, then hangs up, so
+// the client fails while reading the body.
+func credentialServiceTruncating(t *testing.T, status int, body string) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", "4096")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &calls
+}
+
+// TestNewConsumer_APIKeyTruncatedServiceErrorNamesService: an API-key caller
+// whose credential service answers 500/502 with a body that breaks off
+// mid-read sees the service's status, never "invalid AWS credentials" — and a
+// key the cut-off body echoes never reaches the message.
+func TestNewConsumer_APIKeyTruncatedServiceErrorNamesService(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{"500", http.StatusInternalServerError, `{"error":{"code":"internal_error"`, "Helix credential service error: HTTP 500"},
+		{"502 echoing the key", http.StatusBadGateway, `{"error":{"message":"HLX-API-Key ` + testAPIKeyForErrors, "Helix credential service error: HTTP 502"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			identity, identityCalls := countingIdentityServer(t, http.StatusOK)
+			isolateConsumerAWSEnv(t, identity.URL)
+			service, calls := credentialServiceTruncating(t, tc.status, tc.body)
+
+			_, err := NewConsumer(types.Config{APIEndpoint: service.URL, APIKey: testAPIKeyForErrors, CustomerID: "cons-1"})
+
+			assertServiceError(t, err, tc.want)
+			if err != nil && strings.Contains(err.Error(), "credentialErrorTestKey") {
+				t.Errorf("Error() = %q leaks the API key", err.Error())
+			}
+			if got := calls.Load(); got != 3 {
+				t.Errorf("credential service called %d time(s), want 3 (a %d is retried)", got, tc.status)
+			}
+			if got := identityCalls.Load(); got != 0 {
+				t.Errorf("identity service called %d time(s), want 0", got)
+			}
+		})
+	}
+}
+
+// TestNewConsumer_APIKeyOtherCredentialFailureNamesService: an API-key caller
+// whose credentials fail for a reason with no specific message — the service
+// answered with a redirect (refused), or with a 2xx that is not valid — sees
+// a credential service error, never "invalid AWS credentials".
+func TestNewConsumer_APIKeyOtherCredentialFailureNamesService(t *testing.T) {
+	cases := []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{"refused redirect", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "http://127.0.0.1:1/elsewhere", http.StatusFound)
+		}},
+		{"malformed 2xx", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`not json`))
+		}},
+		{"2xx missing fields", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			identity, identityCalls := countingIdentityServer(t, http.StatusOK)
+			isolateConsumerAWSEnv(t, identity.URL)
+			service := httptest.NewServer(tc.handler)
+			t.Cleanup(service.Close)
+
+			_, err := NewConsumer(types.Config{APIEndpoint: service.URL, APIKey: testAPIKeyForErrors, CustomerID: "cons-1"})
+
+			if err == nil || err.Error() != wantAPIKeyCredentialFailure {
+				t.Fatalf("NewConsumer error = %v, want exactly %q", err, wantAPIKeyCredentialFailure)
+			}
+			if errors.Is(err, sdkerr.ErrCredentialServiceUnreachable) {
+				t.Error("the service answered, so it is not unreachable")
+			}
+			if errors.Unwrap(err) == nil {
+				t.Error("errors.Unwrap(err) = nil; the underlying failure must stay reachable for debugging")
+			}
+			if got := identityCalls.Load(); got != 0 {
+				t.Errorf("identity service called %d time(s), want 0", got)
+			}
+		})
+	}
+}
+
+// TestNewConsumer_STSStaticKeysTruncatedServiceError: for a static-key
+// STS-mode caller a truncated 500 is a credential service error, exactly like
+// an intact 500; a truncated 401/403 is still the service rejecting their AWS
+// keys, so it keeps "invalid AWS credentials".
+func TestNewConsumer_STSStaticKeysTruncatedServiceError(t *testing.T) {
+	cases := []struct {
+		status int
+		want   string
+	}{
+		{http.StatusInternalServerError, "Helix credential service error: HTTP 500"},
+		{http.StatusUnauthorized, "invalid AWS credentials"},
+		{http.StatusForbidden, "invalid AWS credentials"},
+	}
+	for _, tc := range cases {
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			identity, _ := countingIdentityServer(t, http.StatusOK)
+			isolateConsumerAWSEnv(t, identity.URL)
+			service, _ := credentialServiceTruncating(t, tc.status, `{"error":{"code":"unauth`)
+
+			_, err := NewConsumer(types.Config{
+				APIEndpoint:        service.URL,
+				AWSAccessKeyID:     "AKIDTESTCONSUMER",
+				AWSSecretAccessKey: "fake-secret",
+				CredentialMode:     types.CredentialModeSTS,
+				CustomerID:         "cons-1",
+			})
+
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("NewConsumer error = %v, want exactly %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestNewConsumer_STSStaticKeysMalformed2xxKeepsMessage: the generic
+// fall-through is unchanged for a static-key caller.
+func TestNewConsumer_STSStaticKeysMalformed2xxKeepsMessage(t *testing.T) {
+	identity, _ := countingIdentityServer(t, http.StatusOK)
+	isolateConsumerAWSEnv(t, identity.URL)
+	service, _ := credentialServiceAnswering(t, http.StatusOK, `not json`)
+
+	_, err := NewConsumer(types.Config{
+		APIEndpoint:        service.URL,
+		AWSAccessKeyID:     "AKIDTESTCONSUMER",
+		AWSSecretAccessKey: "fake-secret",
+		CredentialMode:     types.CredentialModeSTS,
+		CustomerID:         "cons-1",
+	})
+
+	if err == nil || err.Error() != "invalid AWS credentials" {
+		t.Fatalf("NewConsumer error = %v, want exactly %q", err, "invalid AWS credentials")
+	}
+}

@@ -287,3 +287,14 @@ func TestUploadToPresignedURL_RequestBuildFailureCauseNeverLeaksIntoMessage(t *t
 	assertClean(t, err, "failed to create upload request")
 	assertCauseReachable(t, err, arnAccountService)
 }
+
+// TestValidateCredentials_APIKeyCallerNeverToldAWSKeys: when the identity
+// service rejects an API-key caller's minted credentials, the message names
+// the credential service, not AWS keys they never configured, and the
+// upstream ARN stays out of it but reachable.
+func TestValidateCredentials_APIKeyCallerNeverToldAWSKeys(t *testing.T) {
+	err := validateCredentials(context.Background(), fakeSTSAccessDenied(t), true)
+
+	assertClean(t, err, "Helix credential service error: could not get working credentials for this API key")
+	assertCauseReachable(t, err, arnAccountService)
+}

@@ -275,7 +275,9 @@ func loadAWSConfig(ctx context.Context, region string, credProvider aws.Credenti
 // message) is reported as a credential service error carrying the service's
 // scrubbed code and message. The one exception is a 401/403 to a static-key
 // caller (apiKeyConfigured false): the service rejected their AWS keys, so
-// "invalid AWS credentials" is the right advice for them.
+// "invalid AWS credentials" is the right advice for them. Any other failure
+// for an API-key caller (e.g. an unusable answer from the service, or its
+// credentials being rejected) still names the credential service.
 func validateCredentials(ctx context.Context, stsClient *sts.Client, apiKeyConfigured bool) error {
 	if _, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); err != nil {
 		if errors.Is(err, sdkerr.ErrCredentialServiceUnreachable) {
@@ -291,6 +293,9 @@ func validateCredentials(ctx context.Context, stsClient *sts.Client, apiKeyConfi
 			if !rejectedAWSKeys {
 				return sdkerr.Wrap(sdkerr.CredentialServiceMessage(mintErr.StatusCode, mintErr.Code, mintErr.Message), err)
 			}
+		}
+		if apiKeyConfigured {
+			return sdkerr.Wrap(sdkerr.APIKeyCredentialFailure, err)
 		}
 		return sdkerr.Wrap("invalid AWS credentials", err)
 	}

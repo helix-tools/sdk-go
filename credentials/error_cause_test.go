@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/helix-tools/sdk-go/v2/internal/sdkerr"
 )
@@ -138,4 +139,59 @@ func mustRequest(t *testing.T) *http.Request {
 		t.Fatal(err)
 	}
 	return req
+}
+
+// failingStatusTransport answers with status and a body that fails mid-read,
+// counting the calls.
+type failingStatusTransport struct {
+	status int
+	calls  *int
+}
+
+func (f failingStatusTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	*f.calls++
+	return &http.Response{
+		StatusCode: f.status,
+		Status:     http.StatusText(f.status),
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       &failingReadCloser{failMsg: "connection reset touching " + arnAccountService},
+		Request:    req,
+	}, nil
+}
+
+// TestMint_NonSuccessBodyReadFailureIsMintError: when an error status
+// arrives but its body breaks off, the failure is still the service's answer
+// — a *MintError carrying only the status (no body text, so nothing upstream
+// leaks), retried like any other 5xx, and never latched.
+func TestMint_NonSuccessBodyReadFailureIsMintError(t *testing.T) {
+	var calls int
+	cfg := testAPIKeyBrokerConfig("https://broker.test")
+	cfg.HTTPClient = &http.Client{Transport: failingStatusTransport{status: http.StatusInternalServerError, calls: &calls}}
+	p, err := NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	p.sleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
+
+	_, err = p.Retrieve(context.Background())
+
+	var mErr *MintError
+	if !errors.As(err, &mErr) {
+		t.Fatalf("err = %v, want a *MintError", err)
+	}
+	if mErr.StatusCode != http.StatusInternalServerError || mErr.Code != "" || mErr.Message != "" || mErr.Friendly {
+		t.Errorf("MintError = %+v, want status 500 only", *mErr)
+	}
+	if strings.Contains(err.Error(), arnAccountService) {
+		t.Errorf("Error() = %q, leaks the upstream read error", err.Error())
+	}
+	if errors.Is(err, sdkerr.ErrCredentialServiceUnreachable) {
+		t.Error("a response arrived, so the service is not unreachable")
+	}
+	if isLatchableMintError(err) {
+		t.Error("a truncated error response must not be latched")
+	}
+	if calls != mintMaxAttempts {
+		t.Errorf("mint called %d time(s), want %d (a 500 is retried)", calls, mintMaxAttempts)
+	}
 }
