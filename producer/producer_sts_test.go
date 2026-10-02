@@ -20,8 +20,8 @@ import (
 // newTestProducerWithCredentials mirrors newTestProducer
 // (update_dataset_parity_test.go) but accepts an explicit
 // aws.CredentialsProvider so tests can inject either a static (no token) or
-// sts-shaped (with SessionToken) fixture, bypassing NewProducer's AWS STS +
-// SSM calls exactly like the existing helper does.
+// sts-shaped (with SessionToken) fixture, bypassing NewProducer's STS and
+// producer-config calls exactly like the existing helper does.
 func newTestProducerWithCredentials(endpoint string, provider aws.CredentialsProvider) *Producer {
 	return &Producer{
 		APIEndpoint: endpoint,

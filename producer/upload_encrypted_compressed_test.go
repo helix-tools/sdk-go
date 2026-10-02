@@ -463,33 +463,27 @@ func TestEncryptData_WithoutKMSClientIsAnError(t *testing.T) {
 	}
 }
 
-// TestResolveKMSKeyID: a producer whose KMS key cannot be resolved is built
-// without one (it can still do non-upload work) but says plainly that uploads
-// will fail — the old message claimed encryption "will be disabled", which is
-// exactly what can no longer happen.
-func TestResolveKMSKeyID(t *testing.T) {
-	t.Setenv("HELIX_SSM_CUSTOMER_PREFIX", "")
-	t.Setenv("HELIX_ENVIRONMENT", "")
-	t.Setenv("ENVIRONMENT", "")
-
+// TestResolveEncryptionKeyID: a producer whose encryption key cannot be
+// resolved is built without one (it can still do non-upload work) but says
+// plainly that uploads will fail — the old message claimed encryption "will be
+// disabled", which is exactly what can no longer happen.
+func TestResolveEncryptionKeyID(t *testing.T) {
 	t.Run("found", func(t *testing.T) {
-		names := ssmParamCandidates("cust-1", "kms_key_id")
-		f := newFakeSSM(t, map[string]string{names[0]: "found:key-123"})
+		api := newProducerConfigAPI(t, http.StatusOK, `{"encryption_key_id":"key-123"}`)
 
-		got, err := resolveKMSKeyID(context.Background(), f.client(), "cust-1")
+		got, err := newTestProducer(api.server.URL).resolveEncryptionKeyID(context.Background())
 		if err != nil || got != "key-123" {
-			t.Fatalf("resolveKMSKeyID = %q, %v; want key-123, nil", got, err)
+			t.Fatalf("resolveEncryptionKeyID = %q, %v; want key-123, nil", got, err)
 		}
 	})
 
-	for name, script := range map[string]string{"not found": "notfound", "access denied": "denied"} {
+	for name, status := range map[string]int{"not found": http.StatusNotFound, "access denied": http.StatusForbidden} {
 		t.Run(name, func(t *testing.T) {
-			names := ssmParamCandidates("cust-1", "kms_key_id")
-			f := newFakeSSM(t, map[string]string{names[0]: script})
+			api := newProducerConfigAPI(t, status, `{"error":"x"}`)
 
-			got, err := resolveKMSKeyID(context.Background(), f.client(), "cust-1")
+			got, err := newTestProducer(api.server.URL).resolveEncryptionKeyID(context.Background())
 			if got != "" || err == nil {
-				t.Fatalf("resolveKMSKeyID = %q, %v; want an empty key and an error", got, err)
+				t.Fatalf("resolveEncryptionKeyID = %q, %v; want an empty key and an error", got, err)
 			}
 			if !strings.Contains(err.Error(), "uploads will fail") {
 				t.Errorf("error %q must say uploads will fail", err)
@@ -497,8 +491,8 @@ func TestResolveKMSKeyID(t *testing.T) {
 			if strings.Contains(err.Error(), "disabled") {
 				t.Errorf("error %q must not claim encryption is disabled", err)
 			}
-			if strings.Contains(err.Error(), "/helix-tools/") {
-				t.Errorf("error %q prints an internal parameter path", err)
+			if strings.Contains(err.Error(), producerConfigPath) {
+				t.Errorf("error %q prints the request path", err)
 			}
 		})
 	}

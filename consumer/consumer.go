@@ -37,7 +37,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
-	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go/middleware"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
@@ -55,7 +54,7 @@ const emptyPayloadHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca49599
 // best-effort default for those dev-build cases; the wire-sent
 // sdk_version value for a normally-built consumer binary instead
 // reflects the actual resolved module version, which cannot drift.
-const SDKVersion = "2.18.2"
+const SDKVersion = "2.19.0"
 
 // SDKLanguage identifies this SDK's language in download outcome callbacks
 // (matches the dataset_download_event JSON Schema's sdk_language field).
@@ -149,7 +148,6 @@ type Consumer struct {
 	kmsClient  *kms.Client
 	queueURL   *string // Cache for per-consumer queue URL.
 	sqsClient  *sqs.Client
-	ssmClient  *ssm.Client
 }
 
 // DownloadURLInfo contains information about a dataset download URL.
@@ -286,8 +284,6 @@ type PollNotificationsOptions struct {
 
 	// Long polling wait time (1-20 seconds). 0 means "not set" and selects
 	// the default of 20; use ShortPoll to ask for an immediate return.
-	//
-	// TODO: Get pattern from AWS SSM.
 	WaitTimeSeconds int32
 
 	// ShortPoll returns immediately with whatever is queued instead of
@@ -310,7 +306,6 @@ func NewConsumer(cfg types.Config) (*Consumer, error) {
 	// Basic validation.
 	//
 	if cfg.APIEndpoint == "" {
-		// TODO: Get this from AWS SSM.
 		envEndpoint := strings.TrimSpace(os.Getenv("HELIX_API_ENDPOINT"))
 		if envEndpoint != "" {
 			cfg.APIEndpoint = envEndpoint
@@ -320,7 +315,6 @@ func NewConsumer(cfg types.Config) (*Consumer, error) {
 	}
 
 	if cfg.Region == "" {
-		// TODO: Get this from AWS SSM.
 		cfg.Region = "us-east-1"
 	}
 
@@ -358,7 +352,6 @@ func NewConsumer(cfg types.Config) (*Consumer, error) {
 		httpClient: &http.Client{Timeout: defaultHTTPClientTimeout},
 		kmsClient:  kms.NewFromConfig(awsCfg),
 		sqsClient:  sqs.NewFromConfig(awsCfg),
-		ssmClient:  ssm.NewFromConfig(awsCfg),
 	}, nil
 }
 
