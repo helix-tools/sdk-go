@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -249,5 +250,208 @@ func TestRequestSecrets_IncludesSessionToken(t *testing.T) {
 	}
 	if got := scrubSecrets("nothing secret here", requestSecrets(httptest.NewRequest(http.MethodPost, "/", nil), "")); got != "nothing secret here" {
 		t.Errorf("scrubSecrets with no secrets = %q, want the input unchanged", got)
+	}
+}
+
+// A 200 whose fields are otherwise valid but whose expiration echoes the
+// request's Authorization value: the parse error, and every error it wraps,
+// must not carry the header (the API key, or a replayable SigV4 signature).
+func TestMint_200EchoedExpiration_NeverLeaks(t *testing.T) {
+	cases := []struct {
+		name   string
+		cfg    func(endpoint string) BrokerConfig
+		apiKey string
+	}{
+		{"sigv4", testBrokerConfig, ""},
+		{"api key", testAPIKeyBrokerConfig, testAPIKey},
+		{"short api key", func(endpoint string) BrokerConfig {
+			cfg := testAPIKeyBrokerConfig(endpoint)
+			cfg.APIKey = shortTestAPIKey
+			return cfg
+		}, shortTestAPIKey},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var auth string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				auth = r.Header.Get("Authorization")
+				mu.Unlock()
+				body, _ := json.Marshal(mintSuccessResponse{
+					AccessKeyID: "ASIATEMP", SecretAccessKey: "tempSecret", SessionToken: "tempToken",
+					Expiration: r.Header.Get("Authorization"), TTLSeconds: 900, Region: testRegion,
+				})
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(body)
+			}))
+			t.Cleanup(server.Close)
+
+			p, err := NewProvider(tc.cfg(server.URL))
+			if err != nil {
+				t.Fatalf("NewProvider: %v", err)
+			}
+			var retrieveErr error
+			output := captureOutput(t, func() {
+				_, retrieveErr = p.Retrieve(context.Background())
+			})
+
+			mu.Lock()
+			secrets := []string{auth}
+			mu.Unlock()
+			if i := strings.LastIndex(auth, "Signature="); i >= 0 {
+				secrets = append(secrets, auth[i+len("Signature="):])
+			}
+			if tc.apiKey != "" {
+				secrets = append(secrets, tc.apiKey)
+			}
+			assertNoSecrets(t, retrieveErr, output, secrets)
+			if !strings.Contains(retrieveErr.Error(), "unparseable expiration") || !strings.Contains(retrieveErr.Error(), "<redacted>") {
+				t.Errorf("Error() = %q, want the unparseable-expiration error with the echo replaced by <redacted>", retrieveErr.Error())
+			}
+		})
+	}
+}
+
+// Classification reads the RAW response: an API key that happens to equal
+// the 403's error.code must not stop the rejection from latching.
+func TestMint_SecretEqualToLatchCode_StillLatches(t *testing.T) {
+	var calls int
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		writeMintError(w, http.StatusForbidden, "api_key_revoked", "forbidden")
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := testAPIKeyBrokerConfig(server.URL)
+	cfg.APIKey = "api_key_revoked"
+	p, err := NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	_, err1 := p.Retrieve(context.Background())
+	_, err2 := p.Retrieve(context.Background())
+	if !isLatchableMintError(err1) {
+		t.Errorf("first error latchable = false, want true: %v", err1)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Errorf("mint calls = %d, want 1 (second Retrieve must return the latched rejection)", calls)
+	}
+	if err2 == nil || err2.Error() != err1.Error() {
+		t.Errorf("second error = %v, want the latched %v", err2, err1)
+	}
+	var me *MintError
+	if !errors.As(err1, &me) || strings.Contains(me.Code, cfg.APIKey) {
+		t.Errorf("surfaced MintError.Code = %q, want the echoed key scrubbed", me.Code)
+	}
+}
+
+// Classification reads the RAW response: an API key that happens to appear in
+// a 429's "retry after N seconds" must not change the parsed wait.
+func TestMint_SecretInsideRetryAfterMessage_WaitUnchanged(t *testing.T) {
+	var calls int
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		if n == 1 {
+			writeMintError(w, http.StatusTooManyRequests, "rate_limited", "retry after 5 seconds")
+			return
+		}
+		body, _ := json.Marshal(mintSuccessResponse{
+			AccessKeyID: "ASIATEMP", SecretAccessKey: "tempSecret", SessionToken: "tempToken",
+			Expiration: time.Now().Add(time.Hour).UTC().Format(time.RFC3339), TTLSeconds: 900, Region: testRegion,
+		})
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := testAPIKeyBrokerConfig(server.URL)
+	cfg.APIKey = "5"
+	p, err := NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	var waits []time.Duration
+	p.sleep = func(_ context.Context, d time.Duration) error {
+		waits = append(waits, d)
+		return nil
+	}
+	if _, err := p.Retrieve(context.Background()); err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+	if len(waits) != 1 || waits[0] != 5*time.Second {
+		t.Errorf("waits = %v, want exactly [5s]", waits)
+	}
+}
+
+// writeMintError answers with status and an error envelope carrying code and
+// message, the shape helix-tools/api returns.
+func writeMintError(w http.ResponseWriter, status int, code, message string) {
+	var envelope mintErrorResponse
+	envelope.Error.Code = code
+	envelope.Error.Message = message
+	envelope.Error.RequestID = "req-test-1"
+	body, _ := json.Marshal(envelope)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
+}
+
+// scrubError keeps an error (and its cause chain) untouched when it carries
+// no secret, and drops the cause when it does — the cause would still hold
+// the raw value.
+func TestScrubError(t *testing.T) {
+	_, cause := time.Parse(time.RFC3339, "not-a-time")
+	clean := fmt.Errorf("credentials: broker returned unparseable expiration %q: %w", "not-a-time", cause)
+	if got := scrubError(clean, []string{"s3cret"}); got != clean {
+		t.Errorf("scrubError(no secret) = %v, want the same error", got)
+	}
+	var pe *time.ParseError
+	if !errors.As(scrubError(clean, []string{"s3cret"}), &pe) {
+		t.Error("scrubError(no secret) lost the *time.ParseError cause")
+	}
+
+	_, cause = time.Parse(time.RFC3339, "x s3cret y")
+	leaky := fmt.Errorf("credentials: broker returned unparseable expiration %q: %w", "x s3cret y", cause)
+	got := scrubError(leaky, []string{"s3cret"})
+	for i, e := range errorChain(got) {
+		if strings.Contains(e.Error(), "s3cret") {
+			t.Errorf("chain[%d] (%T) leaks: %q", i, e, e.Error())
+		}
+	}
+	if !strings.Contains(got.Error(), "unparseable expiration") || !strings.Contains(got.Error(), "<redacted>") {
+		t.Errorf("scrubError(secret) = %q, want the message with <redacted>", got.Error())
+	}
+	if !strings.Contains(scrubError(errors.New("key "+testAPIKey), nil).Error(), "hlx_<redacted>") {
+		t.Error("scrubError did not apply the hlx_ pattern redaction")
+	}
+}
+
+// A 200 whose JSON cannot be decoded, with an API key that the decoder's
+// error text happens to contain (it quotes a non-integer number literal),
+// never surfaces the key.
+func TestMint_200MalformedJSONEchoingKey_NeverLeaks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"access_key_id":"a","secret_access_key":"b","session_token":"c","expiration":"2026-10-02T00:00:00Z","ttl_seconds":555777.5,"region":"us-east-1"}`))
+	}))
+	t.Cleanup(server.Close)
+	cfg := testAPIKeyBrokerConfig(server.URL)
+	cfg.APIKey = "555777.5"
+	p, err := NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	_, err = p.Retrieve(context.Background())
+	assertNoSecrets(t, err, "", []string{"555777.5"})
+	if err != nil && !strings.Contains(err.Error(), "malformed mint response JSON") {
+		t.Errorf("Error() = %q, want the malformed-JSON error", err.Error())
 	}
 }

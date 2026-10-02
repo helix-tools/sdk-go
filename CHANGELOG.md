@@ -18,7 +18,9 @@
 - If the credential service ever repeats your request's credentials back in
   an error (your API key, the request's signature or session token), the SDK
   now replaces them with `<redacted>` before returning the error, so they
-  never reach your error messages or logs.
+  never reach your error messages or logs. This also covers a successful
+  response the SDK cannot read, and it never changes whether a request is
+  retried, how long the SDK waits, or whether a rejected key stays rejected.
 
 ## 2026-10-01 (v2.20.1)
 

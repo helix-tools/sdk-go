@@ -268,6 +268,17 @@ func scrubSecrets(s string, secrets []string) string {
 	return s
 }
 
+// scrubError returns err unchanged when its text carries no secret;
+// otherwise a plain error with the scrubbed text and NO wrapped cause, since
+// a cause (e.g. *time.ParseError's Value) would still hold the raw secret.
+func scrubError(err error, secrets []string) error {
+	text := err.Error()
+	if scrubbed := scrubSecrets(redactAPIKeys(text), secrets); scrubbed != text {
+		return errors.New(scrubbed)
+	}
+	return err
+}
+
 // IsSubscriptionExpired reports whether err is a *MintError carrying the
 // subscription_expired code, enforced at mint time.
 func IsSubscriptionExpired(err error) bool { return hasCode(err, ErrCodeSubscriptionExpired) }
@@ -352,6 +363,11 @@ type mintSuccessResponse struct {
 	Expiration      string `json:"expiration"` // RFC3339
 	TTLSeconds      int64  `json:"ttl_seconds"`
 	Region          string `json:"region"`
+
+	// serverExpiry is Expiration parsed, set by mint() — which validates it
+	// there because only mint() knows the request's secrets to scrub from
+	// the error if the value is unparseable.
+	serverExpiry time.Time
 }
 
 // missingFields returns the names of any required-by-contract fields left
@@ -678,17 +694,11 @@ func (p *Provider) Retrieve(ctx context.Context) (aws.Credentials, error) {
 		return aws.Credentials{}, err
 	}
 
-	serverExpiry, perr := time.Parse(time.RFC3339, resp.Expiration)
-	if perr != nil {
-		return aws.Credentials{}, fmt.Errorf("credentials: broker returned unparseable expiration %q: %w", resp.Expiration, perr)
-	}
-	if resp.TTLSeconds <= 0 {
-		return aws.Credentials{}, fmt.Errorf("credentials: broker returned non-positive ttl_seconds %d", resp.TTLSeconds)
-	}
-
+	// mint() has already validated Expiration (parsed into serverExpiry) and
+	// TTLSeconds.
 	expires := p.now().Add(time.Duration(resp.TTLSeconds) * time.Second)
-	if serverExpiry.Before(expires) {
-		expires = serverExpiry
+	if resp.serverExpiry.Before(expires) {
+		expires = resp.serverExpiry
 	}
 
 	// Record the TRUE (unadjusted) hard expiry of this mint, independent of
@@ -924,14 +934,26 @@ func (p *Provider) mint(ctx context.Context) (*mintSuccessResponse, bool, error)
 		return nil, true, sdkerr.Wrap("credentials: failed to read mint response", err)
 	}
 
+	// Everything below decides on the RAW response; only what is surfaced —
+	// the returned error, its causes, MintError's fields — is scrubbed.
+	secrets := requestSecrets(req, p.cfg.APIKey)
+
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		var success mintSuccessResponse
 		if jerr := json.Unmarshal(body, &success); jerr != nil {
-			return nil, false, fmt.Errorf("credentials: malformed mint response JSON: %w", jerr)
+			return nil, false, scrubError(fmt.Errorf("credentials: malformed mint response JSON: %w", jerr), secrets)
 		}
 		if missing := success.missingFields(); len(missing) > 0 {
 			return nil, false, fmt.Errorf("credentials: mint response missing required field(s): %s", strings.Join(missing, ", "))
 		}
+		serverExpiry, perr := time.Parse(time.RFC3339, success.Expiration)
+		if perr != nil {
+			return nil, false, scrubError(fmt.Errorf("credentials: broker returned unparseable expiration %q: %w", success.Expiration, perr), secrets)
+		}
+		if success.TTLSeconds <= 0 {
+			return nil, false, fmt.Errorf("credentials: broker returned non-positive ttl_seconds %d", success.TTLSeconds)
+		}
+		success.serverExpiry = serverExpiry
 		return &success, false, nil
 	}
 
@@ -947,13 +969,8 @@ func (p *Provider) mint(ctx context.Context) (*mintSuccessResponse, bool, error)
 	} else {
 		mErr.Message = strings.TrimSpace(string(body))
 	}
-	secrets := requestSecrets(req, p.cfg.APIKey)
-	mErr.Code = scrubSecrets(redactAPIKeys(mErr.Code), secrets)
-	mErr.RequestID = scrubSecrets(redactAPIKeys(mErr.RequestID), secrets)
-	mErr.Message = scrubSecrets(redactAPIKeys(mErr.Message), secrets)
-
 	// Decided from the RAW code/message pair, before the friendly-text
-	// substitution below can overwrite mErr.Message — see
+	// substitution and the scrubbing below can change them — see
 	// isLatchableMintError's doc comment.
 	mErr.latchable = isLatchableMintCode(mErr.StatusCode, mErr.Code, mErr.Message)
 	if resp.StatusCode == http.StatusTooManyRequests {
@@ -964,7 +981,11 @@ func (p *Provider) mint(ctx context.Context) (*mintSuccessResponse, bool, error)
 	if friendly := friendlyMintErrorMessage(resp.StatusCode, mErr.Code, mErr.Message, usedAPIKey); friendly != "" {
 		mErr.Message = friendly
 		mErr.Friendly = true
+	} else {
+		mErr.Message = scrubSecrets(redactAPIKeys(mErr.Message), secrets)
 	}
+	mErr.Code = scrubSecrets(redactAPIKeys(mErr.Code), secrets)
+	mErr.RequestID = scrubSecrets(redactAPIKeys(mErr.RequestID), secrets)
 
 	retryable := resp.StatusCode == http.StatusRequestTimeout ||
 		resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
