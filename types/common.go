@@ -163,7 +163,9 @@ type DatasetUpdateInput struct {
 	VersionNotes  *string        `json:"version_notes,omitempty"`
 	Tags          []string       `json:"tags,omitempty"`
 	Schema        map[string]any `json:"schema,omitempty"`
-	Metadata      map[string]any `json:"metadata,omitempty"`
+	// Deprecated: the update endpoint does not store metadata. UpdateDataset
+	// returns an error when this is set. The field stays so existing code compiles.
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 // Dataset represents a dataset in the catalog.
@@ -224,7 +226,7 @@ type Dataset struct {
 	OriginalSize   int64    `json:"original_size,omitempty"`
 	CompressedSize int64    `json:"compressed_size,omitempty"`
 	AccessCount    int64    `json:"access_count,omitempty"`
-	// Marketplace pricing (schema PR #18). Optional and server-managed: nil
+	// Marketplace pricing. Optional and server-managed: nil
 	// while the marketplace_payments feature flag is off — tolerate absence.
 	Marketplace *DatasetMarketplace `json:"marketplace,omitempty"`
 	// IsPublic is Deprecated: superseded by Visibility; still sent by the API.

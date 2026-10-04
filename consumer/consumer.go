@@ -206,6 +206,19 @@ func (e *APIError) IsConflict() bool { return e.StatusCode == http.StatusConflic
 // IsRateLimited reports a 429: back off and retry.
 func (e *APIError) IsRateLimited() bool { return e.StatusCode == http.StatusTooManyRequests }
 
+// ValidationError is returned for a request that fails a client-side check
+// before anything is sent to the API. errors.As tells it apart from the
+// *APIError the server returns.
+type ValidationError struct {
+	Field   string
+	Message string
+}
+
+// Error implements the error interface.
+func (e *ValidationError) Error() string {
+	return fmt.Sprintf("validation error: %s: %s", e.Field, e.Message)
+}
+
 // Dataset is one row of Consumer.ListDatasets. ID, Name and the two Metadata
 // flags are the fields this package has always exposed, unchanged in name, type
 // and meaning; Record carries the full catalog record — the same *types.Dataset
@@ -222,8 +235,7 @@ type Dataset struct {
 	// Metadata holds the two flags download handling reads, resolved exactly as
 	// DownloadDataset resolves them (resolveEncryptCompress): an explicit
 	// metadata.encryption_enabled wins, otherwise the record's top-level
-	// Encryption flag applies — the create endpoint promotes the flag to it and
-	// drops it from metadata.
+	// Encryption flag applies. The create endpoint writes both places.
 	Metadata struct {
 		CompressionEnabled bool `json:"compression_enabled"`
 		EncryptionEnabled  bool `json:"encryption_enabled"`
@@ -912,11 +924,19 @@ func (c *Consumer) ListSubscriptions(ctx context.Context, opts *ListSubscription
 // Parameters:
 //   - input.ProducerID: Required. The ID of the producer to request access from.
 //   - input.DatasetID: Optional. Specific dataset ID (nil for all-datasets access).
-//   - input.Tier: Optional. Subscription tier (defaults to "free").
+//   - input.Tier: Optional. Subscription tier (defaults to "free"). "free" is the
+//     only tier accepted, in any letter case and with surrounding spaces ignored;
+//     any other value returns a *ValidationError before any request is sent.
 //   - input.Message: Optional. Message to the producer explaining the request.
 //
 // Returns the created subscription request with status "pending".
 func (c *Consumer) CreateSubscriptionRequest(ctx context.Context, input types.CreateSubscriptionRequestInput) (*types.SubscriptionRequest, error) {
+	// Mirror the API's own tier rule (trimmed, case-insensitive), so a value the
+	// API accepts today is still accepted here.
+	if tier := strings.ToLower(strings.TrimSpace(input.Tier)); tier != "" && tier != "free" {
+		return nil, &ValidationError{Field: "tier", Message: fmt.Sprintf("%q is not supported: the only tier is \"free\"", input.Tier)}
+	}
+
 	// Build request payload
 	payload := types.CreateSubscriptionRequestPayload{
 		ProducerID: input.ProducerID,
@@ -1167,8 +1187,8 @@ func (c *Consumer) PollNotifications(ctx context.Context, opts PollNotifications
 	var notifications []Notification
 
 	for _, message := range receiveOutput.Messages {
-		// Parse message body - handle both SNS-wrapped and raw message formats.
-		// SNS-wrapped messages have a "Message" field containing the stringified notification.
+		// Parse message body - handle both wrapped and raw message formats.
+		// Wrapped messages have a "Message" field containing the stringified notification.
 		// Raw messages contain the notification fields directly (event_type, producer_id, etc.).
 
 		messageBody := aws.ToString(message.Body)
@@ -1195,14 +1215,14 @@ func (c *Consumer) PollNotifications(ctx context.Context, opts PollNotifications
 		}
 
 		// Determine message format and parse notification data.
-		if snsMessage, hasSNSWrapper := parsedBody["Message"].(string); hasSNSWrapper {
-			// SNS-wrapped format: { "Type": "Notification", "Message": "{...}", ... }
-			if err := json.Unmarshal([]byte(snsMessage), &notificationData); err != nil {
+		if wrappedMessage, hasWrapper := parsedBody["Message"].(string); hasWrapper {
+			// Wrapped format: { "Type": "Notification", "Message": "{...}", ... }
+			if err := json.Unmarshal([]byte(wrappedMessage), &notificationData); err != nil {
 				fmt.Printf("Warning: Failed to parse notification payload: %v\n", err)
 				continue
 			}
 		} else if _, hasEventType := parsedBody["event_type"]; hasEventType {
-			// Raw notification payload format (raw_message_delivery = true or direct SQS).
+			// Raw notification payload format, with no wrapper.
 			if err := json.Unmarshal([]byte(messageBody), &notificationData); err != nil {
 				fmt.Printf("Warning: Failed to parse raw notification payload: %v\n", err)
 				continue
@@ -1212,8 +1232,8 @@ func (c *Consumer) PollNotifications(ctx context.Context, opts PollNotifications
 			continue
 		}
 
-		// SNS filter policy ensures only messages for this consumer reach this queue
-		// No need for subscriber_id filtering - it's already guaranteed by SNS.
+		// The service routes each notification to its consumer's queue, so
+		// messages here are already this consumer's; no subscriber_id filter is needed.
 
 		// Optional filter by subscription IDs if provided (advanced use case).
 		if len(opts.SubscriptionIDs) > 0 {

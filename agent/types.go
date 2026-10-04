@@ -6,7 +6,7 @@
 // verifies on the server side.
 //
 // The client covers agent-callable operations only: operator-only
-// operations (kill-switch, token revocation, dead-letter handling, etc.)
+// operations (kill-switch, token revocation, delivery-failure handling, etc.)
 // are not part of this SDK.
 //
 // The types in this file mirror the server's wire format.

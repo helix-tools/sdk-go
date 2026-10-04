@@ -32,17 +32,21 @@ func TestProcessFileCompression(t *testing.T) {
 	}
 
 	opts := NewUploadOptions("test-dataset")
-	opts.Encrypt = false // Skip encryption requirement validation
+	opts.Encrypt = false // Deprecated and ignored: encryption is always on.
 	opts.Compress = true
 	opts.CompressionLevel = 6
 
-	// Test that we can't upload without encryption (required)
+	// The upload still needs a key, and that is the only reason it is refused.
+	// The deprecated Encrypt=false is not blamed.
 	_, err := p.processFile(context.Background(), testFile, opts)
 	if err == nil {
-		t.Error("expected error when encryption is disabled")
+		t.Error("expected error when no encryption key is configured")
 	}
-	if !strings.Contains(err.Error(), "encryption is required") {
-		t.Errorf("expected 'encryption is required' error, got: %v", err)
+	if !strings.Contains(err.Error(), "no encryption key configured") {
+		t.Errorf("expected 'no encryption key configured' error, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "UploadOptions.Encrypt") {
+		t.Errorf("error blames the deprecated Encrypt field: %v", err)
 	}
 }
 
@@ -205,29 +209,35 @@ func TestUploadDatasetValidation(t *testing.T) {
 		t.Fatalf("failed to create test file: %v", err)
 	}
 
-	t.Run("encryption required", func(t *testing.T) {
+	t.Run("deprecated Encrypt=false is ignored", func(t *testing.T) {
 		opts := NewUploadOptions("test-dataset")
 		opts.Encrypt = false
 
 		_, err := p.UploadDataset(context.Background(), testFile, opts)
 		if err == nil {
-			t.Error("expected error when encryption is disabled")
+			t.Error("expected error: no encryption key is configured")
 		}
-		if !strings.Contains(err.Error(), "encryption is required") {
-			t.Errorf("expected 'encryption is required', got: %v", err)
+		if !strings.Contains(err.Error(), "no encryption key configured") {
+			t.Errorf("expected 'no encryption key configured', got: %v", err)
+		}
+		if strings.Contains(err.Error(), "UploadOptions.Encrypt") {
+			t.Errorf("error blames the deprecated Encrypt field: %v", err)
 		}
 	})
 
-	t.Run("compression required", func(t *testing.T) {
+	t.Run("deprecated Compress=false is ignored", func(t *testing.T) {
 		opts := NewUploadOptions("test-dataset")
 		opts.Compress = false
 
 		_, err := p.UploadDataset(context.Background(), testFile, opts)
 		if err == nil {
-			t.Error("expected error when compression is disabled")
+			t.Error("expected error: no encryption key is configured")
 		}
-		if !strings.Contains(err.Error(), "compression is required") {
-			t.Errorf("expected 'compression is required', got: %v", err)
+		if !strings.Contains(err.Error(), "no encryption key configured") {
+			t.Errorf("expected 'no encryption key configured', got: %v", err)
+		}
+		if strings.Contains(err.Error(), "UploadOptions.Compress") {
+			t.Errorf("error blames the deprecated Compress field: %v", err)
 		}
 	})
 

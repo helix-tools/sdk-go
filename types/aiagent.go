@@ -2,10 +2,10 @@ package types
 
 // AI-agent (Wave-2 Model-2) self-serve provisioning types.
 //
-// Mirrors the helix-api aiagent surface (GET/POST/DELETE /v1/self/ai-agent). The
-// customer-facing projection carries ZERO infra internals (task ARNs, KMS, IAM,
-// internal URLs) — only the lifecycle status, an optional USD cost, the creation
-// time, and (on error) a curated, infra-free message.
+// Mirrors the aiagent surface (GET/POST/DELETE /v1/self/ai-agent). The
+// customer-facing projection carries no infrastructure details — only the
+// lifecycle status, an optional USD cost, the creation time, and (on error) a
+// curated message.
 
 // AIAgentState is the lifecycle state of a producer's per-producer AI agent.
 // Modelled as a string alias (mirrors BillingStatus) so callers may compare

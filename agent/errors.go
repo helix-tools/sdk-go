@@ -28,7 +28,7 @@ func (e *UnauthorizedError) Error() string {
 // KillSwitchOffError is returned when the server responds with HTTP 503
 // AND the response body marks an operator kill-switch (see
 // isKillSwitch503). The server returns that 503 when the global kill-
-// switch is flipped off (HELIX_AGENTS_ENABLED=false). A 503 that carries
+// switch is turned off for the service. A 503 that carries
 // no such marker — a load balancer, an upstream outage — is reported as
 // a ServiceUnavailableError instead.
 //

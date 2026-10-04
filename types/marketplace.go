@@ -2,8 +2,8 @@ package types
 
 // Marketplace (flat monthly per-dataset subscription pricing).
 //
-// Mirrors sdk-schemas PR #18: dataset.marketplace, subscription.billing, and the
-// company Stripe Connect fields. Every field is OPTIONAL — when the server
+// Mirrors the dataset.marketplace and subscription.billing objects, and the
+// company payout-account fields. Every field is OPTIONAL — when the server
 // `marketplace_payments` feature flag is off the API omits all marketplace
 // fields, so absence MUST be tolerated (nil pointers / zero values; never invent
 // defaults). Pointer fields distinguish "server sent 0/false" from "absent".

@@ -14,8 +14,8 @@ import (
 // the other self-serve producer methods). The status projection NEVER exposes
 // infra internals; see types.AIAgentStatus.
 //
-// NOTE: server-side this surface is dark behind the HELIX_MODEL2_ENABLED feature
-// flag. While it is off, all three endpoints respond 404 and these methods return
+// NOTE: this surface is available only to accounts it has been enabled for. For
+// any other account, all three endpoints respond 404 and these methods return
 // that API error (a *APIError with StatusCode 404).
 
 // ProvisionAIAgent triggers provisioning of the caller's per-producer AI agent.

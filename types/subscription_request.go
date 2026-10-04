@@ -4,14 +4,16 @@ import "encoding/json"
 
 // SubscriptionRequestStatus is the canonical lifecycle state of a
 // subscription request. Canonical contract values: pending, approved,
-// rejected.
+// rejected, and approved_pending_payment (approved for a paid price, with no
+// subscription until the consumer completes checkout).
 type SubscriptionRequestStatus = string
 
 // Canonical SubscriptionRequestStatus values.
 const (
-	SubscriptionRequestStatusPending  SubscriptionRequestStatus = "pending"
-	SubscriptionRequestStatusApproved SubscriptionRequestStatus = "approved"
-	SubscriptionRequestStatusRejected SubscriptionRequestStatus = "rejected"
+	SubscriptionRequestStatusPending                SubscriptionRequestStatus = "pending"
+	SubscriptionRequestStatusApproved               SubscriptionRequestStatus = "approved"
+	SubscriptionRequestStatusRejected               SubscriptionRequestStatus = "rejected"
+	SubscriptionRequestStatusApprovedPendingPayment SubscriptionRequestStatus = "approved_pending_payment"
 )
 
 // SubscriptionRequest represents a request from a consumer to access a producer's datasets.

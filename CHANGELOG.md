@@ -1,5 +1,40 @@
 # Changelog
 
+## 2026-10-03 (v2.21.0)
+
+### Changed
+- `producer.UploadDataset` always encrypts and compresses. The deprecated
+  `UploadOptions.Encrypt` and `UploadOptions.Compress` fields are ignored, so a
+  zero-value `UploadOptions` no longer fails with "cannot be false". Nothing you
+  can set turns encryption or compression off.
+- `consumer.CreateSubscriptionRequest` returns a `*consumer.ValidationError`,
+  before any request is sent, when `Tier` is not `"free"`. Letter case and
+  surrounding spaces are ignored, as the API already ignores them. The API
+  already rejected other tiers, so the failure now comes sooner and says why.
+- `producer.UpdateDataset` returns a `*producer.ValidationError`, before any
+  request is sent, when `input.Metadata` is set. The update endpoint does not
+  accept metadata, so the value used to be dropped silently. Remove the field
+  from your input. The field itself stays so existing code compiles.
+
+### Added
+- `producer.APIError` gains `IsUnauthorized`, `IsForbidden`, `IsNotFound` and
+  `IsRateLimited`, matching `consumer.APIError`.
+- `consumer.ValidationError`, for client-side checks that fail before a request.
+- `types.Subscription` gains `AutoRenew`, `CancellationReason` and
+  `SubscribedAt`, decoded from the API's `auto_renew`, `cancellation_reason` and
+  `subscribed_at` fields.
+- `types.SubscriptionRequestStatusApprovedPendingPayment`, for the
+  `approved_pending_payment` status that paid requests return.
+
+### Fixed
+- The mode-resolution warning (an API key and AWS keys both set, or static mode
+  with an API key set) prints once per process, not on every client
+  construction, as the README describes.
+- Doc comments and code comments no longer name internal services, internal
+  documents or internal flags. `Dataset.Metadata` in the consumer package now
+  describes what the API actually writes.
+- `MIGRATION_v2.md` installs a current release.
+
 ## 2026-10-01 (v2.20.3)
 
 ### Fixed
@@ -538,9 +573,9 @@
   and a curated `Message` on error (never any infra internals). Status
   values are the `types.AIAgentState*` constants
   (`not_provisioned`/`provisioning`/`active`/`error`/`deprovisioning`).
-  Types verified field-for-field against the Go API. NOTE: server-side this surface
-  is dark behind `HELIX_MODEL2_ENABLED`; while off, all three endpoints
-  respond 404 (surfaced as `*producer.APIError` with `StatusCode` 404),
+  Types verified field-for-field against the Go API. NOTE: this surface is
+  available only to accounts it has been enabled for; for other accounts, all
+  three endpoints respond 404 (surfaced as `*producer.APIError` with `StatusCode` 404),
   so live e2e is deferred until the flag is flipped.
 
 ### Fixed
@@ -605,15 +640,15 @@
   and `SetDatasetMarketplace(ctx, datasetID, input)` (`PATCH
   /v1/datasets/:id/marketplace`, PATCH semantics — only non-nil
   `PriceMonthlyCents`/`Listed` fields are sent). New
-  `types/marketplace.go` mirrors sdk-schemas PR #18
+  `types/marketplace.go` mirrors the published schema
   (`DatasetMarketplace`, `SubscriptionBilling`, pagination/response
   types); `types.Dataset` gains an optional `Marketplace` field and
   `types.Subscription` gains `Billing` — both pointer-typed and
   absent-tolerant, since every marketplace field is omitted server-side
   while the `marketplace_payments` feature flag is off (never
   defaulted). Browse/details shapes anchored directly to the API (#8).
-- **Producer Stripe Connect payout surface — Python SDK parity (PR #11
-  equivalent)**. `producer.ConnectOnboard(ctx)` replaces the earlier
+- **Producer Stripe Connect payout surface — Python SDK parity**.
+  `producer.ConnectOnboard(ctx)` replaces the earlier
   `GetConnectOnboardingLink` (never in a tagged release, so no
   compatibility concern): `POST /v1/self/connect/onboard`, no request
   body, now returns BOTH `URL` and `AccountID` instead of silently
@@ -625,8 +660,7 @@
   `types.ConnectLoginLinkResponse`) and the existing
   `producer.GetConnectStatus(ctx)` verified field-for-field against the
   Go API (`OnboardResponse`, `StatusResponse`, `LoginLinkResponse`) and
-  cross-checked against the Python SDK's `helix_connect/producer.py`
-  (PR #11) (#9).
+  cross-checked against the Python SDK's `helix_connect/producer.py` (#9).
 
 ### Fixed
 - **`types.ConnectStatus` was stale/wrong-shaped and drifted from the Go
@@ -1072,7 +1106,7 @@
 ## 2025-12-14
 
 ### Fixed
-- **Notification Parsing Bug**: Fixed notification parsing error when receiving raw SQS messages. The consumer now handles both SNS-wrapped messages (default) and raw notification payloads (when `raw_message_delivery = true` or direct SQS). Previously, when a raw message was received, the code attempted to parse an empty `snsMessage.Message` string, causing the notification parsing to fail.
+- **Notification Parsing Bug**: Fixed notification parsing error when receiving raw SQS messages. The consumer now handles both wrapped messages (default) and raw notification payloads (when the SQS subscription is configured to deliver unwrapped payloads directly). Previously, when a raw message was received, the code attempted to parse an empty `snsMessage.Message` string, causing the notification parsing to fail.
 
 ### Added
-- **Unit Tests**: Added notification parsing tests to `consumer/consumer_test.go` covering both SNS-wrapped and raw message formats.
+- **Unit Tests**: Added notification parsing tests to `consumer/consumer_test.go` covering both wrapped and raw message formats.

@@ -155,9 +155,8 @@ func NewAWSConfig(ctx context.Context, creds Credentials, region string) (aws.Co
 // NewAWSConfigSTS creates an AWS config using the STS credential-broker
 // auto-refresh provider (stscreds.NewCredentialsCache) instead of a static
 // key. It bootstrap-authenticates mint requests with the given static creds
-// (STS-PLAN.md §9 decision #1: the B0/B1 bootstrap is the existing SigV4
-// static key, not a new API key — verified against the real broker,
-// helix-tools/api PR #129, which accepts only SigV4).
+// (the bootstrap is the existing SigV4 static key, not an API key; the
+// broker accepts only SigV4 on this path).
 //
 // Test/e2e utility only, mirroring NewAWSConfig's signature — production SDK
 // callers get this wiring automatically via types.Config.CredentialMode

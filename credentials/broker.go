@@ -58,22 +58,19 @@ const (
 	MintPath = "/v1/credentials/session"
 
 	// sessionTTLSeconds mirrors credential_session.schema.json's
-	// ttl_seconds ("const": 900) and helix-tools/api PR #129's
-	// SessionResponse — the STS DurationSeconds floor and the ratified
-	// 15-minute TTL (STS-PLAN.md §9 decision #2) coincide, so every
-	// successful mint is exactly this many seconds. Used only to derive
-	// proactiveExpiryWindow below; actual credential expiry is always
-	// computed from the server's returned ttl_seconds/expiration, never
-	// hardcoded (see Provider.Retrieve).
+	// ttl_seconds ("const": 900) — the STS DurationSeconds floor and the
+	// 15-minute TTL coincide, so every successful mint is exactly this many
+	// seconds. Used only to derive proactiveExpiryWindow below; actual
+	// credential expiry is always computed from the server's returned
+	// ttl_seconds/expiration, never hardcoded (see Provider.Retrieve).
 	sessionTTLSeconds = 900
 
 	// proactiveExpiryWindow is passed to aws.CredentialsCache as
 	// ExpiryWindow: 1/3 of the 900s TTL (300s = 5min), matching the
 	// "refresh at ~2/3 of the remaining lifetime" note in
 	// credential_session.schema.json's expiration field and the "proactive
-	// refresh when remaining <= 1/3 TTL (5 min at TTL 15m)" policy in
-	// STS-PLAN.md/C-sdk.md C.1. aws.CredentialsCache (see
-	// credential_cache.go in aws-sdk-go-v2) has a SINGLE refresh
+	// refresh when remaining <= 1/3 TTL (5 min at TTL 15m)" policy.
+	// aws.CredentialsCache (see credential_cache.go in aws-sdk-go-v2) has a SINGLE refresh
 	// threshold — unlike botocore's two-tier advisory/mandatory model,
 	// every Retrieve() call once inside this window synchronously
 	// (single-flight-protected) re-mints. That collapses the "<=5min
@@ -85,21 +82,19 @@ const (
 
 	// expiryWindowJitterFrac spreads concurrent SDK instances' refresh
 	// attempts across a ~2.5-5 minute pre-expiry band instead of all
-	// refreshing at exactly T-5:00 (STS-PLAN.md/C-sdk.md C.1 bullet 1:
-	// "Go: ... ExpiryWindowJitterFrac = 0.5").
+	// refreshing at exactly T-5:00 (the jitter fraction is 0.5).
 	expiryWindowJitterFrac = 0.5
 
-	// mintMaxAttempts caps mint attempts at 1 initial + 2 retries,
-	// matching C-sdk.md C.1 bullet 3 ("mint retry 2x with exponential
-	// backoff + jitter, then raise ... AuthenticationError").
+	// mintMaxAttempts caps mint attempts at 1 initial + 2 retries, with
+	// exponential backoff and jitter between them, then reports an
+	// authentication error.
 	mintMaxAttempts = 3
 
 	// mintRetryBaseDelay is the base for exponential backoff between mint
 	// retries (base * 2^(attempt-1), +/-25% jitter). Kept short because
 	// the broker's own rate limit is generous relative to SDK-side
-	// refresh cadence (helix-tools/api PR #129:
-	// CustomerBasedRateLimit(0.33 req/s, burst 5) per customer) and mint
-	// retries are already gated by mintMaxAttempts.
+	// refresh cadence, and mint retries are already gated by
+	// mintMaxAttempts.
 	mintRetryBaseDelay = 200 * time.Millisecond
 
 	// mintRetryAfterCap bounds how long a 429's Retry-After (header, or the
@@ -182,12 +177,11 @@ func (e *MintError) Error() string {
 // changes. These strings are shared verbatim across the TypeScript, Python
 // and Go SDKs; never edit one without the other two.
 //
-// code and message must be the RAW envelope values (helix-tools/api's
+// code and message must be the RAW envelope values (the API's
 // error.code / error.message), not any already-substituted friendly text —
-// see the mint error contract (scratchpad/briefs/mint-error-contract.md):
-// the API's revoked-key response carries code "forbidden" (today) or
-// "api_key_expired"/"static_credentials_retired" (api PR #449's canonical
-// codes) OR "api_key_revoked" (the post-fix canonical form), with the
+// see the mint error contract: the API's revoked-key response carries code
+// "forbidden" (the legacy form) or "api_key_expired"/"static_credentials_retired"
+// (the canonical codes) OR "api_key_revoked" (the newer canonical form), with the
 // human-readable detail living in message, not code — "feature not enabled:
 // sts_broker" and "api key revoked" are both exact MESSAGE strings, never
 // codes, so they are matched against message, not code.
@@ -325,10 +319,9 @@ func isLatchableMintError(err error) bool {
 	return me.latchable
 }
 
-// isLatchableMintCode implements the mint error contract's latch rule
-// (scratchpad/briefs/mint-error-contract.md): 401 always latches; a 403
-// latches when error.code is one of the closed revoked/expired/retired
-// codes, OR — because helix-tools/api's real revoked-key and
+// isLatchableMintCode implements the mint error contract's latch rule: 401
+// always latches; a 403 latches when error.code is one of the closed
+// revoked/expired/retired codes, OR — because the revoked-key and
 // not-enabled-feature responses carry their distinguishing text in
 // error.message, not error.code (code is just "forbidden") — when
 // error.message, compared exactly, is one of the two message-keyed cases.
@@ -354,8 +347,7 @@ func isLatchableMintCode(statusCode int, code, message string) bool {
 }
 
 // mintSuccessResponse mirrors credential_session.schema.json's "success"
-// definition / helix-tools/api PR #129's SessionResponse exactly. All six
-// fields are required by the frozen contract.
+// definition exactly. All six fields are required by the frozen contract.
 type mintSuccessResponse struct {
 	AccessKeyID     string `json:"access_key_id"`
 	SecretAccessKey string `json:"secret_access_key"`
@@ -1002,9 +994,9 @@ func (p *Provider) mint(ctx context.Context) (*mintSuccessResponse, bool, error)
 // the Helix API key (Authorization: HLX-API-Key <key>, no SigV4 signature)
 // or, when no APIKey is configured, with a SigV4 signature from the static
 // AWS key — see BrokerConfig.APIKey. The broker's request body is entirely
-// optional (helix-tools/api PR #129's session_controller.go only binds when
-// Content-Length != 0; an absent body defaults to "all owned planes,
-// standard TTL") and this SDK version has no per-request scoping config
+// optional (the broker binds the body only when Content-Length is non-zero;
+// an absent body defaults to "all owned planes, standard TTL") and this SDK
+// version has no per-request scoping config
 // surface, so the request carries no body in either case — the same
 // zero-body pattern already used by every other signed GET/DELETE call in
 // this SDK (types.EmptyPayloadHash).
@@ -1054,8 +1046,7 @@ func (p *Provider) buildRequest(ctx context.Context) (*http.Request, error) {
 // constants for derivation from the 900s TTL). optFns are applied AFTER the
 // defaults, so callers/tests can override any option (e.g. a compressed
 // ExpiryWindow for fast integration tests). The returned *aws.CredentialsCache
-// exposes Invalidate() — call it to force the next Retrieve to re-mint
-// ("force_refresh()" in e2e requirement E.8.2's terms).
+// exposes Invalidate() — call it to force the next Retrieve to re-mint.
 func NewCredentialsCache(p *Provider, optFns ...func(*aws.CredentialsCacheOptions)) *aws.CredentialsCache {
 	opts := append([]func(*aws.CredentialsCacheOptions){
 		func(o *aws.CredentialsCacheOptions) {
@@ -1083,7 +1074,20 @@ const (
 	warnMsgStaticFieldsIgnoredWhenKeySet = "AWS access keys are ignored because apiKey is set"
 )
 
+// warnedMessages records which warnings have printed. A warning prints once per
+// process, not on every client construction, which is what the README promises.
+var (
+	warnedMu       sync.Mutex
+	warnedMessages = map[string]bool{}
+)
+
 func warn(message string) {
+	warnedMu.Lock()
+	defer warnedMu.Unlock()
+	if warnedMessages[message] {
+		return
+	}
+	warnedMessages[message] = true
 	_, _ = fmt.Fprintln(warningWriter, "helix sdk-go: "+message)
 }
 
