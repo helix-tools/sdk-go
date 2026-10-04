@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-10-04 (v2.21.0)
 
 ### Changed
 - `producer.UploadDataset` returns a `*producer.ValidationError`, before the file
@@ -13,8 +13,6 @@
   `UploadOptions` works. It does not: `DatasetName` and a `Description` of at
   least 10 characters are required. The README also said setting `Encrypt` or
   `Compress` to false returns an error. Both fields are ignored.
-
-## 2026-10-03 (v2.21.0)
 
 ### Changed
 - `producer.UploadDataset` always encrypts and compresses. The deprecated
