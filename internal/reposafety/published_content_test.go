@@ -45,7 +45,7 @@ var bannedContentPattern = regexp.MustCompile(decodePattern(bannedContentPattern
 
 // bannedInternalNamesPatternB64 is bannedInternalNamesPattern's source,
 // base64-encoded for the same reason as bannedContentPatternB64.
-const bannedInternalNamesPatternB64 = "KD9pKWNsb3VkWyBfLV0/d2F0Y2h8XGJyZWRpc1xifFxiZGxxXGJ8ZGVhZFsgXy1dbGV0dGVyfHNjcmF0Y2hwYWR8SEVMSVhfW0EtWjAtOV9dKl9FTkFCTEVEfEN1c3RvbWVyQmFzZWRSYXRlTGltaXR8UmVxdWlyZVByb2R1Y2VyT3JCb3RofFxiU05TXGJ8XGJQUiAjWzAtOV18U1RTLVBMQU58Qy1zZGtcLm1kfGhlbGl4LXRvb2xzLyhhcGl8c2RrLXNjaGVtYXN8aGVsaXgtYWRtaW4p"
+const bannedInternalNamesPatternB64 = "KD9pKWNsb3VkWyBfLV0/d2F0Y2h8XGJyZWRpc1xifFxiZGxxXGJ8ZGVhZFsgXy1dbGV0dGVyfHNjcmF0Y2hwYWR8SEVMSVhfW0EtWjAtOV9dKl9FTkFCTEVEfEN1c3RvbWVyQmFzZWRSYXRlTGltaXR8UmVxdWlyZVByb2R1Y2VyT3JCb3RofHJhd1sgXy1dP21lc3NhZ2VbIF8tXT9kZWxpdmVyeXxhcm46YXdzOnNxczpbYS16MC05LV0qOlxkezksMTJ9Oltcdy4tXSt8c3FzXC5bYS16MC05LV0rXC5hbWF6b25hd3NcLmNvbS9cZCsvW1x3Li1dK3xcYlNOU1xifFxiUFIgI1swLTldfFNUUy1QTEFOfEMtc2RrXC5tZHxoZWxpeC10b29scy8oYXBpfHNkay1zY2hlbWFzfGhlbGl4LWFkbWluKQ=="
 
 // bannedInternalNamesPattern is the list of internal names that must not
 // appear in the doc comments or comments of a published non-test Go or
@@ -53,11 +53,24 @@ const bannedInternalNamesPatternB64 = "KD9pKWNsb3VkWyBfLV0/d2F0Y2h8XGJyZWRpc1xif
 // so a reader of pkg.go.dev or the repository sees them. The list covers the
 // message-queue, cache and dead-letter components, the observability
 // service, server-side feature flags, sandbox paths, internal design-document
-// names, private repository names, PR numbers, the rate-limit configuration and
-// the internal middleware name. Matching is case-insensitive and tolerates a
-// space, underscore or hyphen in place of the separator in the multi-word
-// names. See TestBannedInternalNamesPatternMatches for the spellings it must
-// catch and the public names it must leave alone.
+// names, private repository names, PR numbers, the rate-limit configuration,
+// the internal middleware name, the internal subscription-delivery setting
+// name (`raw_message_delivery` — an internal config knob, not a capability
+// description, so it is banned the same way the feature flags are, while
+// the capability it enables, "raw, unwrapped SQS delivery", stays
+// describable in customer-visible text), and an actual SQS queue ARN or
+// queue URL. The customer-visible content policy (.claude/CLAUDE.md) allows
+// naming SQS as the consumer notification mechanism, but a specific queue
+// name/URL/ARN is a banned AWS resource pattern; matching on the ARN/URL
+// structure (not the word "SQS") keeps the generic mechanism mention (e.g.
+// "SQS queue", the `SQSQueueURL` field) allowed. This scan is non-test
+// sources only, deliberately: unit tests legitimately construct
+// synthetic/placeholder ARNs to exercise error-message parsing (see
+// consumer/error_cause_test.go), and those are not a published-content leak.
+// Matching is case-insensitive and tolerates a space, underscore or hyphen
+// in place of the separator in the multi-word names. See
+// TestBannedInternalNamesPatternMatches for the spellings it must catch and
+// the public names it must leave alone.
 var bannedInternalNamesPattern = regexp.MustCompile(decodePattern(bannedInternalNamesPatternB64))
 
 func decodePattern(encoded string) string {
@@ -226,6 +239,42 @@ func TestBannedContentPatternMatchesProducerConfigLayout(t *testing.T) {
 	}
 }
 
+// TestBannedInternalNamesPatternMatchesSQSResourcePatterns is a regression
+// test for the SQS ARN/queue-URL alternatives in
+// bannedInternalNamesPatternB64: an actual queue ARN or queue URL in a
+// published non-test source must be caught, while the generic "SQS" word
+// and the SDK's own SQSQueueURL field/import path — allowed by the
+// customer-visible content policy (.claude/CLAUDE.md) as the consumer
+// notification mechanism — must stay allowed. Every sample is assembled at
+// runtime from fragments, so no banned string appears contiguously in this
+// file.
+func TestBannedInternalNamesPatternMatchesSQSResourcePatterns(t *testing.T) {
+	region, account, queue := "us-east-1", "123456789012", "helix-notifications-queue"
+	mustMatch := []string{
+		"arn:aws:sqs:" + region + ":" + account + ":" + queue,
+		"https://sqs." + region + ".amazonaws.com/" + account + "/" + queue,
+		"sqs." + region + ".amazonaws.com/" + account + "/" + queue + ".fifo",
+	}
+	for _, s := range mustMatch {
+		if !bannedInternalNamesPattern.MatchString(s) {
+			t.Errorf("bannedInternalNamesPattern does not match %q, an SQS queue ARN/URL", s)
+		}
+	}
+
+	mustNotMatch := []string{
+		"SQS" + " queue",
+		"the consumer notification mechanism is " + "SQS",
+		"SQS" + "QueueURL",
+		"github.com/aws/aws-sdk-go-v2/service/" + "sqs",
+		"sqs" + ".NewFromConfig(awsCfg)",
+	}
+	for _, s := range mustNotMatch {
+		if bannedInternalNamesPattern.MatchString(s) {
+			t.Errorf("bannedInternalNamesPattern unexpectedly matched %q, which is public and must stay allowed", s)
+		}
+	}
+}
+
 // TestNoBannedContentInPublishedFiles fails if any git-tracked file
 // contains a banned-content hit. It scans exactly the file set
 // `git ls-files` reports — the same set the Go module zip ships — so
@@ -287,6 +336,10 @@ func TestBannedInternalNamesPatternMatches(t *testing.T) {
 		"helix" + "_agents_" + "enabled",
 		"Customer" + "BasedRateLimit(0.33 req/s, burst 5)",
 		"Require" + "ProducerOrBoth",
+		"raw" + "_message_delivery",
+		"raw" + "-message-delivery",
+		"raw" + " message " + "delivery",
+		"RAW" + "_MESSAGE_" + "DELIVERY",
 		"S" + "NS-wrapped messages",
 		"PR" + " #129",
 		"STS-" + "PLAN.md §9",
@@ -306,6 +359,9 @@ func TestBannedInternalNamesPatternMatches(t *testing.T) {
 		"RequireProducerCredentials",
 		"Redistribute the result",
 		"SQS queue",
+		"a raw " + "message was received",
+		"raw notification " + "payload",
+		"message " + "delivery guarantees",
 		"github.com/" + "helix-tools/sdk-go/v2/producer",
 	}
 	for _, s := range mustNotMatch {

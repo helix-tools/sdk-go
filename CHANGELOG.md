@@ -1106,7 +1106,7 @@
 ## 2025-12-14
 
 ### Fixed
-- **Notification Parsing Bug**: Fixed notification parsing error when receiving raw SQS messages. The consumer now handles both wrapped messages (default) and raw notification payloads (when `raw_message_delivery = true` or direct SQS). Previously, when a raw message was received, the code attempted to parse an empty `snsMessage.Message` string, causing the notification parsing to fail.
+- **Notification Parsing Bug**: Fixed notification parsing error when receiving raw SQS messages. The consumer now handles both wrapped messages (default) and raw notification payloads (when the SQS subscription is configured to deliver unwrapped payloads directly). Previously, when a raw message was received, the code attempted to parse an empty `snsMessage.Message` string, causing the notification parsing to fail.
 
 ### Added
 - **Unit Tests**: Added notification parsing tests to `consumer/consumer_test.go` covering both wrapped and raw message formats.
