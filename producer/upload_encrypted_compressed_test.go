@@ -37,11 +37,18 @@ func TestUploadDataset_CannotDisableEncryptionOrCompression(t *testing.T) {
 		noKMS   bool
 		wantErr string
 	}{
-		{"Encrypt=false", func(o *UploadOptions) { o.Encrypt = false }, false, "encryption is required"},
-		{"Compress=false", func(o *UploadOptions) { o.Compress = false }, false, "compression is required"},
-		{"both false", func(o *UploadOptions) { o.Encrypt, o.Compress = false, false }, false, "encryption is required"},
-		{"zero-value options", func(o *UploadOptions) { *o = UploadOptions{DatasetName: "x"} }, false, "encryption is required"},
 		{"missing KMS key", func(o *UploadOptions) {}, true, "no encryption key configured"},
+		{
+			// Encrypt and Compress are deprecated and ignored, so turning them
+			// off is not a refusal case. The metadata route below still is, and
+			// it must stay refused when the deprecated bools are also false.
+			"Encrypt=false and metadata says encryption off",
+			func(o *UploadOptions) {
+				o.Encrypt, o.Compress = false, false
+				o.Metadata = map[string]any{"encryption_enabled": false}
+			},
+			false, "cannot be disabled",
+		},
 		{"invalid gzip level", func(o *UploadOptions) { o.CompressionLevel = 10 }, false, "failed to create compression writer"},
 		{
 			"metadata says encryption off",
@@ -147,6 +154,54 @@ func TestUploadDataset_DefaultOptionsStayEncryptedAndCompressed(t *testing.T) {
 	opts := NewUploadOptions("d")
 	if !opts.Encrypt || !opts.Compress || opts.CompressionLevel != 6 {
 		t.Fatalf("NewUploadOptions = Encrypt %v Compress %v level %d, want true true 6", opts.Encrypt, opts.Compress, opts.CompressionLevel)
+	}
+}
+
+// TestUploadDataset_DeprecatedFlagsAreIgnored: Encrypt and Compress are
+// deprecated and ignored. A zero-value UploadOptions, a caller who leaves the
+// bools false, and the defaults all get the same upload. The check is at the
+// wire: the object the upload stored must decrypt and gunzip back to the
+// original bytes, and the record must say encrypted and compressed.
+func TestUploadDataset_DeprecatedFlagsAreIgnored(t *testing.T) {
+	plaintext := []byte(strings.Repeat(`{"phone":"+15550100"}`+"\n", 40))
+
+	cases := []struct {
+		name string
+		opts func() UploadOptions
+	}{
+		{"zero-value options", func() UploadOptions { return UploadOptions{DatasetName: "zero-value"} }},
+		{"Encrypt and Compress left false", func() UploadOptions {
+			o := NewUploadOptions("flags-false")
+			o.Encrypt, o.Compress = false, false
+			return o
+		}},
+		{"NewUploadOptions defaults", func() UploadOptions { return NewUploadOptions("defaults") }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newUploadFixture(t)
+
+			dataFile := filepath.Join(t.TempDir(), "data.ndjson")
+			if err := os.WriteFile(dataFile, plaintext, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := f.p.UploadDataset(context.Background(), dataFile, tc.opts()); err != nil {
+				t.Fatalf("UploadDataset: %v", err)
+			}
+
+			if got := f.openUploaded(t); !bytes.Equal(got, plaintext) {
+				t.Fatalf("stored object decrypts+gunzips to %d bytes, want the original %d", len(got), len(plaintext))
+			}
+			if f.postBody["encryption"] != true {
+				t.Errorf("POST body encryption = %v, want true", f.postBody["encryption"])
+			}
+			md, _ := f.postBody["metadata"].(map[string]any)
+			if md["encryption_enabled"] != true || md["compression_enabled"] != true {
+				t.Errorf("metadata encryption_enabled/compression_enabled = %v/%v, want true/true", md["encryption_enabled"], md["compression_enabled"])
+			}
+		})
 	}
 }
 

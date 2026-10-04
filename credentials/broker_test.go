@@ -2101,14 +2101,23 @@ func TestProvider_Retrieve_APIKey_MultipleCallsAlwaysMintWithKey(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // captureWarnings temporarily redirects warningWriter to a buffer, mirroring
-// producer.deprecationWriter's test pattern, and returns a restore func.
+// producer.deprecationWriter's test pattern, and returns a restore func. It also
+// forgets which warnings already printed, so each capture sees the first print.
 func captureWarnings(t *testing.T) *strings.Builder {
 	t.Helper()
 	var buf strings.Builder
 	prev := warningWriter
 	warningWriter = &buf
 	t.Cleanup(func() { warningWriter = prev })
+	resetWarnedMessages()
 	return &buf
+}
+
+// resetWarnedMessages clears the once-per-process record kept by warn.
+func resetWarnedMessages() {
+	warnedMu.Lock()
+	defer warnedMu.Unlock()
+	warnedMessages = map[string]bool{}
 }
 
 func countOccurrences(s, substr string) int {

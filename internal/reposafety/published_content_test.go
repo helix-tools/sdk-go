@@ -43,10 +43,27 @@ const bannedContentPatternB64 = "KD9pKXJpbmdib29zdHxwaG9uZVwuY29tfGNsaWNrID91cHx
 // spellings this alternative is proven to catch.
 var bannedContentPattern = regexp.MustCompile(decodePattern(bannedContentPatternB64))
 
+// bannedInternalNamesPatternB64 is bannedInternalNamesPattern's source,
+// base64-encoded for the same reason as bannedContentPatternB64.
+const bannedInternalNamesPatternB64 = "KD9pKWNsb3VkWyBfLV0/d2F0Y2h8XGJyZWRpc1xifFxiZGxxXGJ8ZGVhZFsgXy1dbGV0dGVyfHNjcmF0Y2hwYWR8SEVMSVhfW0EtWjAtOV9dKl9FTkFCTEVEfEN1c3RvbWVyQmFzZWRSYXRlTGltaXR8UmVxdWlyZVByb2R1Y2VyT3JCb3RofFxiU05TXGJ8XGJQUiAjWzAtOV18U1RTLVBMQU58Qy1zZGtcLm1kfGhlbGl4LXRvb2xzLyhhcGl8c2RrLXNjaGVtYXN8aGVsaXgtYWRtaW4p"
+
+// bannedInternalNamesPattern is the list of internal names that must not
+// appear in the doc comments or comments of a published non-test Go or
+// Markdown source. Those files ship with the module and are public on GitHub,
+// so a reader of pkg.go.dev or the repository sees them. The list covers the
+// message-queue, cache and dead-letter components, the observability
+// service, server-side feature flags, sandbox paths, internal design-document
+// names, private repository names, PR numbers, the rate-limit configuration and
+// the internal middleware name. Matching is case-insensitive and tolerates a
+// space, underscore or hyphen in place of the separator in the multi-word
+// names. See TestBannedInternalNamesPatternMatches for the spellings it must
+// catch and the public names it must leave alone.
+var bannedInternalNamesPattern = regexp.MustCompile(decodePattern(bannedInternalNamesPatternB64))
+
 func decodePattern(encoded string) string {
 	b, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		panic("published_content: bannedContentPatternB64 does not decode: " + err.Error())
+		panic("published_content: encoded pattern does not decode: " + err.Error())
 	}
 	return string(b)
 }
@@ -248,6 +265,94 @@ func lineContaining(text string, idx int) (lineNo int, line string) {
 		return lineNo, text[start:]
 	}
 	return lineNo, text[start : idx+end]
+}
+
+// TestBannedInternalNamesPatternMatches is a regression test for
+// bannedInternalNamesPatternB64. Each internal name must be caught, including
+// the spacing and separator variants a rename would use, and an ordinary public
+// name that shares a fragment with one of them must not be. Every sample is
+// assembled at runtime from fragments, so no banned string appears
+// contiguously in this file.
+func TestBannedInternalNamesPatternMatches(t *testing.T) {
+	mustMatch := []string{
+		"Cloud" + "Watch FilterByAgent reader",
+		"cloud" + " " + "watch reader",
+		"CLOUD" + "_" + "WATCH",
+		"Re" + "dis-backed idempotency store",
+		"eventual D" + "LQ",
+		"dead" + "-letter handling",
+		"dead" + " letter",
+		"scratch" + "pad/briefs/mint-error-contract.md",
+		"HELIX" + "_MODEL2_" + "ENABLED",
+		"helix" + "_agents_" + "enabled",
+		"Customer" + "BasedRateLimit(0.33 req/s, burst 5)",
+		"Require" + "ProducerOrBoth",
+		"S" + "NS-wrapped messages",
+		"PR" + " #129",
+		"STS-" + "PLAN.md §9",
+		"C-" + "sdk.md C.1",
+		"helix-" + "tools/api PR",
+		"helix-" + "tools/sdk-schemas",
+	}
+	for _, s := range mustMatch {
+		if !bannedInternalNamesPattern.MatchString(s) {
+			t.Errorf("bannedInternalNamesPattern does not match %q", s)
+		}
+	}
+
+	mustNotMatch := []string{
+		"HELIX_API_ENDPOINT",
+		"RateLimitBucket",
+		"RequireProducerCredentials",
+		"Redistribute the result",
+		"SQS queue",
+		"github.com/" + "helix-tools/sdk-go/v2/producer",
+	}
+	for _, s := range mustNotMatch {
+		if bannedInternalNamesPattern.MatchString(s) {
+			t.Errorf("bannedInternalNamesPattern unexpectedly matched %q, which is public and must stay allowed", s)
+		}
+	}
+}
+
+// TestNoBannedInternalNamesInSources fails if a published non-test Go or
+// Markdown file names an internal component, flag, document or repository.
+// Those files ship with the module and are public on GitHub.
+func TestNoBannedInternalNamesInSources(t *testing.T) {
+	root := repoRoot(t)
+	files := publishedFiles(t, root)
+
+	scanned := 0
+	for _, f := range files {
+		if !isNonTestGoOrMarkdown(f) {
+			continue
+		}
+		scanned++
+
+		data, err := os.ReadFile(filepath.Join(root, f))
+		if err != nil {
+			t.Fatalf("published_content: reading %s: %v", f, err)
+		}
+		text := string(data)
+
+		for _, loc := range bannedInternalNamesPattern.FindAllStringIndex(text, -1) {
+			lineNo, line := lineContaining(text, loc[0])
+			t.Errorf("%s:%d: internal name %q in a published source: %q", f, lineNo, text[loc[0]:loc[1]], strings.TrimSpace(line))
+		}
+	}
+
+	if scanned == 0 {
+		t.Fatal("published_content: no non-test Go or Markdown files found — refusing to run a guard that would trivially pass")
+	}
+}
+
+// isNonTestGoOrMarkdown reports whether f is a non-test Go source or a Markdown
+// document, the file types TestNoBannedInternalNamesInSources scans.
+func isNonTestGoOrMarkdown(f string) bool {
+	if strings.HasSuffix(f, ".md") {
+		return true
+	}
+	return strings.HasSuffix(f, ".go") && !strings.HasSuffix(f, "_test.go")
 }
 
 // TestExcludeNestedModules pins the module zip rule publishedFiles relies

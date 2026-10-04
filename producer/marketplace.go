@@ -13,8 +13,9 @@ import (
 // ConnectOnboard starts (or resumes) Stripe Connect Express payout onboarding.
 //
 // POST /v1/self/connect/onboard — no request body; the producer id comes from
-// the JWT (RequireProducerOrBoth). Returns the hosted Account Link URL plus the
-// Connect account id. The SDK NEVER opens or redirects to the URL itself — the
+// the JWT, which must belong to a producer or to a customer with both roles.
+// Returns the hosted Account Link URL plus the Connect account id. The SDK
+// NEVER opens or redirects to the URL itself — the
 // producer must open it to submit KYC and bank details.
 //
 // Replaces the earlier GetConnectOnboardingLink, which returned only the URL

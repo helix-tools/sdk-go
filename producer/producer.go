@@ -81,22 +81,37 @@ func (e *APIError) IsConflict() bool {
 	return e.StatusCode == http.StatusConflict
 }
 
+// IsUnauthorized reports a 401 (bad or expired credentials).
+func (e *APIError) IsUnauthorized() bool { return e.StatusCode == http.StatusUnauthorized }
+
+// IsForbidden reports a 403 (authenticated but not permitted).
+func (e *APIError) IsForbidden() bool { return e.StatusCode == http.StatusForbidden }
+
+// IsNotFound reports a 404 (the resource does not exist or is not visible).
+func (e *APIError) IsNotFound() bool { return e.StatusCode == http.StatusNotFound }
+
+// IsRateLimited reports a 429: back off and retry.
+func (e *APIError) IsRateLimited() bool { return e.StatusCode == http.StatusTooManyRequests }
+
 // UploadOptions contains options for uploading datasets.
 //
 // NOTE: Use NewUploadOptions() to get sane defaults.
 // NOTE: Encryption and compression are required: every upload is compressed
-// and then encrypted, and no option turns either off. Encrypt and Compress stay
-// on this struct so existing callers keep compiling, but UploadDataset returns
-// an error — before any network call — when either is false, when the encryption
-// key is missing, or when Metadata / DatasetOverrides try to switch the record's
-// encryption_enabled / compression_enabled flags off.
+// and then encrypted, and no option turns either off. UploadDataset returns an
+// error — before any network call — when the encryption key is missing, or when
+// Metadata / DatasetOverrides try to switch the record's encryption_enabled /
+// compression_enabled flags off.
 type UploadOptions struct {
-	Category         string
+	Category string
+	// Deprecated: every upload is compressed, so this field is ignored. It stays
+	// so existing code keeps compiling, and a zero-value UploadOptions works.
 	Compress         bool
 	CompressionLevel int // Default: 6 (compression level 1-9)
 	DataFreshness    types.DataFreshness
 	DatasetName      string
 	Description      string
+	// Deprecated: every upload is encrypted, so this field is ignored. It stays
+	// so existing code keeps compiling, and a zero-value UploadOptions works.
 	Encrypt          bool
 	Metadata         map[string]any
 	DatasetOverrides map[string]any
@@ -594,8 +609,9 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 // side effect other than one KMS Encrypt call; it never uploads anything.
 //
 // It is the single enforcement point for the upload invariant (see
-// validateUploadOptions): a call that would skip compression or encryption
-// fails here, before the file is read or anything reaches the network.
+// validateUploadOptions): a call that would switch encryption or compression
+// off, or that has no encryption key, fails here, before the file is read or
+// anything reaches the network.
 func (p *Producer) processFile(ctx context.Context, filePath string, opts UploadOptions) (*ProcessedFileData, error) {
 	if err := p.validateUploadOptions(opts); err != nil {
 		return nil, err
@@ -663,20 +679,14 @@ var flagKeysThatMustStayOn = []string{"encryption", "encryption_enabled", "compr
 // gzip-compressed and then encrypted, and no option turns either off. It runs
 // before the file is read and before any network call (KMS included), and it
 // refuses:
-//   - Encrypt or Compress set to false,
 //   - a Producer without a KMS key,
 //   - Metadata or DatasetOverrides — top-level or under "metadata" — that set
 //     one of the record's encryption/compression flags to anything but true,
 //     or that give "metadata" as something other than an object.
+//
+// UploadOptions.Encrypt and UploadOptions.Compress are deprecated and ignored,
+// so a zero-value UploadOptions is accepted.
 func (p *Producer) validateUploadOptions(opts UploadOptions) error {
-	if !opts.Encrypt {
-		return errors.New("encryption is required for dataset uploads: UploadOptions.Encrypt cannot be false")
-	}
-
-	if !opts.Compress {
-		return errors.New("compression is required for dataset uploads: UploadOptions.Compress cannot be false")
-	}
-
 	if p.KMSKeyID == "" {
 		return errors.New("encryption requested but no encryption key configured for this account")
 	}
@@ -1236,10 +1246,18 @@ func requireDatasetID(datasetID string) error {
 //   - datasetID: The dataset ID to update.
 //   - input: DatasetUpdateInput containing fields to update (nil fields are ignored).
 //
+// input.Metadata is deprecated and cannot be updated here, so UpdateDataset
+// returns a *ValidationError, before any network call, when it is set.
+//
 // Returns the updated dataset.
 func (p *Producer) UpdateDataset(ctx context.Context, datasetID string, input types.DatasetUpdateInput) (*types.Dataset, error) {
 	if err := requireDatasetID(datasetID); err != nil {
 		return nil, err
+	}
+
+	//nolint:staticcheck // SA1019: reads the deprecated field on purpose, to refuse it before any request.
+	if input.Metadata != nil {
+		return nil, &ValidationError{Field: "metadata", Message: "is not updatable by UpdateDataset; remove it from the input"}
 	}
 
 	path := fmt.Sprintf("/v1/datasets/%s", url.PathEscape(datasetID))

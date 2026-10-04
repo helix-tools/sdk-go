@@ -111,10 +111,19 @@ type Subscription struct {
 	LastAccessedAt *string `json:"last_accessed_at,omitempty"`
 	CreatedAt      string  `json:"created_at"`
 	UpdatedAt      string  `json:"updated_at"`
-	// Billing is the marketplace billing (payment) state (schema PR #18).
+	// Billing is the marketplace billing (payment) state.
 	// Optional: free/legacy subscriptions omit it or carry billing_status
 	// "free". Distinct from Status (the ACCESS state). Tolerate absence (nil).
 	Billing *SubscriptionBilling `json:"billing,omitempty"`
+	// AutoRenew reports whether the subscription renews at the end of its term.
+	// The API omits it when false, so a decoded false also means "not set".
+	AutoRenew bool `json:"auto_renew,omitempty"`
+	// CancellationReason is the free-text reason recorded when the subscription
+	// was cancelled. Empty unless one was recorded.
+	CancellationReason string `json:"cancellation_reason,omitempty"`
+	// SubscribedAt is when the subscription was created, RFC 3339. The API's
+	// response name for the stored created_at. Empty when the API omits it.
+	SubscribedAt string `json:"subscribed_at,omitempty"`
 }
 
 // SubscriptionsResponse is the response for GET /v1/subscriptions.

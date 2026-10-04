@@ -406,7 +406,7 @@ func (c *Client) ListPeers(ctx context.Context) (*RegistryList, error) {
 //
 //   - Signature and freshness verification via
 //     MCPEnvelopeBuilder.Verify.
-//   - Replay protection via a Redis-backed idempotency store keyed on
+//   - Replay protection via a server-side idempotency store keyed on
 //     envelope.correlation_id with a 1-hour TTL. A duplicate
 //     correlation_id within the window returns 409, which this
 //     client surfaces as DuplicateCorrelationError.
@@ -450,8 +450,8 @@ func WithA2ACustomerID(customerID string) A2AOption {
 // the echoed correlation id.
 //
 // The server returns HTTP 202 Accepted immediately; the actual
-// webhook delivery happens in the background with retries +
-// eventual DLQ. The status in the response is typically "queued".
+// webhook delivery happens in the background, with retries. The status
+// in the response is typically "queued".
 //
 // The SDK validates operation and customer_id locally — both are
 // required by the server and rejected with a 400 if missing, so
@@ -495,9 +495,7 @@ func (c *Client) SendA2A(ctx context.Context, recipientAgentID, correlationID st
 }
 
 // MyAuditTrail returns the caller's recent audit events (at most
-// 100 entries from the last hour, server-enforced). The filter
-// pattern is applied server-side by the CloudWatch FilterByAgent
-// reader.
+// 100 entries from the last hour, server-enforced).
 //
 // A nil slice is returned when the server returns an empty array.
 // Callers can len() the result without a nil check.

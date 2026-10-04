@@ -115,8 +115,6 @@ func main() {
 		Description:      "End-to-end test dataset from Golang Producer SDK",
 		Category:         "test",
 		DataFreshness:    "realtime",
-		Encrypt:          true,
-		Compress:         true,
 		CompressionLevel: 9, // Maximum compression for test
 		Metadata: map[string]interface{}{
 			"test_run": time.Now().Format(time.RFC3339),
