@@ -101,17 +101,25 @@ func (e *APIError) IsRateLimited() bool { return e.StatusCode == http.StatusTooM
 // error — before any network call — when the encryption key is missing, or when
 // Metadata / DatasetOverrides try to switch the record's encryption_enabled /
 // compression_enabled flags off.
+// NOTE: DatasetName and a Description of at least 10 characters are required.
+// A zero-value UploadOptions is not a valid upload. UploadDataset returns an
+// error, before any network call, when Description is shorter than 10 characters
+// after surrounding spaces are trimmed, unless DatasetOverrides sets "description".
 type UploadOptions struct {
 	Category string
-	// Deprecated: every upload is compressed, so this field is ignored. It stays
-	// so existing code keeps compiling, and a zero-value UploadOptions works.
+	// Deprecated: ignored. Every upload is compressed regardless of this field,
+	// so false is fine. It stays so existing code keeps compiling. Zero-value
+	// options are still not enough: DatasetName and a Description of at least 10
+	// characters are required.
 	Compress         bool
 	CompressionLevel int // Default: 6 (compression level 1-9)
 	DataFreshness    types.DataFreshness
 	DatasetName      string
 	Description      string
-	// Deprecated: every upload is encrypted, so this field is ignored. It stays
-	// so existing code keeps compiling, and a zero-value UploadOptions works.
+	// Deprecated: ignored. Every upload is encrypted regardless of this field,
+	// so false is fine. It stays so existing code keeps compiling. Zero-value
+	// options are still not enough: DatasetName and a Description of at least 10
+	// characters are required.
 	Encrypt          bool
 	Metadata         map[string]any
 	DatasetOverrides map[string]any
@@ -675,6 +683,10 @@ func (p *Producer) processFile(ctx context.Context, filePath string, opts Upload
 // but true.
 var flagKeysThatMustStayOn = []string{"encryption", "encryption_enabled", "compression", "compression_enabled"}
 
+// minDescriptionLength is the API's minimum dataset description length, counted
+// after surrounding spaces are trimmed (the create-dataset rule).
+const minDescriptionLength = 10
+
 // validateUploadOptions enforces the upload invariant: every upload is
 // gzip-compressed and then encrypted, and no option turns either off. It runs
 // before the file is read and before any network call (KMS included), and it
@@ -682,10 +694,13 @@ var flagKeysThatMustStayOn = []string{"encryption", "encryption_enabled", "compr
 //   - a Producer without a KMS key,
 //   - Metadata or DatasetOverrides — top-level or under "metadata" — that set
 //     one of the record's encryption/compression flags to anything but true,
-//     or that give "metadata" as something other than an object.
+//     or that give "metadata" as something other than an object,
+//   - a Description shorter than minDescriptionLength after trimming, unless
+//     DatasetOverrides sets "description" (that value is what gets sent, and the
+//     API checks it).
 //
 // UploadOptions.Encrypt and UploadOptions.Compress are deprecated and ignored,
-// so a zero-value UploadOptions is accepted.
+// so leaving them false is accepted.
 func (p *Producer) validateUploadOptions(opts UploadOptions) error {
 	if p.KMSKeyID == "" {
 		return errors.New("encryption requested but no encryption key configured for this account")
@@ -697,6 +712,11 @@ func (p *Producer) validateUploadOptions(opts UploadOptions) error {
 
 	if err := rejectDisabledFlags("UploadOptions.DatasetOverrides", opts.DatasetOverrides); err != nil {
 		return err
+	}
+
+	_, overridden := opts.DatasetOverrides["description"]
+	if !overridden && len(strings.TrimSpace(opts.Description)) < minDescriptionLength {
+		return &ValidationError{Field: "description", Message: fmt.Sprintf("must be at least %d characters", minDescriptionLength)}
 	}
 
 	if raw, present := opts.DatasetOverrides["metadata"]; present {

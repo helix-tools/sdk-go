@@ -34,8 +34,9 @@ func Example_quickstart() {
 	}
 
 	// Encryption and compression are required — NewUploadOptions sets
-	// sane defaults for both.
+	// sane defaults for both. A Description of at least 10 characters is required.
 	opts := producer.NewUploadOptions("my-dataset")
+	opts.Description = "My dataset description"
 
 	dataset, err := p.UploadDataset(ctx, "./data.ndjson", opts)
 	if err != nil {

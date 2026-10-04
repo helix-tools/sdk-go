@@ -116,7 +116,7 @@ func TestCreateDatasetRecord_MatchesV1FieldTable(t *testing.T) {
 	p := newTestProducer(server.URL)
 	dataFile := writeNDJSON(t, 20)
 
-	opts := NewUploadOptions("sizes-table-test")
+	opts := testUploadOptions("sizes-table-test")
 	processed := &ProcessedFileData{
 		OriginalSize: 424420949,
 		Sizes: map[string]any{
@@ -198,7 +198,7 @@ func TestCreateDatasetRecord_RecordCountDefaultsZeroWhenAnalysisFails(t *testing
 	// deterministically, so analysis fails and the default-0 path runs.
 	tmpDir := t.TempDir()
 
-	opts := NewUploadOptions("record-count-default-test")
+	opts := testUploadOptions("record-count-default-test")
 	if _, err := p.createDatasetRecord(context.Background(), tmpDir, opts, fakeProcessedFileData()); err != nil {
 		t.Fatalf("createDatasetRecord returned error: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestCreateDatasetRecord_OverridesWinOverComputedValues(t *testing.T) {
 	p := newTestProducer(server.URL)
 	dataFile := writeNDJSON(t, 5)
 
-	opts := NewUploadOptions("override-wins-test")
+	opts := testUploadOptions("override-wins-test")
 	opts.DatasetOverrides = map[string]any{
 		"version":      "2020-01-01",
 		"record_count": 999,
@@ -269,7 +269,7 @@ func TestCreateDatasetRecord_ExplicitEmptyVersionOverridesComputedDate(t *testin
 		p := newTestProducer(server.URL)
 		dataFile := writeNDJSON(t, 5)
 
-		opts := NewUploadOptions("empty-version-override-test")
+		opts := testUploadOptions("empty-version-override-test")
 		opts.DatasetOverrides = map[string]any{"version": ""}
 		if _, err := p.createDatasetRecord(context.Background(), dataFile, opts, fakeProcessedFileData()); err != nil {
 			t.Fatalf("createDatasetRecord returned error: %v", err)
@@ -293,7 +293,7 @@ func TestCreateDatasetRecord_ExplicitEmptyVersionOverridesComputedDate(t *testin
 		p := newTestProducer(server.URL)
 		dataFile := writeNDJSON(t, 5)
 
-		opts := NewUploadOptions("no-version-override-test")
+		opts := testUploadOptions("no-version-override-test")
 		opts.DatasetOverrides = map[string]any{"category": "custom"} // touches overrides, but never "version"
 		if _, err := p.createDatasetRecord(context.Background(), dataFile, opts, fakeProcessedFileData()); err != nil {
 			t.Fatalf("createDatasetRecord returned error: %v", err)
@@ -338,7 +338,7 @@ func TestUploadDataset_NothingUploadedWhenPOSTRefused(t *testing.T) {
 			p := newTestProducerWithKMS(apiServer.URL, kmsServer.URL)
 			dataFile := writeNDJSON(t, 5)
 
-			opts := NewUploadOptions("post-refused-test")
+			opts := testUploadOptions("post-refused-test")
 			_, err := p.UploadDataset(context.Background(), dataFile, opts)
 			if err == nil {
 				t.Fatal("expected UploadDataset to return an error when the POST is refused")
@@ -431,7 +431,7 @@ func TestUploadDataset_ProcessesBeforePOST_SoRealSizesReachTheBody(t *testing.T)
 	defer kmsServer.Close()
 
 	p := newTestProducerWithKMS(apiServer.URL, kmsServer.URL)
-	opts := NewUploadOptions("real-sizes-test")
+	opts := testUploadOptions("real-sizes-test")
 
 	ds, err := p.UploadDataset(context.Background(), dataFile, opts)
 	if err != nil {
@@ -580,7 +580,7 @@ func TestCreateDatasetRecord_SizeBytesTopLevel_TracksProcessedBytes(t *testing.T
 		},
 	}
 
-	opts := NewUploadOptions("size-bytes-tracks-processed-test")
+	opts := testUploadOptions("size-bytes-tracks-processed-test")
 	if _, err := p.createDatasetRecord(context.Background(), dataFile, opts, processed); err != nil {
 		t.Fatalf("createDatasetRecord returned error: %v", err)
 	}
@@ -666,7 +666,7 @@ func TestUploadDataset_ExplicitVersionOverride_EndToEnd(t *testing.T) {
 	p := newTestProducerWithKMS(apiServer.URL, kmsServer.URL)
 	dataFile := writeNDJSON(t, 3)
 
-	opts := NewUploadOptions("override-e2e-test")
+	opts := testUploadOptions("override-e2e-test")
 	opts.DatasetOverrides = map[string]any{"version": "1999-12-31"}
 
 	// The create-response's upload_url is deliberately "" (see below); this

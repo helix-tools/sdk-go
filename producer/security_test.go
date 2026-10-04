@@ -46,7 +46,7 @@ func TestProcessFileRejectsParentTraversal(t *testing.T) {
 	_, err := p.processFile(
 		context.Background(),
 		filepath.Join("..", "outside.ndjson"),
-		NewUploadOptions("test-dataset"),
+		testUploadOptions("test-dataset"),
 	)
 	if err == nil {
 		t.Fatal("processFile accepted an input path that escapes its intended directory")

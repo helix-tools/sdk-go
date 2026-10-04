@@ -131,7 +131,7 @@ func TestUploadDataset_CannotDisableEncryptionOrCompression(t *testing.T) {
 			if tc.noKMS {
 				p.KMSKeyID = ""
 			}
-			opts := NewUploadOptions("cannot-disable")
+			opts := testUploadOptions("cannot-disable")
 			tc.mutate(&opts)
 
 			_, err := p.UploadDataset(context.Background(), writeNDJSON(t, 3), opts)
@@ -151,7 +151,7 @@ func TestUploadDataset_CannotDisableEncryptionOrCompression(t *testing.T) {
 // TestUploadDataset_DefaultOptionsStayEncryptedAndCompressed: the defaults are
 // the only mode there is.
 func TestUploadDataset_DefaultOptionsStayEncryptedAndCompressed(t *testing.T) {
-	opts := NewUploadOptions("d")
+	opts := testUploadOptions("d")
 	if !opts.Encrypt || !opts.Compress || opts.CompressionLevel != 6 {
 		t.Fatalf("NewUploadOptions = Encrypt %v Compress %v level %d, want true true 6", opts.Encrypt, opts.Compress, opts.CompressionLevel)
 	}
@@ -169,13 +169,13 @@ func TestUploadDataset_DeprecatedFlagsAreIgnored(t *testing.T) {
 		name string
 		opts func() UploadOptions
 	}{
-		{"zero-value options", func() UploadOptions { return UploadOptions{DatasetName: "zero-value"} }},
+		{"zero-value Encrypt and Compress", func() UploadOptions { return UploadOptions{DatasetName: "zero-value", Description: testDescription} }},
 		{"Encrypt and Compress left false", func() UploadOptions {
-			o := NewUploadOptions("flags-false")
+			o := testUploadOptions("flags-false")
 			o.Encrypt, o.Compress = false, false
 			return o
 		}},
-		{"NewUploadOptions defaults", func() UploadOptions { return NewUploadOptions("defaults") }},
+		{"NewUploadOptions defaults", func() UploadOptions { return testUploadOptions("defaults") }},
 	}
 
 	for _, tc := range cases {
@@ -406,7 +406,7 @@ func TestUploadDataset_AcmeCallPathIsUnchanged(t *testing.T) {
 func TestUploadDataset_TopLevelEncryptionMatchesTSAndPython(t *testing.T) {
 	f := newUploadFixture(t)
 
-	opts := NewUploadOptions("parity-test")
+	opts := testUploadOptions("parity-test")
 	if _, err := f.p.UploadDataset(context.Background(), writeNDJSON(t, 3), opts); err != nil {
 		t.Fatalf("UploadDataset: %v", err)
 	}
@@ -435,7 +435,7 @@ func TestUploadDataset_TopLevelEncryptionMatchesTSAndPython(t *testing.T) {
 func TestUploadDataset_RecordFlagsSurviveAnOverrideThatReplacesMetadata(t *testing.T) {
 	f := newUploadFixture(t)
 
-	opts := NewUploadOptions("replaces-metadata")
+	opts := testUploadOptions("replaces-metadata")
 	opts.DatasetOverrides = map[string]any{"metadata": map[string]any{"owner_note": "kept"}}
 
 	if _, err := f.p.UploadDataset(context.Background(), writeNDJSON(t, 3), opts); err != nil {
@@ -468,7 +468,7 @@ func TestCreateDatasetRecord_FlagsAreAlwaysTrue(t *testing.T) {
 			"compression_enabled":   false,
 		},
 	}
-	if _, err := f.p.createDatasetRecord(context.Background(), writeNDJSON(t, 2), NewUploadOptions("flags-true"), processed); err != nil {
+	if _, err := f.p.createDatasetRecord(context.Background(), writeNDJSON(t, 2), testUploadOptions("flags-true"), processed); err != nil {
 		t.Fatalf("createDatasetRecord: %v", err)
 	}
 
@@ -492,7 +492,7 @@ func TestProcessFile_ResultAlwaysSaysEncryptedAndCompressed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := f.p.processFile(context.Background(), dataFile, NewUploadOptions("p"))
+	got, err := f.p.processFile(context.Background(), dataFile, testUploadOptions("p"))
 	if err != nil {
 		t.Fatalf("processFile: %v", err)
 	}
@@ -577,7 +577,7 @@ func TestUploadDataset_KeyServiceOutageUploadsNothing(t *testing.T) {
 
 	p := newTestProducerWithKMS(api.URL, kmsDown.URL)
 
-	_, err := p.UploadDataset(context.Background(), writeNDJSON(t, 3), NewUploadOptions("kms-down"))
+	_, err := p.UploadDataset(context.Background(), writeNDJSON(t, 3), testUploadOptions("kms-down"))
 	if err == nil || !strings.Contains(err.Error(), "encryption failed") {
 		t.Fatalf("error = %v, want an encryption failure", err)
 	}
@@ -622,7 +622,7 @@ func TestMetadataObject(t *testing.T) {
 // object either.
 func TestCreateDatasetRecord_RefusesNonObjectMetadataOverride(t *testing.T) {
 	f := newUploadFixture(t)
-	opts := NewUploadOptions("bad-metadata")
+	opts := testUploadOptions("bad-metadata")
 	opts.DatasetOverrides = map[string]any{"metadata": []string{"encryption_enabled"}}
 
 	processed := &ProcessedFileData{Data: []byte("x"), Sizes: map[string]any{}}
@@ -638,7 +638,7 @@ func TestCreateDatasetRecord_RefusesNonObjectMetadataOverride(t *testing.T) {
 // metadata override (JSON null) is not a way to send a record without flags.
 func TestUploadDataset_NilMetadataOverrideStillCarriesFlags(t *testing.T) {
 	f := newUploadFixture(t)
-	opts := NewUploadOptions("nil-metadata")
+	opts := testUploadOptions("nil-metadata")
 	opts.DatasetOverrides = map[string]any{"metadata": nil}
 
 	if _, err := f.p.UploadDataset(context.Background(), writeNDJSON(t, 3), opts); err != nil {

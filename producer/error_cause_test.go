@@ -185,7 +185,7 @@ func TestUploadDataset_PresignedUploadCauseNestedTwoLevelsDeep(t *testing.T) {
 	p := newTestProducerWithKMS(apiServer.URL, kmsServer.URL)
 	p.httpClient = &http.Client{Transport: failingPUTTransport{}}
 
-	_, err := p.UploadDataset(context.Background(), writeNDJSON(t, 3), NewUploadOptions("nested-test"))
+	_, err := p.UploadDataset(context.Background(), writeNDJSON(t, 3), testUploadOptions("nested-test"))
 
 	if err == nil {
 		t.Fatal("expected an error")

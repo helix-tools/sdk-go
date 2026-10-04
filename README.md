@@ -131,10 +131,11 @@ func main() {
 		log.Fatalf("producer: %v", err)
 	}
 
-	// Every upload is compressed and encrypted. NewUploadOptions sets both;
-	// setting Encrypt or Compress to false makes UploadDataset return an
-	// error before anything is read or sent.
+	// Every upload is compressed and encrypted. Encrypt and Compress are
+	// ignored, so leave them as NewUploadOptions sets them. DatasetName and a
+	// Description of at least 10 characters are required.
 	opts := producer.NewUploadOptions("customer-records")
+	opts.Description = "Customer records exported from our CRM"
 
 	dataset, err := p.UploadDataset(ctx, "./data/customers.json", opts)
 	if err != nil {
@@ -439,8 +440,8 @@ and not the others, by design:
   in Go. Wrap the call in your own progress reporting if you need it. An object
   that is not encrypted and compressed fails the download. The other SDKs keep
   their option names but reject turning either step off.
-- **`UploadOptions.Encrypt` / `Compress`** exist for source compatibility only:
-  false is an error, as it is in the other SDKs.
+- **`UploadOptions.Encrypt` / `Compress`** exist for source compatibility only
+  and are ignored: every upload is encrypted and compressed, whatever they hold.
 - **Direct subscription** (`subscribe_to_dataset`) and **`update_dataset_data`**
   are Python-only. In Go, request access with `CreateSubscriptionRequest` and
   replace data with `UploadDataset`.
