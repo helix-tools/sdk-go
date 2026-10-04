@@ -31,7 +31,7 @@ func TestProcessFileCompression(t *testing.T) {
 		KMSKeyID:   "",  // No encryption for this test
 	}
 
-	opts := NewUploadOptions("test-dataset")
+	opts := testUploadOptions("test-dataset")
 	opts.Encrypt = false // Deprecated and ignored: encryption is always on.
 	opts.Compress = true
 	opts.CompressionLevel = 6
@@ -63,7 +63,7 @@ func TestProcessFileEmptyFile(t *testing.T) {
 		KMSKeyID:   "test-kms-key", // Set KMS key to pass encryption check
 	}
 
-	opts := NewUploadOptions("test-dataset")
+	opts := testUploadOptions("test-dataset")
 	
 	_, err := p.processFile(context.Background(), emptyFile, opts)
 	if err == nil {
@@ -82,7 +82,7 @@ func TestProcessFileMissingFile(t *testing.T) {
 		KMSKeyID:   "test-kms-key", // Set KMS key to pass encryption check
 	}
 
-	opts := NewUploadOptions("test-dataset")
+	opts := testUploadOptions("test-dataset")
 	
 	_, err := p.processFile(context.Background(), "/nonexistent/file.ndjson", opts)
 	if err == nil {
@@ -210,7 +210,7 @@ func TestUploadDatasetValidation(t *testing.T) {
 	}
 
 	t.Run("deprecated Encrypt=false is ignored", func(t *testing.T) {
-		opts := NewUploadOptions("test-dataset")
+		opts := testUploadOptions("test-dataset")
 		opts.Encrypt = false
 
 		_, err := p.UploadDataset(context.Background(), testFile, opts)
@@ -226,7 +226,7 @@ func TestUploadDatasetValidation(t *testing.T) {
 	})
 
 	t.Run("deprecated Compress=false is ignored", func(t *testing.T) {
-		opts := NewUploadOptions("test-dataset")
+		opts := testUploadOptions("test-dataset")
 		opts.Compress = false
 
 		_, err := p.UploadDataset(context.Background(), testFile, opts)
@@ -242,7 +242,7 @@ func TestUploadDatasetValidation(t *testing.T) {
 	})
 
 	t.Run("encryption key required for encryption", func(t *testing.T) {
-		opts := NewUploadOptions("test-dataset")
+		opts := testUploadOptions("test-dataset")
 		opts.Encrypt = true
 		// p.KMSKeyID is empty
 

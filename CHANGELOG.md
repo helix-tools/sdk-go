@@ -1,6 +1,18 @@
 # Changelog
 
-## 2026-10-03 (v2.21.0)
+## 2026-10-04 (v2.21.0)
+
+### Changed
+- `producer.UploadDataset` returns a `*producer.ValidationError`, before the file
+  is read or any request is sent, when `UploadOptions.Description` is shorter
+  than 10 characters after surrounding spaces are trimmed. The API already
+  refused such a description, so the failure now comes sooner.
+
+### Fixed
+- The `UploadOptions` field docs and the README said a zero-value
+  `UploadOptions` works. It does not: `DatasetName` and a `Description` of at
+  least 10 characters are required. The README also said setting `Encrypt` or
+  `Compress` to false returns an error. Both fields are ignored.
 
 ### Changed
 - `producer.UploadDataset` always encrypts and compresses. The deprecated

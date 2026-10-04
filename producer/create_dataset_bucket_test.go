@@ -41,7 +41,7 @@ func TestCreateDatasetRecord_OmitsS3BucketNameByDefault(t *testing.T) {
 		t.Fatalf("write temp file: %v", err)
 	}
 
-	opts := NewUploadOptions("e2e-bucket-test")
+	opts := testUploadOptions("e2e-bucket-test")
 	opts.Category = "general"
 	if _, err := p.createDatasetRecord(context.Background(), dataFile, opts, fakeProcessedFileData()); err != nil {
 		t.Fatalf("createDatasetRecord returned error: %v", err)
@@ -105,7 +105,7 @@ func TestCreateDatasetRecord_S3BucketNameOverridePassesThrough(t *testing.T) {
 
 	p := newTestProducer(server.URL)
 
-	opts := NewUploadOptions("bucket-override-test")
+	opts := testUploadOptions("bucket-override-test")
 	opts.DatasetOverrides = map[string]any{"s3_bucket_name": "caller-chosen-bucket"}
 	if _, err := p.createDatasetRecord(context.Background(), writeNDJSON(t, 3), opts, fakeProcessedFileData()); err != nil {
 		t.Fatalf("createDatasetRecord returned error: %v", err)
@@ -146,7 +146,7 @@ func TestCreateDatasetRecord_IncludesVisibility(t *testing.T) {
 		t.Fatalf("write temp file: %v", err)
 	}
 
-	opts := NewUploadOptions("e2e-visibility-test")
+	opts := testUploadOptions("e2e-visibility-test")
 	if _, err := p.createDatasetRecord(context.Background(), dataFile, opts, fakeProcessedFileData()); err != nil {
 		t.Fatalf("createDatasetRecord returned error: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestCreateDatasetRecord_VisibilityOverridable(t *testing.T) {
 		t.Fatalf("write temp file: %v", err)
 	}
 
-	opts := NewUploadOptions("e2e-visibility-override-test")
+	opts := testUploadOptions("e2e-visibility-override-test")
 	opts.DatasetOverrides = map[string]any{"visibility": "public"}
 	if _, err := p.createDatasetRecord(context.Background(), dataFile, opts, fakeProcessedFileData()); err != nil {
 		t.Fatalf("createDatasetRecord returned error: %v", err)

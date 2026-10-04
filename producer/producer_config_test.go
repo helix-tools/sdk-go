@@ -284,7 +284,7 @@ func TestNewProducer_UsesTheAPIEncryptionKey(t *testing.T) {
 		t.Errorf("producer-config request is not signed with the caller's credentials: Authorization=%q", auth)
 	}
 
-	if _, err := p.UploadDataset(context.Background(), writeNDJSON(t, 3), NewUploadOptions("api-key-upload")); err != nil {
+	if _, err := p.UploadDataset(context.Background(), writeNDJSON(t, 3), testUploadOptions("api-key-upload")); err != nil {
 		t.Fatalf("UploadDataset: %v", err)
 	}
 
@@ -367,7 +367,7 @@ func TestNewProducer_UnresolvedKeyFailsUploadsClosed(t *testing.T) {
 				t.Errorf("warning leaks the server's error body: %q", out)
 			}
 
-			_, err := p.UploadDataset(context.Background(), writeNDJSON(t, 3), NewUploadOptions("no-key"))
+			_, err := p.UploadDataset(context.Background(), writeNDJSON(t, 3), testUploadOptions("no-key"))
 			if err == nil || !strings.Contains(err.Error(), "no encryption key configured") {
 				t.Fatalf("UploadDataset error = %v, want the missing-encryption-key error", err)
 			}
