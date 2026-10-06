@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-06 (v2.22.1)
+
+### Fixed
+- Shipped comments and tests no longer reference internal planning documents,
+  an internal tool name or a personal handle. No code behaviour changes.
+
 ## 2026-10-06 (v2.22.0)
 
 ### Changed
