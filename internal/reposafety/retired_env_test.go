@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -58,9 +59,9 @@ func TestRetiredEnvNameNotInPublishedFiles(t *testing.T) {
 }
 
 // TestNoRetiredEnvReadsInSources fails if any non-test Go source in the
-// published main module reads the retired variable through os.Getenv or
-// os.LookupEnv. Test files are not read here; their text is covered by
-// TestRetiredEnvNameNotInPublishedFiles.
+// published main module reads the retired variable through the os or syscall
+// Getenv or LookupEnv, under any import name. Test files are not read here;
+// their text is covered by TestRetiredEnvNameNotInPublishedFiles.
 func TestNoRetiredEnvReadsInSources(t *testing.T) {
 	root := repoRoot(t)
 
@@ -97,8 +98,9 @@ func TestNoRetiredEnvReadsInSources(t *testing.T) {
 }
 
 // retiredEnvReads takes the non-test Go files of one package (file name to
-// source) and returns the position of every os.Getenv and os.LookupEnv call
-// whose name argument can reach the retired variable. A call counts when:
+// source) and returns the position of every environment read, through os or
+// syscall under any local name (see envQualifiers), whose name argument can
+// reach the retired variable. A call counts when:
 //   - its string pieces, joined in source order, spell the name
 //     ("HELIX_SSM_" + "CUSTOMER_PREFIX");
 //   - its string pieces carry two or more distinct fragments, which catches
@@ -137,9 +139,10 @@ func retiredEnvReads(files map[string][]byte) ([]string, error) {
 
 	var hits []string
 	for _, file := range parsed {
+		qualifiers := envQualifiers(file)
 		ast.Inspect(file, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
-			if !ok || !isEnvLookup(call) {
+			if !ok || !isEnvLookup(call, qualifiers) {
 				return true
 			}
 			arg := call.Args[0]
@@ -164,14 +167,43 @@ func retiredEnvReads(files map[string][]byte) ([]string, error) {
 	return hits, nil
 }
 
-// isEnvLookup reports whether call is os.Getenv(x) or os.LookupEnv(x).
-func isEnvLookup(call *ast.CallExpr) bool {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || len(call.Args) != 1 {
+// envPackagePaths are the stdlib packages whose Getenv and LookupEnv read the
+// process environment.
+var envPackagePaths = []string{"os", "syscall"}
+
+// envQualifiers returns the identifiers under which file reaches an environment
+// reader: the names os and syscall, which always count, plus every local name
+// the file binds to one of those packages, and "." for a dot-import. The
+// always-counted names fail closed: a non-stdlib package bound to os is flagged.
+func envQualifiers(file *ast.File) map[string]bool {
+	qualifiers := map[string]bool{"os": true, "syscall": true}
+	for _, imp := range file.Imports {
+		path, err := strconv.Unquote(imp.Path.Value)
+		if err != nil || !slices.Contains(envPackagePaths, path) || imp.Name == nil {
+			continue
+		}
+		if imp.Name.Name != "_" {
+			qualifiers[imp.Name.Name] = true
+		}
+	}
+	return qualifiers
+}
+
+// isEnvLookup reports whether call reads the environment: x.Getenv(k) or
+// x.LookupEnv(k) with x in qualifiers, or a bare Getenv or LookupEnv when the
+// file dot-imports os or syscall.
+func isEnvLookup(call *ast.CallExpr, qualifiers map[string]bool) bool {
+	if len(call.Args) != 1 {
 		return false
 	}
-	pkg, ok := sel.X.(*ast.Ident)
-	return ok && pkg.Name == "os" && (sel.Sel.Name == "Getenv" || sel.Sel.Name == "LookupEnv")
+	switch fn := call.Fun.(type) {
+	case *ast.SelectorExpr:
+		pkg, ok := fn.X.(*ast.Ident)
+		return ok && qualifiers[pkg.Name] && (fn.Sel.Name == "Getenv" || fn.Sel.Name == "LookupEnv")
+	case *ast.Ident:
+		return qualifiers["."] && (fn.Name == "Getenv" || fn.Name == "LookupEnv")
+	}
+	return false
 }
 
 // distinctFragments counts the retired-name fragments that appear, upper-cased,
@@ -252,6 +284,48 @@ func TestRetiredEnvReadDetector(t *testing.T) {
 			t.Errorf("retiredEnvReads = %d hit(s) %v, want 1", len(hits), hits)
 		}
 	})
+}
+
+// TestRetiredEnvReadResolvesImports pins that an environment read is found by
+// what the file imports, not only by the spelling os: the stdlib package may
+// be bound to another name or dot-imported, and the read must still be caught.
+func TestRetiredEnvReadResolvesImports(t *testing.T) {
+	fragmentsExpr := `strings.Join([]string{"{1}", "{2}", "{3}", "{4}"}, "_")`
+
+	source := func(imports, stmt string) map[string][]byte {
+		return map[string][]byte{"p.go": []byte(fillFragments("package p\n\nimport (\n\t\"strings\"\n" + imports + ")\n\n" +
+			"func read(key string) {\n\t" + stmt + "\n\t_ = strings.ToUpper(key)\n}\n"))}
+	}
+
+	cases := []struct {
+		name    string
+		imports string
+		stmt    string
+		want    int
+	}{
+		{"aliased os import, Getenv, joined fragments", "\tstdos \"os\"\n", `_ = stdos.Getenv(` + fragmentsExpr + `)`, 1},
+		{"aliased os import, LookupEnv, joined fragments", "\tstdos \"os\"\n", `_, _ = stdos.LookupEnv(` + fragmentsExpr + `)`, 1},
+		{"aliased os import, literal prefix plus variable", "\tstdos \"os\"\n", `_ = stdos.Getenv("{1}_{2}_" + key)`, 1},
+		{"aliased os import, name built once into a variable", "\tstdos \"os\"\n", "n := " + fragmentsExpr + "\n\t_ = stdos.Getenv(n)", 1},
+		{"aliased syscall import, joined fragments", "\tsc \"syscall\"\n", `_, _ = sc.Getenv(` + fragmentsExpr + `)`, 1},
+		{"dot-imported os, bare Getenv", "\t. \"os\"\n", `_ = Getenv(` + fragmentsExpr + `)`, 1},
+		{"dot-imported os, bare LookupEnv", "\t. \"os\"\n", `_, _ = LookupEnv(` + fragmentsExpr + `)`, 1},
+		{"aliased os import, unrelated joined words", "\tstdos \"os\"\n", `_ = stdos.Getenv(strings.Join([]string{"HELIX", "API", "ENDPOINT"}, "_"))`, 0},
+		// Decision: the name os always counts as the environment package, so a
+		// non-stdlib package bound to os is flagged. Over-flagging fails closed.
+		{"non-stdlib package bound to os is flagged", "\tos \"example.com/notstdlib/os\"\n", `_ = os.Getenv(` + fragmentsExpr + `)`, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hits, err := retiredEnvReads(source(tc.imports, tc.stmt))
+			if err != nil {
+				t.Fatalf("retiredEnvReads: %v", err)
+			}
+			if len(hits) != tc.want {
+				t.Errorf("retiredEnvReads(%s) = %d hit(s) %v, want %d", tc.stmt, len(hits), hits, tc.want)
+			}
+		})
+	}
 }
 
 // TestMentionsRetiredEnvName pins the casing-insensitive text match behind
