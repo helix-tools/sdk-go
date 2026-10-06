@@ -61,7 +61,7 @@ func sealEnvelope(data []byte) []byte {
 }
 
 // encryptedObject is the exact object a conforming upload leaves in storage:
-// gzip first, then the envelope.
+// compressed first, then the envelope.
 func encryptedObject(plaintext []byte) []byte {
 	return sealEnvelope(gzipBytes(plaintext))
 }

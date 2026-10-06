@@ -163,17 +163,17 @@ func TestDownloadDataset_RejectsObjectNotEncryptedAndCompressed(t *testing.T) {
 		{"plaintext ndjson", plaintext, errNotEncrypted, "", 0},
 		{"plaintext shorter than the header", []byte("hi"), errNotEncrypted, "", 0},
 		{"zero-byte object", []byte{}, errNotEncrypted, "", 0},
-		{"gzip only, never encrypted", gzipBytes(plaintext), errNotEncrypted, "", 0},
+		{"compressed only, never encrypted", gzipBytes(plaintext), errNotEncrypted, "", 0},
 		{"envelope with a zero-length wrapped key", zeroKeyLen, errNotEncrypted, "", 0},
 		{"envelope cut short", truncated, errNotEncrypted, "", 0},
 		{"encrypted but never compressed", sealEnvelope(plaintext), errNotCompressed, "", 1},
-		// A cut-short gzip stream fails mid-decompress, not at the gzip
+		// A cut-short compressed stream fails mid-decompress, not at the
 		// header check, so it is a "decompression failed" error like the
-		// trailing-garbage case below — never the raw stdlib flate/gzip
+		// trailing-garbage case below — never the raw stdlib decompression library
 		// text (see TestDecompressData_UpstreamCauseNeverLeaksIntoMessage
 		// for the clean-message-plus-cause contract this pins).
-		{"encrypted gzip cut short", sealEnvelope(gzipBytes(plaintext)[:20]), nil, "decompression failed", 1},
-		{"encrypted gzip with garbage after it", sealEnvelope(append(gzipBytes(plaintext), []byte("trailing garbage")...)), nil, "decompression failed", 1},
+		{"encrypted compressed data cut short", sealEnvelope(gzipBytes(plaintext)[:20]), nil, "decompression failed", 1},
+		{"encrypted compressed data with trailing garbage", sealEnvelope(append(gzipBytes(plaintext), []byte("trailing garbage")...)), nil, "decompression failed", 1},
 		{"ciphertext tampered with", tampered, nil, "decryption failed", 1},
 	}
 
@@ -238,10 +238,10 @@ func TestDecryptData_HugeKeyLengthDoesNotAllocate(t *testing.T) {
 	}
 }
 
-// TestDecryptData_WithoutKMSClientIsAnError: a Consumer built by hand has no
+// TestDecryptData_WithoutKeyServiceClientIsAnError: a Consumer built by hand has no
 // KMS client. Decryption is mandatory, so that is an error, not a nil-pointer
 // panic and not a skipped step.
-func TestDecryptData_WithoutKMSClientIsAnError(t *testing.T) {
+func TestDecryptData_WithoutKeyServiceClientIsAnError(t *testing.T) {
 	c := &Consumer{}
 
 	_, err := c.decryptData(context.Background(), encryptedObject([]byte("x")))
@@ -252,7 +252,7 @@ func TestDecryptData_WithoutKMSClientIsAnError(t *testing.T) {
 
 // TestDownloadOutcome_RefusedObject_ReportsCategory: a refused object is
 // reported through the outcome callback like any other download failure —
-// kms_decrypt for a bad envelope, decompress for a missing gzip layer.
+// kms_decrypt for a bad envelope, decompress for a missing compression layer.
 func TestDownloadOutcome_RefusedObject_ReportsCategory(t *testing.T) {
 	plaintext := []byte("just some plaintext rows\n")
 

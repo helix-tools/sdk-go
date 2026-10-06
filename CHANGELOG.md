@@ -27,6 +27,15 @@
   requested dataset. Empty when the request is for all datasets, when the
   dataset no longer exists, or when the caller is not allowed to see it.
 
+### Fixed
+- Shipped comments, docs and two human-readable error messages no longer name
+  internal infrastructure. A failed credentials-provider setup now reads
+  `failed to create the credentials provider`, and a failed cipher setup reads
+  `failed to prepare encryption`. Error values that code matches
+  with `errors.Is`, exported names and wire behaviour are unchanged. A guard
+  test in `internal/reposafety` fails CI if a published Go comment, string or
+  Markdown file names internal infrastructure again.
+
 ## 2026-10-04 (v2.21.0)
 
 ### Changed
@@ -131,10 +140,10 @@
 ## 2026-10-01 (v2.20.0)
 
 ### Added
-- API keys as an alternative way to bootstrap STS session credentials:
+- API keys as an alternative way to bootstrap short-lived session credentials:
   set `types.Config.APIKey` (created in the Helix portal under API Keys)
   instead of your AWS access keys. With no `CredentialMode` set, a
-  configured `APIKey` now resolves to STS mode automatically (bootstrapped
+  configured `APIKey` now resolves to `sts` mode automatically (bootstrapped
   with the key, no AWS access keys needed); `CredentialMode:
   types.CredentialModeStatic` or `types.CredentialModeSTS` with AWS access
   keys set keep working exactly as before. If both an API key and AWS
@@ -293,7 +302,7 @@
 - **`UploadDataset`'s create-dataset request sends a top-level `encryption`
   field, matching the TypeScript and Python SDKs.** Without it, the API's
   `extractBool` dropped `metadata.encryption_enabled` from the stored catalog
-  record — confirmed against live Mongo records where Go's record had only
+  record — confirmed against live stored records where Go's record had only
   `metadata.compression_enabled` while TS's and Python's had both flags for an
   identical upload. `metadata.encryption_enabled`/`compression_enabled` were
   already sent and are unchanged.
@@ -376,10 +385,10 @@
   set on every request `Consumer` and `Producer` sign and send to
   `APIEndpoint` (dataset CRUD, subscriptions, download-outcome callbacks,
   ...), on every `agent.Client` request, and on the credential-broker mint
-  request (`credentials.Provider`'s STS session POST), using the SDK's
+  request (`credentials.Provider`'s session-mint POST), using the SDK's
   actual resolved module version when available (falling back to a coarser
   default in dev builds). It is intentionally excluded from the two calls
-  this SDK does not control the signature of — the presigned S3
+  this SDK does not control the signature of — the presigned
   download/upload — and is never part of the SigV4 `SignedHeaders` set on
   the calls that do carry it.
 - **`Subscription` usage-counter fields (additive, minor).**
@@ -492,9 +501,9 @@
   in `metadata`, defaulting to `0` when analysis fails, matching v1.3.11
   instead of omitting the key), and `metadata.file_format`/`.encoding`
   (`"json"`/`"utf-8"` defaults, only filled if the caller didn't already set
-  them). The POST still happens before any bytes reach S3 — file processing
-  has no network side effect beyond one local KMS `Encrypt` call — so the
-  race the original POST-first refactor closed (an S3 event firing before
+  them). The POST still happens before any bytes reach storage — file processing
+  has no network side effect beyond one local encryption step — so the
+  race the original POST-first refactor closed (a storage event firing before
   the catalog record exists) is unaffected. `DatasetOverrides` still wins
   over every computed value, including an explicit `version: ""`, matching
   v1.3.11's unconditional `deepMergeMaps(payload, overrideCopy)`.
@@ -507,7 +516,7 @@
   dropped this field entirely, so every re-upload zeroed the catalog's
   `total_size_bytes` — observed in production going from `12,248,326` to `0`
   for a real dataset. `size_bytes` is now `int64(len(processed.Data))`, the
-  exact byte length of the object PUT to S3 (compressed, then encrypted —
+  exact byte length of the object uploaded to storage (compressed, then encrypted —
   both mandatory), matching what the Python and TypeScript SDKs already send.
 - `InviteConsumer`'s wire body now always sends the top-level `"tier"` key
   as `"free"` when `InviteConsumerInput.Tier` is left unset, instead of
@@ -591,12 +600,12 @@
 ## 2026-07-20 (v2.8.2)
 
 ### Documentation
-- docs: unify README to the canonical cross-SDK template -- restructured README.md into the 12 section names/order shared with the TypeScript and Go SDK READMEs (Overview, Installation, Authentication & Credentials incl. an STS subsection, Quickstart -- Producer, Quickstart -- Consumer, Marketplace, Partner Invites, Payouts (Stripe Connect), Versioning & Changelog, Support, License). Split the previous combined Marketplace section's payout-onboarding snippet into a dedicated Payouts (Stripe Connect) section; added an `UpdateDataset` snippet to the Producer quickstart. Moved the `/v2` module-path caveat out of Installation and into Versioning & Changelog. `producer/example_test.go` updated in lockstep (added `Example_payouts`, split from `Example_marketplace`; added the `UpdateDataset` call to `Example_quickstart`) so `go vet`/`go test` continue to compile every README snippet against the real API. No behavior change; corrected the Support section's documentation link to https://dev.helix.tools (was the wrong https://docs.helix.tools domain).
+- docs: unify README to the canonical cross-SDK template -- restructured README.md into the 12 section names/order shared with the TypeScript and Go SDK READMEs (Overview, Installation, Authentication & Credentials incl. a short-lived-session subsection, Quickstart -- Producer, Quickstart -- Consumer, Marketplace, Partner Invites, Payouts (Stripe Connect), Versioning & Changelog, Support, License). Split the previous combined Marketplace section's payout-onboarding snippet into a dedicated Payouts (Stripe Connect) section; added an `UpdateDataset` snippet to the Producer quickstart. Moved the `/v2` module-path caveat out of Installation and into Versioning & Changelog. `producer/example_test.go` updated in lockstep (added `Example_payouts`, split from `Example_marketplace`; added the `UpdateDataset` call to `Example_quickstart`) so `go vet`/`go test` continue to compile every README snippet against the real API. No behavior change; corrected the Support section's documentation link to https://dev.helix.tools (was the wrong https://docs.helix.tools domain).
 
 ## 2026-07-20 (v2.8.1)
 
 ### Documentation
-- docs: content-policy scrub -- removed AWS-internals language (S3 bucket / KMS key / SSM resolution, KMS decrypt) from the README's Producer quickstart note and Credentials section, replacing it with capability-level language (authentication and destination configuration, decryption, handled automatically). No behavior change.
+- docs: content-policy scrub -- removed internal-infrastructure language from the README's Producer quickstart note and Credentials section, replacing it with capability-level language (authentication and destination configuration, decryption, handled automatically). No behavior change.
 
 ## 2026-07-20 (v2.8.0)
 
@@ -739,9 +748,9 @@
 ## 2026-07-11 (v2.6.0)
 
 ### Added
-- **STS session credentials (opt-in)**. New
+- **Short-lived session credentials (opt-in)**. New
   `credentials` package (`github.com/helix-tools/sdk-go/v2/credentials`)
-  implements an `aws.CredentialsProvider` that mints short-lived AWS STS
+  implements an `aws.CredentialsProvider` that mints short-lived
   session credentials from the Helix Connect credential broker (`POST
   /v1/credentials/session`, contract frozen in sdk-schemas #17), wrapped in
   `aws.CredentialsCache` for auto-refresh (proactive refresh at ~2/3 of the
@@ -836,9 +845,9 @@
   - `s3_bucket_name` + `access_tier`: required by
     `ValidateCreateDatasetRequest`; previously a 400.
   - `s3_key`: an absent key defaulted to
-    `datasets/{producer_id}/{dataset_id}`, but the s3-event-processor
+    a per-producer, per-dataset location, but the ingestion processor
     derives `dataset_name` from the key's first segment — now
-    dataset-NAME-keyed (`datasets/{name}/data.ndjson.gz`), matching the
+    dataset-NAME-keyed, matching the
     Python/TS SDKs.
   - `metadata.encryption_enabled`/`compression_enabled`: absent meant
     `Consumer.DownloadDataset` skipped decrypt/decompress, corrupting the
@@ -984,7 +993,7 @@
   for the bytes field. No prod behavior change for non-zero downloads;
   receivers see `bytes_downloaded=0` instead of absent on legal 0-byte
   successes and on early-failure error paths. The schema's "persisted
-  only when non-zero" rule continues to apply server-side at the Mongo
+  only when non-zero" rule continues to apply server-side at the
   upsert layer (see `dataset_download_event.schema.json`), so zero-value
   records do not pollute the dashboard's persisted history.
 - **`SDKVersion` constant synced to module tag**: The constant had
@@ -1035,7 +1044,7 @@
   on a successful `POST /v1/subscription-requests`, so before this fix every
   real `Consumer.CreateSubscriptionRequest` call surfaced a fake
   `"API request failed: 201"` error to the caller even though the request
-  WAS persisted in Mongo. The previous test suite mocked 200 from `httptest`,
+  WAS persisted. The previous test suite mocked 200 from `httptest`,
   masking the bug. Live-verified against `https://api-go.helix.tools` with
   a consumer (consumer) credentials — request created with status `pending`.
 
@@ -1087,7 +1096,7 @@
 
 ### Fixed
 - **SDK Parity - Dataset ID**: Removed timestamp from dataset ID generation. IDs are now `{producer_id}-{slugified_name}` instead of `{producer_id}-{slugified_name}-{timestamp}`. This matches Portal behavior and prevents duplicate datasets when uploading the same dataset multiple times.
-- **SDK Parity - S3 Bucket Field**: Removed redundant `s3_bucket` field from dataset payload. Now only sends `s3_bucket_name` which is what the Go API expects. This fixes MongoDB field naming mismatch issues.
+- **SDK Parity - Storage Location Field**: Removed redundant `s3_bucket` field from dataset payload. Now only sends `s3_bucket_name` which is what the Go API expects. This fixes field naming mismatch issues.
 
 ## 2026-01-03
 

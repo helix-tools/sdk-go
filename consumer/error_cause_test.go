@@ -108,7 +108,7 @@ func TestValidateCredentials_NegativeControl(t *testing.T) {
 // decryptData (KMS Decrypt).
 // ----------------------------------------------------------------------------
 
-func TestDecryptData_KMSCauseNeverLeaksIntoMessage(t *testing.T) {
+func TestDecryptData_KeyServiceCauseNeverLeaksIntoMessage(t *testing.T) {
 	c := useFakeKMS(newTestConsumer("https://objects.test"), "", &http.Client{Transport: kmsARNTransport{}})
 
 	_, err := c.decryptData(context.Background(), encryptedObject([]byte("row\n")))
@@ -137,11 +137,11 @@ func (kmsARNTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	}, nil
 }
 
-// TestDownloadDataset_KMSCauseNeverLeaksIntoMessage is the end-to-end version
+// TestDownloadDataset_KeyServiceCauseNeverLeaksIntoMessage is the end-to-end version
 // of the test above: the exact customer-visible error DownloadDataset returns
 // for a KMS AccessDenied must stay clean too, not just the internal
 // decryptData helper.
-func TestDownloadDataset_KMSCauseNeverLeaksIntoMessage(t *testing.T) {
+func TestDownloadDataset_KeyServiceCauseNeverLeaksIntoMessage(t *testing.T) {
 	client := &http.Client{Transport: downloadKMSDeniedTransport{}}
 	c := newTestConsumer("https://objects.test")
 	c.httpClient = client
@@ -328,12 +328,12 @@ func TestDownloadOutcome_ErrorMessageDoesNotLeakUpstreamCause(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
-// decompressData (gzip).
+// decompressData (compressed).
 // ----------------------------------------------------------------------------
 
 // TestDecompressData_TruncatedStreamCauseNeverLeaksIntoMessage is the
-// bypass/regression test for the "encrypted gzip cut short" case: a
-// TRUNCATED (but header-valid) gzip stream fails inside io.ReadAll, not at
+// bypass/regression test for the "encrypted compressed data cut short" case: a
+// TRUNCATED (but header-valid) compressed stream fails inside io.ReadAll, not at
 // gzip.NewReader, so it must go through the SAME clean-message-plus-cause
 // path as any other decompression failure — not surface the raw
 // io.ErrUnexpectedEOF text the way the pre-fix code did.
@@ -361,7 +361,7 @@ func TestDecompressData_TruncatedStreamCauseNeverLeaksIntoMessage(t *testing.T) 
 // TestDecompressData_NotCompressed_SentinelAndCauseBothReachable pins that
 // errNotCompressed — an EXISTING exported-package sentinel other code and
 // callers use errors.Is against — keeps matching after the fix, while the
-// raw gzip header-parse error is ALSO reachable for debugging, and never
+// raw compression header-parse error is ALSO reachable for debugging, and never
 // printed into the message.
 func TestDecompressData_NotCompressed_SentinelAndCauseBothReachable(t *testing.T) {
 	c := newTestConsumer("https://objects.test")

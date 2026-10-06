@@ -67,7 +67,7 @@ func main() {
 	}
 	fmt.Printf("✅ Producer SDK initialized\n")
 	fmt.Printf("   Customer ID: %s\n", prod.CustomerID)
-	fmt.Printf("   KMS Key: %s\n\n", prod.KMSKeyID)
+	fmt.Printf("   Encryption key configured: %s\n\n", yesNo(prod.KMSKeyID))
 
 	// Step 2: Create test dataset file
 	fmt.Println("Step 2: Create Test Dataset")
@@ -129,7 +129,7 @@ func main() {
 
 	fmt.Printf("✅ Dataset uploaded successfully\n")
 	fmt.Printf("   Dataset ID: %s\n", dataset.ID)
-	fmt.Printf("   S3 Key: %s\n", dataset.S3Key)
+	fmt.Printf("   Object stored: %s\n", yesNo(dataset.S3Key))
 	fmt.Printf("   Size: %d bytes\n\n", dataset.SizeBytes)
 
 	// Step 4: Wait a moment for API consistency
@@ -176,9 +176,9 @@ func main() {
 	fmt.Println("Summary:")
 	fmt.Println("  ✅ Producer SDK initialized")
 	fmt.Println("  ✅ Test dataset created (328 bytes)")
-	fmt.Println("  ✅ Compression: Working (gzip level 9)")
-	fmt.Println("  ✅ Encryption: Working (KMS + AES-256-GCM)")
-	fmt.Println("  ✅ Dataset uploaded to S3")
+	fmt.Println("  ✅ Compression: Working (level 9)")
+	fmt.Println("  ✅ Encryption: Working")
+	fmt.Println("  ✅ Dataset uploaded to storage")
 	fmt.Println("  ✅ Dataset registered in catalog")
 	fmt.Println("  ✅ Consumer SDK initialized")
 	fmt.Println("  ✅ Consumer can list datasets")
@@ -192,4 +192,13 @@ func main() {
 	if err := os.Remove(testFilePath); err != nil {
 		fmt.Printf("⚠️ Failed to remove test file: %v\n", err)
 	}
+}
+
+// yesNo reports whether a value is set, so the run output confirms that a key
+// or object exists without printing the value itself.
+func yesNo(v string) string {
+	if v == "" {
+		return "no"
+	}
+	return "yes"
 }

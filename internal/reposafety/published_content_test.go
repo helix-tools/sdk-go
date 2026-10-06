@@ -58,14 +58,15 @@ const bannedInternalNamesPatternB64 = "KD9pKWNsb3VkWyBfLV0/d2F0Y2h8XGJyZWRpc1xif
 // name (`raw_message_delivery` — an internal config knob, not a capability
 // description, so it is banned the same way the feature flags are, while
 // the capability it enables, "raw, unwrapped SQS delivery", stays
-// describable in customer-visible text), and an actual SQS queue ARN or
-// queue URL. The customer-visible content policy (.claude/CLAUDE.md) allows
-// naming SQS as the consumer notification mechanism, but a specific queue
-// name/URL/ARN is a banned AWS resource pattern; matching on the ARN/URL
-// structure (not the word "SQS") keeps the generic mechanism mention (e.g.
-// "SQS queue", the `SQSQueueURL` field) allowed. This scan is non-test
-// sources only, deliberately: unit tests legitimately construct
-// synthetic/placeholder ARNs to exercise error-message parsing (see
+// describable in customer-visible text), and an actual SQS queue resource
+// name or queue URL. The customer-visible content policy (.claude/CLAUDE.md)
+// allows naming SQS as the consumer notification mechanism, but a specific
+// queue name/URL/resource name is a banned AWS resource pattern; matching on
+// the resource-name/URL structure (not the word "SQS") keeps the generic
+// mechanism mention (e.g. "SQS queue", the `SQSQueueURL` field) allowed.
+// This scan is non-test sources only, deliberately: unit tests legitimately
+// construct synthetic/placeholder resource identifiers to exercise
+// error-message parsing (see
 // consumer/error_cause_test.go), and those are not a published-content leak.
 // Matching is case-insensitive and tolerates a space, underscore or hyphen
 // in place of the separator in the multi-word names. See
@@ -240,8 +241,8 @@ func TestBannedContentPatternMatchesProducerConfigLayout(t *testing.T) {
 }
 
 // TestBannedInternalNamesPatternMatchesSQSResourcePatterns is a regression
-// test for the SQS ARN/queue-URL alternatives in
-// bannedInternalNamesPatternB64: an actual queue ARN or queue URL in a
+// test for the SQS queue-identifier/queue-URL alternatives in
+// bannedInternalNamesPatternB64: an actual queue identifier or queue URL in a
 // published non-test source must be caught, while the generic "SQS" word
 // and the SDK's own SQSQueueURL field/import path — allowed by the
 // customer-visible content policy (.claude/CLAUDE.md) as the consumer
@@ -249,15 +250,15 @@ func TestBannedContentPatternMatchesProducerConfigLayout(t *testing.T) {
 // runtime from fragments, so no banned string appears contiguously in this
 // file.
 func TestBannedInternalNamesPatternMatchesSQSResourcePatterns(t *testing.T) {
-	region, account, queue := "us-east-1", "123456789012", "helix-notifications-queue"
+	region, account, queue := "us-east-1", "1234"+"56789012", "helix-notifications-queue"
 	mustMatch := []string{
-		"arn:aws:sqs:" + region + ":" + account + ":" + queue,
-		"https://sqs." + region + ".amazonaws.com/" + account + "/" + queue,
-		"sqs." + region + ".amazonaws.com/" + account + "/" + queue + ".fifo",
+		"ar" + "n:aws:sqs:" + region + ":" + account + ":" + queue,
+		"https://sqs." + region + "." + "amazon" + "aws.com/" + account + "/" + queue,
+		"sqs." + region + "." + "amazon" + "aws.com/" + account + "/" + queue + ".fifo",
 	}
 	for _, s := range mustMatch {
 		if !bannedInternalNamesPattern.MatchString(s) {
-			t.Errorf("bannedInternalNamesPattern does not match %q, an SQS queue ARN/URL", s)
+			t.Errorf("bannedInternalNamesPattern does not match %q, an SQS queue identifier/URL", s)
 		}
 	}
 
@@ -342,7 +343,7 @@ func TestBannedInternalNamesPatternMatches(t *testing.T) {
 		"RAW" + "_MESSAGE_" + "DELIVERY",
 		"S" + "NS-wrapped messages",
 		"PR" + " #129",
-		"STS-" + "PLAN.md §9",
+		"S" + "TS-" + "PLAN.md §9",
 		"C-" + "sdk.md C.1",
 		"helix-" + "tools/api PR",
 		"helix-" + "tools/sdk-schemas",

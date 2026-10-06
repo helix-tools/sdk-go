@@ -16,13 +16,13 @@ type CredentialMode string
 const (
 	// CredentialModeStatic uses the long-lived AWSAccessKeyID/
 	// AWSSecretAccessKey pair directly, byte-identical to the SDK's
-	// pre-STS behavior (github.com/aws/aws-sdk-go-v2/credentials.
+	// pre-existing behavior (github.com/aws/aws-sdk-go-v2/credentials.
 	// NewStaticCredentialsProvider). This is the default: an empty
 	// CredentialMode with static keys set behaves exactly as before this
 	// field existed — no existing caller's behavior changes.
 	CredentialModeStatic CredentialMode = "static"
 
-	// CredentialModeSTS auto-refreshes short-lived AWS STS session
+	// CredentialModeSTS auto-refreshes short-lived session
 	// credentials minted from the Helix Connect credential broker (POST
 	// /v1/credentials/session — see credential_session.schema.json,
 	// sdk-schemas #17). The mint request is bootstrap-authenticated either
@@ -57,14 +57,14 @@ type Config struct {
 	// encoding/json, which never consults fmt.Stringer/GoStringer.
 	APIKey string
 
-	// CredentialMode selects "static" (default; existing AKIA behavior,
+	// CredentialMode selects "static" (default; existing access-key behavior,
 	// byte-identical) or "sts" (auto-refreshing broker-issued session
 	// credentials, opt-in). Left empty, the mode is inferred: APIKey present
 	// -> "sts" via the key; else static keys present -> "static" (preserves
 	// today's behavior exactly); nothing present -> construction error.
 	// "sts" bootstrapped by static keys is never inferred — it must be
 	// requested explicitly, so no existing caller can silently start
-	// minting STS sessions. See credentials.SelectProvider for the full
+	// minting short-lived sessions. See credentials.SelectProvider for the full
 	// matrix.
 	CredentialMode CredentialMode
 }

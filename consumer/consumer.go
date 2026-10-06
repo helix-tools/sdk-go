@@ -61,7 +61,7 @@ const SDKVersion = "2.20.3"
 const SDKLanguage = "go"
 
 // defaultHTTPClientTimeout bounds every Consumer HTTP call (getDataset,
-// getDownloadUrl, S3 download, outcome callback) so a stuck connection
+// getDownloadUrl, the object download, outcome callback) so a stuck connection
 // cannot hang the caller indefinitely. It is intentionally longer than
 // the per-call ctx budget (5s for the outcome callback) so that the
 // per-call deadline still wins where one is supplied; this is purely
@@ -87,7 +87,7 @@ const (
 )
 
 // errNotEncrypted and errNotCompressed mark a downloaded object that does not
-// have the shape every upload produces (gzip, then the encryption envelope).
+// have the shape every upload produces (compressed, then the encryption envelope).
 // A download never passes such an object through: it is an error.
 var (
 	errNotEncrypted  = errors.New("object is not in the encrypted format every upload produces; refusing to return it unencrypted")
@@ -95,7 +95,7 @@ var (
 )
 
 // maxWrappedKeyLen bounds the wrapped-data-key length an object's header may
-// declare. It is the KMS Decrypt CiphertextBlob limit; a larger value cannot
+// declare. It is the size limit on a wrapped key; a larger value cannot
 // be a real envelope.
 const maxWrappedKeyLen = 6144
 
@@ -335,7 +335,7 @@ func NewConsumer(cfg types.Config) (*Consumer, error) {
 	}
 
 	// Select the AWS credentials provider: "static" (default, byte-identical
-	// to the pre-STS behavior) or "sts" (auto-refreshing broker-issued
+	// to the pre-existing behavior) or "sts" (auto-refreshing broker-issued
 	// session credentials, opt-in via cfg.CredentialMode). See
 	// credentials.SelectProvider for the full mode-inference matrix.
 	credProvider, err := stscreds.SelectProvider(cfg.APIEndpoint, cfg)
@@ -383,12 +383,12 @@ func loadAWSConfig(ctx context.Context, region string, credProvider aws.Credenti
 	return awsCfg, nil
 }
 
-// validateCredentials calls AWS STS GetCallerIdentity, an AWS SDK call, to
-// fail fast on bad credentials. On failure the customer sees a clean message
-// while the raw STS/IAM error (which can carry the account ID and an IAM
-// ARN) stays reachable via errors.Unwrap/errors.As for debugging.
+// validateCredentials makes one identity-check call to AWS, to fail fast on
+// bad credentials. On failure the customer sees a clean message while the raw
+// underlying error (which can carry internal account details) stays reachable
+// via errors.Unwrap/errors.As for debugging.
 //
-// In STS mode the call first gets session credentials from the Helix
+// In sts mode the call first gets session credentials from the Helix
 // credential service, so a failure there is reported as what it is — the
 // service could not be reached, or it returned one of its customer-facing
 // messages (e.g. a revoked API key) — never as "invalid AWS credentials",
@@ -479,8 +479,8 @@ func (c *Consumer) GetDownloadURL(ctx context.Context, datasetID string) (*Downl
 // overridden when metadata.encryption_enabled is explicitly present. The create
 // endpoint PROMOTES metadata.encryption_enabled to the top-level `encryption`
 // field and drops it from metadata, so a metadata-only read wrongly sees false
-// and skips decrypt (then gunzips still-encrypted bytes -> "gzip: invalid
-// header"). Mirrors the Python SDK's
+// and skips decrypt (then decompresses still-encrypted bytes and fails on the
+// header). Mirrors the Python SDK's
 // metadata.get("encryption_enabled", dataset.get("encryption", False)).
 //
 // isCompressed is metadata-only (default false): the API keeps
@@ -706,7 +706,7 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 	return nil
 }
 
-// decryptAndDecompress reverses what every upload does — gzip, then encrypt —
+// decryptAndDecompress reverses what every upload does — compress, then encrypt —
 // and is the only way DownloadDataset turns a stored object into dataset
 // bytes: there is no option to skip either step. An object that is not
 // encrypted, or not compressed, is an error, never a pass-through. On failure
@@ -783,7 +783,7 @@ func sanitizeErrorMessage(msg string) string {
 //	[4 bytes big-endian wrapped-key length][wrapped key][16 IV][16 tag][ciphertext]
 //
 // The header comes from an untrusted object, so it is validated against the
-// bytes actually present before anything is allocated or sent to KMS: a
+// bytes actually present before anything is allocated or sent for unwrapping: a
 // plaintext object (its first four bytes read as a length) is refused with
 // errNotEncrypted instead of being passed through.
 func (c *Consumer) decryptData(ctx context.Context, data []byte) ([]byte, error) {
@@ -807,7 +807,7 @@ func (c *Consumer) decryptData(ctx context.Context, data []byte) ([]byte, error)
 	authTag := rest[keyLen+ivLen : keyLen+ivLen+tagLen]
 	encryptedData := rest[keyLen+ivLen+tagLen:]
 
-	// Decrypt data key with KMS.
+	// Unwrap the data key.
 	decryptOut, err := c.kmsClient.Decrypt(ctx, &kms.DecryptInput{
 		CiphertextBlob: encryptedKey,
 	})
@@ -815,11 +815,11 @@ func (c *Consumer) decryptData(ctx context.Context, data []byte) ([]byte, error)
 		return nil, sdkerr.Wrap("decryption failed", err)
 	}
 
-	// Decrypt data with AES-256-GCM. Every failure branch below uses the
-	// same clean message as the KMS branch above, so decryptData's contract
+	// Decrypt the payload. Every failure branch below uses the
+	// same clean message as the unwrap branch above, so decryptData's contract
 	// is uniform: Error() is always exactly "decryption failed" and the
-	// underlying cause (however unlikely — KMS handed back a malformed key
-	// size, tampered ciphertext failing the GCM auth tag, ...) is always
+	// underlying cause (however unlikely — the unwrap handed back a malformed key
+	// size, tampered ciphertext failing the authentication check, ...) is always
 	// reachable via errors.Unwrap, never bare on the wire to the caller.
 	block, err := aes.NewCipher(decryptOut.Plaintext)
 	if err != nil {
@@ -832,7 +832,7 @@ func (c *Consumer) decryptData(ctx context.Context, data []byte) ([]byte, error)
 		return nil, sdkerr.Wrap("decryption failed", err)
 	}
 
-	// GCM expects the auth tag appended to the ciphertext.
+	// The authentication tag is expected appended to the ciphertext.
 	ciphertext := make([]byte, 0, len(encryptedData)+tagLen)
 	ciphertext = append(ciphertext, encryptedData...)
 	ciphertext = append(ciphertext, authTag...)
@@ -845,7 +845,7 @@ func (c *Consumer) decryptData(ctx context.Context, data []byte) ([]byte, error)
 	return plaintext, nil
 }
 
-// decompressData gunzips data. Bytes that are not a gzip stream are refused
+// decompressData decompresses data. Bytes that are not a compressed stream are refused
 // with errNotCompressed: a download never returns an uncompressed object.
 func (c *Consumer) decompressData(data []byte) ([]byte, error) {
 	gr, err := gzip.NewReader(bytes.NewReader(data))

@@ -373,7 +373,7 @@ func TestUploadDataset_NothingUploadedWhenPOSTRefused(t *testing.T) {
 // (compressed+encrypted) bytes, not zeros — only possible if processFile ran
 // before createDatasetRecord built the payload. It also exercises the
 // presigned PUT and the trailing GET, and — using the fake KMS server's
-// captured (real) data key — fully AES-256-GCM DECRYPTS and gunzips the
+// captured (real) data key — fully AES-256-GCM DECRYPTS and decompresses the
 // uploaded envelope back to the exact original plaintext, proving a real
 // round trip rather than just the envelope's byte-length shape. A tampered
 // copy of the same envelope must fail to decrypt (negative control), which
@@ -526,7 +526,7 @@ func TestUploadDataset_ProcessesBeforePOST_SoRealSizesReachTheBody(t *testing.T)
 	}
 	gz, err := gzip.NewReader(bytes.NewReader(decompressed))
 	if err != nil {
-		t.Fatalf("gzip.NewReader on decrypted data: %v", err)
+		t.Fatalf("decompression reader on decrypted data: %v", err)
 	}
 	defer func() { _ = gz.Close() }()
 	gotPlaintext, err := io.ReadAll(gz)
@@ -601,17 +601,17 @@ func TestCreateDatasetRecord_SizeBytesTopLevel_TracksProcessedBytes(t *testing.T
 	}
 }
 
-// TestCompressData_GzipRoundTrip is the closest available golden test to
+// TestCompressData_RoundTrip is the closest available golden test to
 // acceptance question 4 ("bytes on wire byte-identical to v2.15.0 for the
 // same input") given this change does not touch compressData or
 // encryptData at all (only call order and payload construction changed,
 // verified by `git diff` leaving both functions untouched): it proves
 // compressData — the exact function processFile calls, unmodified by this
-// PR — still gunzips back to the original plaintext byte-for-byte, the same
+// PR — still decompresses back to the original plaintext byte-for-byte, the same
 // compressData v2.15.0 shipped. (processFile itself can't isolate
 // compression alone: it hard-requires Encrypt=true, covered by the
 // KMS-mocked end-to-end tests above.)
-func TestCompressData_GzipRoundTrip(t *testing.T) {
+func TestCompressData_RoundTrip(t *testing.T) {
 	plaintext := []byte(strings.Repeat(`{"id":1,"name":"golden"}`+"\n", 300))
 
 	p := &Producer{CustomerID: "golden-test"}
@@ -622,7 +622,7 @@ func TestCompressData_GzipRoundTrip(t *testing.T) {
 
 	gz, err := gzip.NewReader(bytes.NewReader(compressed))
 	if err != nil {
-		t.Fatalf("gzip.NewReader: %v", err)
+		t.Fatalf("decompression reader: %v", err)
 	}
 	defer func() { _ = gz.Close() }()
 

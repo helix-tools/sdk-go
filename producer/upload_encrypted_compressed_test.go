@@ -49,7 +49,7 @@ func TestUploadDataset_CannotDisableEncryptionOrCompression(t *testing.T) {
 			},
 			false, "cannot be disabled",
 		},
-		{"invalid gzip level", func(o *UploadOptions) { o.CompressionLevel = 10 }, false, "failed to create compression writer"},
+		{"invalid compression level", func(o *UploadOptions) { o.CompressionLevel = 10 }, false, "failed to create compression writer"},
 		{
 			"metadata says encryption off",
 			func(o *UploadOptions) { o.Metadata = map[string]any{"encryption_enabled": false} },
@@ -160,7 +160,7 @@ func TestUploadDataset_DefaultOptionsStayEncryptedAndCompressed(t *testing.T) {
 // TestUploadDataset_DeprecatedFlagsAreIgnored: Encrypt and Compress are
 // deprecated and ignored. A zero-value UploadOptions, a caller who leaves the
 // bools false, and the defaults all get the same upload. The check is at the
-// wire: the object the upload stored must decrypt and gunzip back to the
+// wire: the object the upload stored must decrypt and decompress back to the
 // original bytes, and the record must say encrypted and compressed.
 func TestUploadDataset_DeprecatedFlagsAreIgnored(t *testing.T) {
 	plaintext := []byte(strings.Repeat(`{"phone":"+15550100"}`+"\n", 40))
@@ -254,7 +254,7 @@ func newUploadFixture(t *testing.T) *uploadFixture {
 	return f
 }
 
-// openUploaded reverses what UploadDataset stored: envelope, then gzip.
+// openUploaded reverses what UploadDataset stored: envelope, then compression.
 func (f *uploadFixture) openUploaded(t *testing.T) []byte {
 	t.Helper()
 	obj := f.uploaded
@@ -276,7 +276,7 @@ func (f *uploadFixture) openUploaded(t *testing.T) []byte {
 	}
 	zr, err := gzip.NewReader(bytes.NewReader(gzipped))
 	if err != nil {
-		t.Fatalf("the uploaded object is not gzip once decrypted: %v", err)
+		t.Fatalf("the uploaded object is not compressed once decrypted: %v", err)
 	}
 	plain, err := io.ReadAll(zr)
 	if err != nil {
@@ -373,7 +373,7 @@ func TestUploadDataset_AcmeCallPathIsUnchanged(t *testing.T) {
 		}
 	}
 
-	// The stored object is gzip inside the encryption envelope, and its length
+	// The stored object is compressed inside the encryption envelope, and its length
 	// is what the record reports.
 	if got := f.openUploaded(t); !bytes.Equal(got, plaintext) {
 		t.Fatalf("stored object decrypts+gunzips to %d bytes, want the original %d", len(got), len(plaintext))
@@ -483,7 +483,7 @@ func TestCreateDatasetRecord_FlagsAreAlwaysTrue(t *testing.T) {
 
 // TestProcessFile_ResultAlwaysSaysEncryptedAndCompressed: the sizes a real
 // processFile pass hands to the record carry both flags as true, and the bytes
-// it returns are the gzip-then-envelope object, not the input.
+// it returns are the compressed-then-envelope object, not the input.
 func TestProcessFile_ResultAlwaysSaysEncryptedAndCompressed(t *testing.T) {
 	f := newUploadFixture(t)
 	plaintext := []byte(strings.Repeat(`{"a":1}`+"\n", 50))
@@ -507,10 +507,10 @@ func TestProcessFile_ResultAlwaysSaysEncryptedAndCompressed(t *testing.T) {
 	}
 }
 
-// TestEncryptData_WithoutKMSClientIsAnError: a Producer with a key id but no
+// TestEncryptData_WithoutKeyServiceClientIsAnError: a Producer with a key id but no
 // KMS client cannot encrypt — that is an error, never a plaintext upload and
 // never a nil-pointer panic.
-func TestEncryptData_WithoutKMSClientIsAnError(t *testing.T) {
+func TestEncryptData_WithoutKeyServiceClientIsAnError(t *testing.T) {
 	p := &Producer{KMSKeyID: "some-key"}
 
 	if _, err := p.encryptData(context.Background(), []byte("x")); err == nil || !strings.Contains(err.Error(), "encryption is not configured") {
