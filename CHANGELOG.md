@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-10-06 (v2.22.0)
 
 ### Changed
 - Fields that hold an enum are now typed with the named string type for that
