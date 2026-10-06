@@ -660,8 +660,8 @@ func TestDeactivateConsumer_FeatureFlagForbidden(t *testing.T) {
 }
 
 // TestInviteConsumer_TrimsDatasetsOnWire pins that dataset ids are CANONICALIZED
-// (trimmed) in the POST body, not just for validation. codex 2026-07-06 caught
-// that validation trimmed but the raw slice was sent, so `[" ds-1 "]` reached
+// (trimmed) in the POST body, not just for validation. An earlier revision
+// trimmed for validation but sent the raw slice, so `[" ds-1 "]` reached
 // the server with spaces and risked a failed grant.
 func TestInviteConsumer_TrimsDatasetsOnWire(t *testing.T) {
 	var gotBody map[string]any
@@ -891,8 +891,8 @@ func TestInviteConsumer_DatasetTiers_ValidationRejects(t *testing.T) {
 }
 
 // TestDeactivateConsumer_TrimsIDInPath pins that the TRIMMED consumer id is
-// path-escaped, not the raw arg (codex 2026-07-06: raw escape turned a padded
-// id into a %20-laden path that never matches).
+// path-escaped, not the raw arg (an earlier revision escaped the raw arg,
+// turning a padded id into a %20-laden path that never matches).
 func TestDeactivateConsumer_TrimsIDInPath(t *testing.T) {
 	var gotPath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

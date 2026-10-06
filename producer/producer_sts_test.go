@@ -1,4 +1,4 @@
-// Tests for the STS credential-mode surface (STS-PLAN.md §P3/B1). Mirrors
+// Tests for the short-lived-credential (STS) mode surface. Mirrors
 // consumer/consumer_sts_test.go — see that file's doc comment for the
 // rationale behind what's tested here vs. in credentials/broker_test.go.
 package producer

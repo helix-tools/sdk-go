@@ -3,7 +3,7 @@
 // It handles the entire lifecycle of dataset production, including authentication,
 // encrypting, compressing, uploading datasets, and notifying subscribers of new uploads.
 //
-// TODO: Use thalesfsp/sypl logger, and set log levels to `debug`.
+// TODO: adopt structured logging with configurable levels (e.g. debug).
 package producer
 
 import (

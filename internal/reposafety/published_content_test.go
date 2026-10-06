@@ -18,7 +18,7 @@ import (
 // out as a literal regex would put them in plain text in the repo. The
 // encoding hides the terms from a text search, not from a reader, which is
 // why the file must also stay out of the published module.
-const bannedContentPatternB64 = "KD9pKXJpbmdib29zdHxwaG9uZVwuY29tfGNsaWNrID91cHxkaXNjb3JkfFxiODZbMC05YS16XXs3fVxifC9Vc2Vycy9bQS1aYS16XXwvcHJpdmF0ZS90bXAvY2xhdWRlfGRtZS1wcm9kdWNlci18aGVsaXhbLV8uXSthZG1pbnxoZWxpeC1wcm9kdWNlci18aGVsaXhfc3NtX3wvaGVsaXgoLXRvb2xzKT8vW2EtejAtOSV7fSRfLV0rL2N1c3RvbWVyc1xi"
+const bannedContentPatternB64 = "KD9pKXJpbmdib29zdHxwaG9uZVwuY29tfGNsaWNrID91cHxkaXNjb3JkfFxiODZbMC05YS16XXs3fVxifC9Vc2Vycy9bQS1aYS16XXwvcHJpdmF0ZS90bXAvY2xhdWRlfGRtZS1wcm9kdWNlci18aGVsaXhbLV8uXSthZG1pbnxoZWxpeC1wcm9kdWNlci18aGVsaXhfc3NtX3wvaGVsaXgoLXRvb2xzKT8vW2EtejAtOSV7fSRfLV0rL2N1c3RvbWVyc1xifFNUUy1QTEFOfEMtc2RrXC5tZHxcYmNvZGV4XGJ8XGJ0aGFsZXNmc3BcYg=="
 
 // bannedContentPattern is the exact banned-content list applied to every
 // published Helix SDK artifact (this module's zip, the npm tarball, the
@@ -32,29 +32,39 @@ const bannedContentPatternB64 = "KD9pKXJpbmdib29zdHxwaG9uZVwuY29tfGNsaWNrID91cHx
 // package name and must be caught, not just the single-separator form; the
 // admin SDK is never published, so pointing at its package name anywhere
 // in a public artifact is a dependency-confusion risk, not just an
-// internals leak), and the platform's internal producer-configuration
+// internals leak), the platform's internal producer-configuration
 // layout — the lookup prefix older releases read, the environment variable
 // that overrode it, and the producer bucket naming convention — which no
-// published artifact needs now that the API supplies that configuration.
-// Case-insensitive throughout — none of these belong in
+// published artifact needs now that the API supplies that configuration,
+// an internal planning-document name (checked here, not in
+// bannedInternalNamesPattern, because a planning-doc reference can appear
+// in a test file's doc comment just as easily as in production source —
+// unlike the resource-identifier alternatives below, there is no
+// legitimate reason for ANY published file, test or not, to name one), an
+// internal code-review tool's name (in any surrounding prose — the tool's
+// own verdict vocabulary is caught by the same bare-word match, so no
+// separate alternative is needed for it), and a maintainer's personal
+// source-forge handle. Case-insensitive throughout — none of these belong in
 // the published tree in any casing. See bannedContentPatternB64's doc
-// comment for why it's encoded, and
+// comment for why it's encoded,
 // TestBannedContentPatternMatchesAdminPackageVariants for the separator
-// spellings this alternative is proven to catch.
+// spellings the admin-package alternative is proven to catch, and
+// TestBannedContentPatternMatchesPlanningAndToolingRefs for the
+// planning-doc/tool-name/handle alternatives.
 var bannedContentPattern = regexp.MustCompile(decodePattern(bannedContentPatternB64))
 
 // bannedInternalNamesPatternB64 is bannedInternalNamesPattern's source,
 // base64-encoded for the same reason as bannedContentPatternB64.
-const bannedInternalNamesPatternB64 = "KD9pKWNsb3VkWyBfLV0/d2F0Y2h8XGJyZWRpc1xifFxiZGxxXGJ8ZGVhZFsgXy1dbGV0dGVyfHNjcmF0Y2hwYWR8SEVMSVhfW0EtWjAtOV9dKl9FTkFCTEVEfEN1c3RvbWVyQmFzZWRSYXRlTGltaXR8UmVxdWlyZVByb2R1Y2VyT3JCb3RofHJhd1sgXy1dP21lc3NhZ2VbIF8tXT9kZWxpdmVyeXxhcm46YXdzOnNxczpbYS16MC05LV0qOlxkezksMTJ9Oltcdy4tXSt8c3FzXC5bYS16MC05LV0rXC5hbWF6b25hd3NcLmNvbS9cZCsvW1x3Li1dK3xcYlNOU1xifFxiUFIgI1swLTldfFNUUy1QTEFOfEMtc2RrXC5tZHxoZWxpeC10b29scy8oYXBpfHNkay1zY2hlbWFzfGhlbGl4LWFkbWluKQ=="
+const bannedInternalNamesPatternB64 = "KD9pKWNsb3VkWyBfLV0/d2F0Y2h8XGJyZWRpc1xifFxiZGxxXGJ8ZGVhZFsgXy1dbGV0dGVyfHNjcmF0Y2hwYWR8SEVMSVhfW0EtWjAtOV9dKl9FTkFCTEVEfEN1c3RvbWVyQmFzZWRSYXRlTGltaXR8UmVxdWlyZVByb2R1Y2VyT3JCb3RofHJhd1sgXy1dP21lc3NhZ2VbIF8tXT9kZWxpdmVyeXxhcm46YXdzOnNxczpbYS16MC05LV0qOlxkezksMTJ9Oltcdy4tXSt8c3FzXC5bYS16MC05LV0rXC5hbWF6b25hd3NcLmNvbS9cZCsvW1x3Li1dK3xcYlNOU1xifFxiUFIgI1swLTldfGhlbGl4LXRvb2xzLyhhcGl8c2RrLXNjaGVtYXN8aGVsaXgtYWRtaW4p"
 
 // bannedInternalNamesPattern is the list of internal names that must not
 // appear in the doc comments or comments of a published non-test Go or
 // Markdown source. Those files ship with the module and are public on GitHub,
 // so a reader of pkg.go.dev or the repository sees them. The list covers the
 // message-queue, cache and dead-letter components, the observability
-// service, server-side feature flags, sandbox paths, internal design-document
-// names, private repository names, PR numbers, the rate-limit configuration,
-// the internal middleware name, the internal subscription-delivery setting
+// service, server-side feature flags, sandbox paths, private repository
+// names, PR numbers, the rate-limit configuration, the internal middleware
+// name, the internal subscription-delivery setting
 // name (`raw_message_delivery` — an internal config knob, not a capability
 // description, so it is banned the same way the feature flags are, while
 // the capability it enables, "raw, unwrapped SQS delivery", stays
@@ -240,6 +250,44 @@ func TestBannedContentPatternMatchesProducerConfigLayout(t *testing.T) {
 	}
 }
 
+// TestBannedContentPatternMatchesPlanningAndToolingRefs is a regression test
+// for the planning-document, code-review-tool, and maintainer-handle
+// alternatives in bannedContentPatternB64. Unlike the resource-identifier
+// alternatives above, these three are banned in EVERY published file,
+// test or not — a test's doc comment naming an internal planning document
+// or reviewer is exactly as much of a leak as production source doing the
+// same, so TestNoBannedContentInPublishedFiles (which scans the whole
+// published tree, not just non-test Go/Markdown) is what enforces them.
+// Every sample is assembled at runtime from fragments, so no banned string
+// appears contiguously in this file.
+func TestBannedContentPatternMatchesPlanningAndToolingRefs(t *testing.T) {
+	mustMatch := []string{
+		"S" + "TS-" + "PLAN.md §9",
+		"C-" + "sdk.md C.1",
+		"co" + "dex",
+		"Co" + "dex-REFUTE finding",
+		"caught by " + "co" + "dex" + " 2026-07-06",
+		"github.com/" + "thales" + "fsp/sypl",
+		"TODO: Use " + "thales" + "fsp/sypl logger",
+	}
+	for _, s := range mustMatch {
+		if !bannedContentPattern.MatchString(s) {
+			t.Errorf("bannedContentPattern does not match %q, a planning-doc/tool-name/handle reference", s)
+		}
+	}
+
+	mustNotMatch := []string{
+		"video " + "codecs",
+		"the design document, §9",
+		"an independent adversarial review caught it",
+	}
+	for _, s := range mustNotMatch {
+		if bannedContentPattern.MatchString(s) {
+			t.Errorf("bannedContentPattern unexpectedly matched %q, which is public and must stay allowed", s)
+		}
+	}
+}
+
 // TestBannedInternalNamesPatternMatchesSQSResourcePatterns is a regression
 // test for the SQS queue-identifier/queue-URL alternatives in
 // bannedInternalNamesPatternB64: an actual queue identifier or queue URL in a
@@ -343,8 +391,6 @@ func TestBannedInternalNamesPatternMatches(t *testing.T) {
 		"RAW" + "_MESSAGE_" + "DELIVERY",
 		"S" + "NS-wrapped messages",
 		"PR" + " #129",
-		"S" + "TS-" + "PLAN.md §9",
-		"C-" + "sdk.md C.1",
 		"helix-" + "tools/api PR",
 		"helix-" + "tools/sdk-schemas",
 	}

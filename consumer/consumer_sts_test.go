@@ -1,4 +1,4 @@
-// Tests for the STS credential-mode surface (STS-PLAN.md §P3/B1). This file
+// Tests for the short-lived-credential (STS) mode surface. This file
 // covers what is specific to Consumer's own request-signing path:
 //
 //  1. the Acme regression pin, at the wire level — a Consumer signed

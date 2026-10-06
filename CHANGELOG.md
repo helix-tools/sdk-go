@@ -860,10 +860,11 @@
   now falls back to `types.Dataset.Encryption` when the metadata key is
   absent, mirroring the Python SDK.
 - **`InviteConsumer`/`DeactivateConsumer` sent untrimmed values on the
-  wire** (codex REFUTE catch): `InviteConsumer` trimmed dataset ids for
-  validation but POSTed the raw slice, and `DeactivateConsumer`
-  path-escaped the raw arg — whitespace-padded input diverged from the
-  canonical server-side value. Both now send/escape the trimmed value.
+  wire** (caught by an independent adversarial review): `InviteConsumer`
+  trimmed dataset ids for validation but POSTed the raw slice, and
+  `DeactivateConsumer` path-escaped the raw arg — whitespace-padded input
+  diverged from the canonical server-side value. Both now send/escape the
+  trimmed value.
 
 ### Tests
 - Regression test drives the real `createDatasetRecord`, asserting every
