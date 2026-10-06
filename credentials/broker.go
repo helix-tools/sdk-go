@@ -1,5 +1,5 @@
 // Package credentials implements an aws.CredentialsProvider that mints
-// short-lived AWS STS session credentials from the Helix Connect credential
+// short-lived AWS session credentials from the Helix Connect credential
 // broker (POST /v1/credentials/session), per credential_session.schema.json
 // (sdk-schemas #17).
 //
@@ -7,7 +7,7 @@
 //
 //   - Production / opt-in customers: SelectProvider(apiEndpoint, cfg) picks
 //     the right aws.CredentialsProvider for a types.Config — static (default,
-//     byte-identical to the SDK's pre-STS behavior) or sts (this package's
+//     byte-identical to the SDK's pre-existing behavior) or sts (this package's
 //     auto-refreshing broker-backed provider, wrapped in aws.CredentialsCache).
 //     consumer.NewConsumer and producer.NewProducer call this internally.
 //
@@ -58,7 +58,7 @@ const (
 	MintPath = "/v1/credentials/session"
 
 	// sessionTTLSeconds mirrors credential_session.schema.json's
-	// ttl_seconds ("const": 900) — the STS DurationSeconds floor and the
+	// ttl_seconds ("const": 900) — the minimum session length and the
 	// 15-minute TTL coincide, so every successful mint is exactly this many
 	// seconds. Used only to derive proactiveExpiryWindow below; actual
 	// credential expiry is always computed from the server's returned
@@ -552,7 +552,7 @@ func refuseMintRedirect(*http.Request, []*http.Request) error {
 	return errMintRedirectRefused
 }
 
-// Provider implements aws.CredentialsProvider by minting a fresh AWS STS
+// Provider implements aws.CredentialsProvider by minting a fresh short-lived
 // session credential from the Helix credential broker on every Retrieve
 // call. Provider itself never caches — wrap it with NewCredentialsCache for
 // production use (adds the proactive-refresh window, jitter, and
@@ -1093,7 +1093,7 @@ func warn(message string) {
 
 // SelectProvider infers/validates cfg's credential mode and returns the
 // aws.CredentialsProvider NewConsumer/NewProducer should use. It performs no
-// network I/O — safe to unit test exhaustively without a broker or AWS STS.
+// network I/O — safe to unit test exhaustively without a broker or any AWS call.
 //
 // Mode-resolution rule (design §4.11), identical across the TS/Python/Go
 // SDKs:

@@ -2,8 +2,8 @@
 // credentials) one place to turn an upstream failure (a cloud SDK call, an
 // HTTP client request, a compression/decompression library call) into a
 // customer-facing error: an authored, capability-language message that never
-// interpolates the upstream error's own text (which can carry account IDs,
-// key ARNs, queue URLs, or other internal service detail), while still
+// interpolates the upstream error's own text (which can carry internal
+// identifiers or other internal service detail), while still
 // attaching the original error as the cause so errors.Is / errors.As and a
 // developer's own error-message logging can reach it.
 package sdkerr

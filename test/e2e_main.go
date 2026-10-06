@@ -67,7 +67,7 @@ func main() {
 	}
 	fmt.Printf("✅ Producer SDK initialized\n")
 	fmt.Printf("   Customer ID: %s\n", prod.CustomerID)
-	fmt.Printf("   KMS Key: %s\n\n", prod.KMSKeyID)
+	fmt.Printf("   Encryption key: %s\n\n", prod.KMSKeyID)
 
 	// Step 2: Create test dataset file
 	fmt.Println("Step 2: Create Test Dataset")
@@ -129,7 +129,7 @@ func main() {
 
 	fmt.Printf("✅ Dataset uploaded successfully\n")
 	fmt.Printf("   Dataset ID: %s\n", dataset.ID)
-	fmt.Printf("   S3 Key: %s\n", dataset.S3Key)
+	fmt.Printf("   Storage key: %s\n", dataset.S3Key)
 	fmt.Printf("   Size: %d bytes\n\n", dataset.SizeBytes)
 
 	// Step 4: Wait a moment for API consistency
@@ -177,8 +177,8 @@ func main() {
 	fmt.Println("  ✅ Producer SDK initialized")
 	fmt.Println("  ✅ Test dataset created (328 bytes)")
 	fmt.Println("  ✅ Compression: Working (gzip level 9)")
-	fmt.Println("  ✅ Encryption: Working (KMS + AES-256-GCM)")
-	fmt.Println("  ✅ Dataset uploaded to S3")
+	fmt.Println("  ✅ Encryption: Working")
+	fmt.Println("  ✅ Dataset uploaded to storage")
 	fmt.Println("  ✅ Dataset registered in catalog")
 	fmt.Println("  ✅ Consumer SDK initialized")
 	fmt.Println("  ✅ Consumer can list datasets")

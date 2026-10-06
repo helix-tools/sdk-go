@@ -45,15 +45,15 @@ p, err := producer.NewProducer(types.Config{
 })
 ```
 
-`NewProducer`/`NewConsumer` validate the AWS credentials against STS at
+`NewProducer`/`NewConsumer` validate the AWS credentials at
 construction time, so both require real, reachable AWS credentials to
 construct.
 
-### STS session credentials (opt-in)
+### Short-lived session credentials (opt-in)
 
 By default, the SDK signs every request with the long-lived AWS key you
 provide (`CredentialMode: types.CredentialModeStatic`) — unchanged since the
-first release. Opt into short-lived, auto-refreshing AWS STS session
+first release. Opt into short-lived, auto-refreshing AWS session
 credentials with one config field: `CredentialMode: types.CredentialModeSTS`.
 That key is then used only as a bootstrap credential — the SDK mints a
 15-minute session credential from the Helix credential broker and refreshes
@@ -77,7 +77,7 @@ the lower-level `Provider`/`NewCredentialsCache` API.
 
 ### API keys (opt-in, v2.20.0+)
 
-As of v2.20.0, you can bootstrap STS session credentials with a Helix API
+As of v2.20.0, you can bootstrap short-lived session credentials with a Helix API
 key instead of your AWS access keys. Create one in the Helix portal under
 **API Keys**, then set it via `types.Config.APIKey` (read it from an
 environment variable such as `HELIX_API_KEY` — the SDK does not read it for
@@ -445,7 +445,7 @@ and not the others, by design:
 - **Direct subscription** (`subscribe_to_dataset`) and **`update_dataset_data`**
   are Python-only. In Go, request access with `CreateSubscriptionRequest` and
   replace data with `UploadDataset`.
-- **Credentials** are refreshed automatically in STS mode; there are no
+- **Credentials** are refreshed automatically in `sts` mode; there are no
   `forceCredentialRefresh` / `setCredentialAutoRefresh` helpers to call.
 - **`ListDatasets`** takes an optional producer id and returns `[]Dataset`
   (the legacy fields plus the full record in `Record`).

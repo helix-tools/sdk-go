@@ -158,7 +158,7 @@ func NewProducer(cfg types.Config) (*Producer, error) {
 	}
 
 	// Select the AWS credentials provider: "static" (default, byte-identical
-	// to the pre-STS behavior) or "sts" (auto-refreshing broker-issued
+	// to the pre-existing behavior) or "sts" (auto-refreshing broker-issued
 	// session credentials, opt-in via cfg.CredentialMode). See
 	// credentials.SelectProvider for the full mode-inference matrix.
 	credProvider, err := stscreds.SelectProvider(cfg.APIEndpoint, cfg)
@@ -284,12 +284,12 @@ func loadAWSConfig(ctx context.Context, region string, credProvider aws.Credenti
 	return awsCfg, nil
 }
 
-// validateCredentials calls AWS STS GetCallerIdentity, an AWS SDK call, to
-// fail fast on bad credentials. On failure the customer sees a clean message
-// while the raw STS/IAM error (which can carry the account ID and an IAM
-// ARN) stays reachable via errors.Unwrap/errors.As for debugging.
+// validateCredentials makes one identity-check call to AWS, to fail fast on
+// bad credentials. On failure the customer sees a clean message while the raw
+// underlying error (which can carry internal account details) stays reachable
+// via errors.Unwrap/errors.As for debugging.
 //
-// In STS mode the call first gets session credentials from the Helix
+// In sts mode the call first gets session credentials from the Helix
 // credential service, so a failure there is reported as what it is — the
 // service could not be reached, or it returned one of its customer-facing
 // messages (e.g. a revoked API key) — never as "invalid AWS credentials",
@@ -344,11 +344,11 @@ func (p *Producer) compressData(data []byte, level int) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// encryptData encrypts data using envelope encryption
+// encryptData encrypts data before upload.
 // Process:
-// 1. Generate random data key (32 bytes for AES-256)
+// 1. Generate random data key (32 bytes)
 // 2. Encrypt data with the data key
-// 3. Encrypt the data key with KMS
+// 3. Protect the data key with the account's encryption key
 // 4. Return: [key_length][encrypted_key][iv][tag][encrypted_data]
 func (p *Producer) encryptData(ctx context.Context, data []byte) ([]byte, error) {
 	if p.KMSKeyID == "" {
@@ -360,17 +360,17 @@ func (p *Producer) encryptData(ctx context.Context, data []byte) ([]byte, error)
 	}
 
 	// Generate random data key and IV.
-	dataKey := make([]byte, 32) // 256-bit key for AES-256.
+	dataKey := make([]byte, 32) // 256-bit key.
 	if _, err := rand.Read(dataKey); err != nil {
 		return nil, fmt.Errorf("failed to generate data key: %w", err)
 	}
 
-	iv := make([]byte, 16) // 128-bit IV for GCM mode (16 bytes, matches Python SDK).
+	iv := make([]byte, 16) // 16-byte IV (matches the Python SDK).
 	if _, err := rand.Read(iv); err != nil {
 		return nil, fmt.Errorf("failed to generate IV: %w", err)
 	}
 
-	// Encrypt data with data key using AES-256-GCM.
+	// Encrypt data with the data key.
 	block, err := aes.NewCipher(dataKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cipher: %w", err)
@@ -379,7 +379,7 @@ func (p *Producer) encryptData(ctx context.Context, data []byte) ([]byte, error)
 	// Use 16-byte nonce to match Python's os.urandom(16).
 	aesGCM, err := cipher.NewGCMWithNonceSize(block, 16)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create GCM: %w", err)
+		return nil, fmt.Errorf("failed to prepare encryption: %w", err)
 	}
 
 	// Encrypt the data (auth tag is automatically appended).
@@ -390,7 +390,7 @@ func (p *Producer) encryptData(ctx context.Context, data []byte) ([]byte, error)
 	actualEncryptedData := encryptedData[:len(encryptedData)-authTagSize]
 	authTag := encryptedData[len(encryptedData)-authTagSize:]
 
-	// Encrypt the data key with KMS.
+	// Protect the data key with the account's encryption key.
 	encryptOutput, err := p.kmsClient.Encrypt(ctx, &kms.EncryptInput{
 		KeyId:     aws.String(p.KMSKeyID),
 		Plaintext: dataKey,
@@ -454,7 +454,7 @@ type ProcessedFileData struct {
 // record_count, matching what v1.3.11 sent (producer.go buildDatasetPayload,
 // pre-v2). v2.15.0 called this before processFile, so it always POSTed
 // zero/absent sizes and an empty version; the caller (UploadDataset) still
-// POSTs before any bytes reach S3, so the catalog-record-before-upload race
+// POSTs before any bytes reach storage, so the catalog-record-before-upload race
 // protection the original POST-first refactor introduced is unchanged.
 func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opts UploadOptions, processed *ProcessedFileData) (*CreateDatasetResponse, error) {
 	// Analyze data (memory-efficient streaming). Independent of processFile's
@@ -516,7 +516,7 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 	// (`datasets/{name}/data.ndjson[.gz]`). The API honors a client s3_key and
 	// otherwise defaults to `datasets/{producer_id}/{dataset_id}/data`
 	// (service.go CreateDataset). That default breaks the whole notify pipeline:
-	// the s3-event-processor derives dataset_name from the key's FIRST segment,
+	// the ingestion processor derives dataset_name from the key's FIRST segment,
 	// so a producer-id-keyed object yields dataset_name=<producer_id>, the
 	// findOneAndUpdate never matches, and subscribers are notified with the
 	// wrong name (or not at all). Go always compresses, so the file is
@@ -551,7 +551,7 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 	// request size_bytes to the catalog's total_size_bytes
 	// (datasets/service.go CreateDataset, ~line 699). v2.16.0 dropped it,
 	// which zeroed production total_size_bytes. len(processed.Data) is the
-	// exact byte length of the object about to be PUT to S3 (compressed,
+	// exact byte length of the object about to be uploaded to storage (compressed,
 	// then encrypted — both mandatory), so it always matches
 	// metadata.encrypted_size_bytes.
 	// encryption MUST be sent top-level, matching Python (producer.py
@@ -561,7 +561,7 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 	// extractBool (api service.go) drops metadata.encryption_enabled from the
 	// stored record whenever the request has no top-level "encryption" field,
 	// so a request that only sets the metadata key ends up with a record that
-	// is silently missing it — found 2026-09-26 comparing Go's stored Mongo
+	// is silently missing it — found 2026-09-26 comparing Go's stored
 	// record against Python/TS's for an identical upload. Always true: Encrypt
 	// cannot be false (validateUploadOptions), so this mirrors the same
 	// invariant as pinnedMetadata's encryption_enabled below, not a new one.
@@ -614,7 +614,7 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 // processFile reads, compresses, and encrypts the file data.
 // This is step 1 of the upload flow — it runs BEFORE createDatasetRecord so
 // the real sizes are known when the POST body is built. It has no network
-// side effect other than one KMS Encrypt call; it never uploads anything.
+// side effect other than one local encryption step; it never uploads anything.
 //
 // It is the single enforcement point for the upload invariant (see
 // validateUploadOptions): a call that would switch encryption or compression
@@ -689,9 +689,9 @@ const minDescriptionLength = 10
 
 // validateUploadOptions enforces the upload invariant: every upload is
 // gzip-compressed and then encrypted, and no option turns either off. It runs
-// before the file is read and before any network call (KMS included), and it
+// before the file is read and before any network call (the key lookup included), and it
 // refuses:
-//   - a Producer without a KMS key,
+//   - a Producer without an encryption key,
 //   - Metadata or DatasetOverrides — top-level or under "metadata" — that set
 //     one of the record's encryption/compression flags to anything but true,
 //     or that give "metadata" as something other than an object,
@@ -820,7 +820,7 @@ func (p *Producer) uploadToPresignedURL(ctx context.Context, uploadURL string, d
 }
 
 // UploadDataset uploads a dataset, always compressed and then encrypted.
-// FLOW (process-before-POST, still catalog-record-before-S3-upload):
+// FLOW (process-before-POST, still catalog-record-before-storage-upload):
 // 1. Process file (compress + encrypt) — no upload yet, so the real sizes
 //    are known.
 // 2. POST to /v1/datasets with those sizes plus version/record_count/
@@ -828,8 +828,8 @@ func (p *Producer) uploadToPresignedURL(ctx context.Context, uploadURL string, d
 // 3. PUT the processed bytes to the presigned URL.
 // 4. GET the dataset record and return it.
 //
-// Step 2 still happens before any bytes reach S3, so the race the original
-// POST-first refactor closed (an S3 event firing before the catalog record
+// Step 2 still happens before any bytes reach storage, so the race the original
+// POST-first refactor closed (a storage event firing before the catalog record
 // exists) stays closed. A refused POST still means zero PUTs — step 1 has no
 // side effect beyond one local compress and one encryption call.
 //

@@ -152,7 +152,7 @@ func NewAWSConfig(ctx context.Context, creds Credentials, region string) (aws.Co
 	)
 }
 
-// NewAWSConfigSTS creates an AWS config using the STS credential-broker
+// NewAWSConfigSTS creates an AWS config using the credential-broker
 // auto-refresh provider (stscreds.NewCredentialsCache) instead of a static
 // key. It bootstrap-authenticates mint requests with the given static creds
 // (the bootstrap is the existing SigV4 static key, not an API key; the
@@ -171,7 +171,7 @@ func NewAWSConfigSTS(ctx context.Context, apiEndpoint string, creds Credentials,
 		AWSSecretAccessKey: creds.AWSSecretAccessKey,
 	})
 	if err != nil {
-		return aws.Config{}, fmt.Errorf("failed to create STS credentials provider: %w", err)
+		return aws.Config{}, fmt.Errorf("failed to create the credentials provider: %w", err)
 	}
 
 	return config.LoadDefaultConfig(ctx,
