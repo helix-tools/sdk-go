@@ -23,6 +23,9 @@
   `types.CustomerType`, `types.StripeStatus`, `types.CompanyTier` (with
   `types.CompanyTierFree`) and `types.ConsumerRelationStatus`. Each has one
   constant per value in its schema enum.
+- `SubscriptionRequest.DatasetName`: the response-only current name of the
+  requested dataset. Empty when the request is for all datasets, when the
+  dataset no longer exists, or when the caller is not allowed to see it.
 
 ## 2026-10-04 (v2.21.0)
 

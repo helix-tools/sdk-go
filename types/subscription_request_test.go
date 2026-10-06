@@ -100,6 +100,32 @@ func TestSubscriptionRequest_MatchesSchemaFile(t *testing.T) {
 	}
 }
 
+// TestSubscriptionRequest_DatasetNameDecode: dataset_name is response-only
+// and optional (schema: subscription-request dataset_name, not in
+// `required`). Decoding must work both when the API sends it (a specific
+// dataset request) and when it omits it (an all-datasets request, or a
+// dataset the caller can no longer see) — the latter leaves the zero value
+// with no error.
+func TestSubscriptionRequest_DatasetNameDecode(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body string
+		want string
+	}{
+		"present": {body: `{"_id":"req-1","dataset_name":"Acme Sales Leads"}`, want: "Acme Sales Leads"},
+		"absent":  {body: `{"_id":"req-1"}`, want: ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var got SubscriptionRequest
+			if err := json.Unmarshal([]byte(tc.body), &got); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if got.DatasetName != tc.want {
+				t.Errorf("DatasetName = %q, want %q", got.DatasetName, tc.want)
+			}
+		})
+	}
+}
+
 // ApproveRequestResponse: the request half is strict, the subscription half is
 // best-effort (the approval has already happened when this is decoded).
 func TestApproveRequestResponse_Decode(t *testing.T) {
