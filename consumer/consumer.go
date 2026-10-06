@@ -4,7 +4,7 @@
 // downloading, decrypting, and decompressing datasets. It also provides mechanisms
 // to poll and acknowledge dataset upload notifications via SQS.
 //
-// TODO: Use thalesfsp/sypl logger, and set log levels to `debug`.
+// TODO: adopt structured logging with configurable levels (e.g. debug).
 package consumer
 
 import (

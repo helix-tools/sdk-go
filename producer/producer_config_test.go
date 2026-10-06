@@ -169,10 +169,10 @@ func fakeIdentityServer(t *testing.T) *httptest.Server {
 	return srv
 }
 
-// retiredLookupEnvVar is the name of the environment variable older releases
-// read to locate the producer's configuration. Built from fragments so the
-// name never appears contiguously in a published file.
-var retiredLookupEnvVar = strings.Join([]string{"HELIX", "SSM", "CUSTOMER", "PREFIX"}, "_")
+// unrelatedLeftoverEnvVar is an arbitrary environment variable with no
+// meaning to this SDK, standing in for any stray value a previous install
+// or unrelated tool might leave set in the process environment.
+const unrelatedLeftoverEnvVar = "SDK_GO_TEST_UNRELATED_LEFTOVER_VAR"
 
 // newProducerThroughConstructor builds a Producer with the real NewProducer,
 // with every AWS endpoint pointed at a local fake and no shared AWS config
@@ -220,8 +220,8 @@ func isolateAWSEnv(t *testing.T, identityURL, keyServiceURL string) {
 	t.Setenv("AWS_ENDPOINT_URL", "")
 	t.Setenv("AWS_ENDPOINT_URL_STS", identityURL)
 	t.Setenv("AWS_ENDPOINT_URL_KMS", keyServiceURL)
-	// A value left behind from an older release must change nothing.
-	t.Setenv(retiredLookupEnvVar, "/left/behind")
+	// An unrelated value present in the environment must change nothing.
+	t.Setenv(unrelatedLeftoverEnvVar, "/left/behind")
 }
 
 // captureStdout runs fn and returns what it printed to os.Stdout.

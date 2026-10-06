@@ -272,10 +272,10 @@ func TestProvider_Retrieve_HappyPath(t *testing.T) {
 }
 
 // TestProvider_Retrieve_ClockSkewHardening pins the "local_now + ttl_seconds
-// capped by parsed expiration" formula (STS-PLAN.md/C-sdk.md C.1 bullet 4)
-// in BOTH directions: whichever bound is EARLIER always wins, so client/
-// server clock drift can only ever shorten — never extend — a credential's
-// effective lifetime beyond what the server granted.
+// capped by parsed expiration" formula in BOTH directions: whichever bound
+// is EARLIER always wins, so client/server clock drift can only ever
+// shorten — never extend — a credential's effective lifetime beyond what
+// the server granted.
 func TestProvider_Retrieve_ClockSkewHardening(t *testing.T) {
 	fixedNow := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
 
@@ -1458,13 +1458,13 @@ func TestCredentialsCache_OptFnsOverrideDefaults(t *testing.T) {
 
 // TestCredentialsCache_RideThroughBrokerBlipUntilHardExpiry proves the
 // required "serve-last-good creds until hard expiry" behavior
-// (STS-PLAN.md/C-sdk.md C.1 bullet 3 / R7: "a broker blip is invisible"):
+// (R7: "a broker blip is invisible"):
 // when a refresh becomes due (past the proactive window) but the true hard
 // expiry from the last successful mint has NOT yet passed, a broker outage
 // must NOT fail the caller — Retrieve rides through on the last-known-good
 // credential. A second call immediately after must be served from that
 // same ride-through cache entry without re-attempting a mint (no request
-// storm during an outage). codex-REFUTE finding: an earlier revision of
+// storm during an outage). An earlier revision of
 // this provider failed closed as soon as the proactive window was crossed,
 // not at true hard expiry — this test and
 // TestCredentialsCache_FailClosedExpiry together pin the corrected,
@@ -1578,7 +1578,7 @@ func TestConstants_RefreshPolicyDerivedFromTTLFloor(t *testing.T) {
 		t.Errorf("proactiveExpiryWindow = %v, want 5m (900s/3 — 'refresh at ~2/3 TTL' / 'proactive when remaining <=1/3 TTL')", proactiveExpiryWindow)
 	}
 	if expiryWindowJitterFrac != 0.5 {
-		t.Errorf("expiryWindowJitterFrac = %v, want 0.5 (STS-PLAN.md/C-sdk.md C.1 bullet 1, Go-specific figure)", expiryWindowJitterFrac)
+		t.Errorf("expiryWindowJitterFrac = %v, want 0.5 (Go-specific figure)", expiryWindowJitterFrac)
 	}
 	if mintMaxAttempts != 3 {
 		t.Errorf("mintMaxAttempts = %d, want 3 (1 initial + 2 retries — C.1 bullet 3 'mint retry 2x')", mintMaxAttempts)
