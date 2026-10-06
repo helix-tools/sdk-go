@@ -14,21 +14,13 @@ const (
 	SubscriptionStatusExpired   SubscriptionStatus = "expired"
 )
 
-// SubscriptionTier is the canonical access tier on a subscription.
-// Reads are tolerant of the legacy/paid tier vocabulary; the only canonical
-// write value accepted by the API is "free" (paid tiers were collapsed in
-// the Producer-Invite epic).
+// SubscriptionTier is the access tier on a subscription and on a subscription
+// request. Its only value is "free", as the subscription schema defines it.
 type SubscriptionTier = string
 
-// Canonical and read-tolerant SubscriptionTier values. TierFree is the only
-// canonical write value; the rest are accepted on read for backward compat.
+// Canonical SubscriptionTier values.
 const (
-	TierFree         SubscriptionTier = "free"
-	TierStarter      SubscriptionTier = "starter"
-	TierBasic        SubscriptionTier = "basic"
-	TierPremium      SubscriptionTier = "premium"
-	TierProfessional SubscriptionTier = "professional"
-	TierEnterprise   SubscriptionTier = "enterprise"
+	TierFree SubscriptionTier = "free"
 )
 
 // ConsumerInfo is the server-side enrichment of the consumer that owns a
@@ -63,16 +55,16 @@ type DatasetInfo struct {
 
 // Subscription represents an active subscription to a dataset or producer.
 type Subscription struct {
-	ID          string  `json:"_id"`
-	ConsumerID  string  `json:"consumer_id"`
-	CustomerID  string  `json:"customer_id,omitempty"` // Legacy field
-	DatasetID   *string `json:"dataset_id"`            // Required field, null for all-datasets subscription
-	DatasetName string  `json:"dataset_name,omitempty"`
-	ProducerID  string  `json:"producer_id"`
-	RequestID   string  `json:"request_id,omitempty"`
-	Tier        string  `json:"tier"`   // SubscriptionTier — canonical write value is "free"
-	Status      string  `json:"status"` // SubscriptionStatus: "active", "paused", "cancelled", "expired"
-	SQSQueueURL *string `json:"sqs_queue_url,omitempty"`
+	ID          string             `json:"_id"`
+	ConsumerID  string             `json:"consumer_id"`
+	CustomerID  string             `json:"customer_id,omitempty"` // Legacy field
+	DatasetID   *string            `json:"dataset_id"`            // Required field, null for all-datasets subscription
+	DatasetName string             `json:"dataset_name,omitempty"`
+	ProducerID  string             `json:"producer_id"`
+	RequestID   string             `json:"request_id,omitempty"`
+	Tier        SubscriptionTier   `json:"tier"`   // "free" is the only value
+	Status      SubscriptionStatus `json:"status"` // "active", "paused", "cancelled", "expired"
+	SQSQueueURL *string            `json:"sqs_queue_url,omitempty"`
 	// ProducerInfo is optional server-side enrichment carrying the producer's
 	// company name; absent unless the API populated it on this read path.
 	ProducerInfo *ProducerInfo `json:"producer_info,omitempty"`
