@@ -601,7 +601,7 @@ func TestCreateDatasetRecord_SizeBytesTopLevel_TracksProcessedBytes(t *testing.T
 	}
 }
 
-// TestCompressData_GzipRoundTrip is the closest available golden test to
+// TestCompressData_RoundTrip is the closest available golden test to
 // acceptance question 4 ("bytes on wire byte-identical to v2.15.0 for the
 // same input") given this change does not touch compressData or
 // encryptData at all (only call order and payload construction changed,
@@ -611,7 +611,7 @@ func TestCreateDatasetRecord_SizeBytesTopLevel_TracksProcessedBytes(t *testing.T
 // compressData v2.15.0 shipped. (processFile itself can't isolate
 // compression alone: it hard-requires Encrypt=true, covered by the
 // KMS-mocked end-to-end tests above.)
-func TestCompressData_GzipRoundTrip(t *testing.T) {
+func TestCompressData_RoundTrip(t *testing.T) {
 	plaintext := []byte(strings.Repeat(`{"id":1,"name":"golden"}`+"\n", 300))
 
 	p := &Producer{CustomerID: "golden-test"}

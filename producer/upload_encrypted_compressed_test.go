@@ -507,10 +507,10 @@ func TestProcessFile_ResultAlwaysSaysEncryptedAndCompressed(t *testing.T) {
 	}
 }
 
-// TestEncryptData_WithoutKMSClientIsAnError: a Producer with a key id but no
+// TestEncryptData_WithoutKeyServiceClientIsAnError: a Producer with a key id but no
 // KMS client cannot encrypt — that is an error, never a plaintext upload and
 // never a nil-pointer panic.
-func TestEncryptData_WithoutKMSClientIsAnError(t *testing.T) {
+func TestEncryptData_WithoutKeyServiceClientIsAnError(t *testing.T) {
 	p := &Producer{KMSKeyID: "some-key"}
 
 	if _, err := p.encryptData(context.Background(), []byte("x")); err == nil || !strings.Contains(err.Error(), "encryption is not configured") {

@@ -238,10 +238,10 @@ func TestDecryptData_HugeKeyLengthDoesNotAllocate(t *testing.T) {
 	}
 }
 
-// TestDecryptData_WithoutKMSClientIsAnError: a Consumer built by hand has no
+// TestDecryptData_WithoutKeyServiceClientIsAnError: a Consumer built by hand has no
 // KMS client. Decryption is mandatory, so that is an error, not a nil-pointer
 // panic and not a skipped step.
-func TestDecryptData_WithoutKMSClientIsAnError(t *testing.T) {
+func TestDecryptData_WithoutKeyServiceClientIsAnError(t *testing.T) {
 	c := &Consumer{}
 
 	_, err := c.decryptData(context.Background(), encryptedObject([]byte("x")))

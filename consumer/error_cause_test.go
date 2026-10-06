@@ -108,7 +108,7 @@ func TestValidateCredentials_NegativeControl(t *testing.T) {
 // decryptData (KMS Decrypt).
 // ----------------------------------------------------------------------------
 
-func TestDecryptData_KMSCauseNeverLeaksIntoMessage(t *testing.T) {
+func TestDecryptData_KeyServiceCauseNeverLeaksIntoMessage(t *testing.T) {
 	c := useFakeKMS(newTestConsumer("https://objects.test"), "", &http.Client{Transport: kmsARNTransport{}})
 
 	_, err := c.decryptData(context.Background(), encryptedObject([]byte("row\n")))
@@ -137,11 +137,11 @@ func (kmsARNTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	}, nil
 }
 
-// TestDownloadDataset_KMSCauseNeverLeaksIntoMessage is the end-to-end version
+// TestDownloadDataset_KeyServiceCauseNeverLeaksIntoMessage is the end-to-end version
 // of the test above: the exact customer-visible error DownloadDataset returns
 // for a KMS AccessDenied must stay clean too, not just the internal
 // decryptData helper.
-func TestDownloadDataset_KMSCauseNeverLeaksIntoMessage(t *testing.T) {
+func TestDownloadDataset_KeyServiceCauseNeverLeaksIntoMessage(t *testing.T) {
 	client := &http.Client{Transport: downloadKMSDeniedTransport{}}
 	c := newTestConsumer("https://objects.test")
 	c.httpClient = client
