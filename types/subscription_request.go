@@ -18,17 +18,22 @@ const (
 
 // SubscriptionRequest represents a request from a consumer to access a producer's datasets.
 type SubscriptionRequest struct {
-	ID            string                    `json:"_id"`
-	RequestID     string                    `json:"request_id"`
-	ConsumerID    string                    `json:"consumer_id"`
-	ConsumerName  string                    `json:"consumer_name"`
-	ConsumerEmail string                    `json:"consumer_email"`
-	ProducerID    string                    `json:"producer_id"`
-	ProducerName  string                    `json:"producer_name"`
-	DatasetID     *string                   `json:"dataset_id,omitempty"` // Null for all-datasets access
-	Tier          SubscriptionTier          `json:"tier"`                 // "free" is the only value
-	Message       *string                   `json:"message,omitempty"`
-	Status        SubscriptionRequestStatus `json:"status"` // "pending", "approved", "rejected", "approved_pending_payment"
+	ID            string  `json:"_id"`
+	RequestID     string  `json:"request_id"`
+	ConsumerID    string  `json:"consumer_id"`
+	ConsumerName  string  `json:"consumer_name"`
+	ConsumerEmail string  `json:"consumer_email"`
+	ProducerID    string  `json:"producer_id"`
+	ProducerName  string  `json:"producer_name"`
+	DatasetID     *string `json:"dataset_id,omitempty"` // Null for all-datasets access
+	// DatasetName is the response-only current name of the requested
+	// dataset. Empty when the request is for all datasets, when the
+	// dataset no longer exists, or when the caller is not allowed to see
+	// it.
+	DatasetName string                    `json:"dataset_name,omitempty"`
+	Tier        SubscriptionTier          `json:"tier"` // "free" is the only value
+	Message     *string                   `json:"message,omitempty"`
+	Status      SubscriptionRequestStatus `json:"status"` // "pending", "approved", "rejected", "approved_pending_payment"
 	// PriceMonthlyCents is the per-consumer monthly USD-cents price the
 	// producer approved this request at (schema: subscription-request
 	// price_monthly_cents). nil/absent means the dataset's own marketplace
