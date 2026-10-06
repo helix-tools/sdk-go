@@ -526,7 +526,7 @@ func TestUploadDataset_ProcessesBeforePOST_SoRealSizesReachTheBody(t *testing.T)
 	}
 	gz, err := gzip.NewReader(bytes.NewReader(decompressed))
 	if err != nil {
-		t.Fatalf("gzip.NewReader on decrypted data: %v", err)
+		t.Fatalf("decompression reader on decrypted data: %v", err)
 	}
 	defer func() { _ = gz.Close() }()
 	gotPlaintext, err := io.ReadAll(gz)
@@ -622,7 +622,7 @@ func TestCompressData_GzipRoundTrip(t *testing.T) {
 
 	gz, err := gzip.NewReader(bytes.NewReader(compressed))
 	if err != nil {
-		t.Fatalf("gzip.NewReader: %v", err)
+		t.Fatalf("decompression reader: %v", err)
 	}
 	defer func() { _ = gz.Close() }()
 

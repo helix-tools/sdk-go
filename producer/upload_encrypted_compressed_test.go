@@ -49,7 +49,7 @@ func TestUploadDataset_CannotDisableEncryptionOrCompression(t *testing.T) {
 			},
 			false, "cannot be disabled",
 		},
-		{"invalid gzip level", func(o *UploadOptions) { o.CompressionLevel = 10 }, false, "failed to create compression writer"},
+		{"invalid compression level", func(o *UploadOptions) { o.CompressionLevel = 10 }, false, "failed to create compression writer"},
 		{
 			"metadata says encryption off",
 			func(o *UploadOptions) { o.Metadata = map[string]any{"encryption_enabled": false} },
@@ -276,7 +276,7 @@ func (f *uploadFixture) openUploaded(t *testing.T) []byte {
 	}
 	zr, err := gzip.NewReader(bytes.NewReader(gzipped))
 	if err != nil {
-		t.Fatalf("the uploaded object is not gzip once decrypted: %v", err)
+		t.Fatalf("the uploaded object is not compressed once decrypted: %v", err)
 	}
 	plain, err := io.ReadAll(zr)
 	if err != nil {

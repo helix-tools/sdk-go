@@ -163,7 +163,7 @@ func TestDownloadDataset_RejectsObjectNotEncryptedAndCompressed(t *testing.T) {
 		{"plaintext ndjson", plaintext, errNotEncrypted, "", 0},
 		{"plaintext shorter than the header", []byte("hi"), errNotEncrypted, "", 0},
 		{"zero-byte object", []byte{}, errNotEncrypted, "", 0},
-		{"gzip only, never encrypted", gzipBytes(plaintext), errNotEncrypted, "", 0},
+		{"compressed only, never encrypted", gzipBytes(plaintext), errNotEncrypted, "", 0},
 		{"envelope with a zero-length wrapped key", zeroKeyLen, errNotEncrypted, "", 0},
 		{"envelope cut short", truncated, errNotEncrypted, "", 0},
 		{"encrypted but never compressed", sealEnvelope(plaintext), errNotCompressed, "", 1},
@@ -173,7 +173,7 @@ func TestDownloadDataset_RejectsObjectNotEncryptedAndCompressed(t *testing.T) {
 		// text (see TestDecompressData_UpstreamCauseNeverLeaksIntoMessage
 		// for the clean-message-plus-cause contract this pins).
 		{"encrypted compressed data cut short", sealEnvelope(gzipBytes(plaintext)[:20]), nil, "decompression failed", 1},
-		{"encrypted gzip with garbage after it", sealEnvelope(append(gzipBytes(plaintext), []byte("trailing garbage")...)), nil, "decompression failed", 1},
+		{"encrypted compressed data with trailing garbage", sealEnvelope(append(gzipBytes(plaintext), []byte("trailing garbage")...)), nil, "decompression failed", 1},
 		{"ciphertext tampered with", tampered, nil, "decryption failed", 1},
 	}
 
