@@ -26,9 +26,14 @@ type SubscriptionRequest struct {
 	ProducerID    string  `json:"producer_id"`
 	ProducerName  string  `json:"producer_name"`
 	DatasetID     *string `json:"dataset_id,omitempty"` // Null for all-datasets access
-	Tier          string  `json:"tier"`                 // SubscriptionTier — canonical write value is "free"
-	Message       *string `json:"message,omitempty"`
-	Status        string  `json:"status"` // SubscriptionRequestStatus: "pending", "approved", "rejected"
+	// DatasetName is the response-only current name of the requested
+	// dataset. Empty when the request is for all datasets, when the
+	// dataset no longer exists, or when the caller is not allowed to see
+	// it.
+	DatasetName string                    `json:"dataset_name,omitempty"`
+	Tier        SubscriptionTier          `json:"tier"` // "free" is the only value
+	Message     *string                   `json:"message,omitempty"`
+	Status      SubscriptionRequestStatus `json:"status"` // "pending", "approved", "rejected", "approved_pending_payment"
 	// PriceMonthlyCents is the per-consumer monthly USD-cents price the
 	// producer approved this request at (schema: subscription-request
 	// price_monthly_cents). nil/absent means the dataset's own marketplace

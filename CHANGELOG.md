@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### Changed
+- Fields that hold an enum are now typed with the named string type for that
+  enum: `Dataset.Category`, `Dataset.Visibility`, `Dataset.Status`,
+  `Dataset.AccessTier`, `Subscription.Status`, `SubscriptionRequest.Status`,
+  `Company.CustomerType`, `Company.Status`, `Company.StripeStatus` and
+  `ProducerConsumerRelation.Status`. The values are unchanged, so existing code
+  still compiles.
+- `types.SubscriptionTier` now lists only `TierFree`, the one value the
+  subscription schema allows. `Subscription.Tier` and `SubscriptionRequest.Tier`
+  use it.
+- `TierStarter`, `TierBasic`, `TierPremium`, `TierProfessional` and
+  `TierEnterprise` are now `types.CompanyTier` values, the six-value tier that
+  companies and producer-consumer relations use. Their string values are
+  unchanged, and they still assign to a `SubscriptionTier`. `Company.Tier` and
+  `ProducerConsumerRelation.Tier` use `CompanyTier`.
+
+### Added
+- `types.DatasetCategory`, `types.DatasetVisibility`, `types.AccessTier`,
+  `types.CustomerType`, `types.StripeStatus`, `types.CompanyTier` (with
+  `types.CompanyTierFree`) and `types.ConsumerRelationStatus`. Each has one
+  constant per value in its schema enum.
+- `SubscriptionRequest.DatasetName`: the response-only current name of the
+  requested dataset. Empty when the request is for all datasets, when the
+  dataset no longer exists, or when the caller is not allowed to see it.
+
 ### Fixed
 - Shipped comments, docs and two human-readable error messages no longer name
   internal infrastructure. A failed credentials-provider setup now reads

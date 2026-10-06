@@ -102,19 +102,30 @@ type InviteConsumerResponse struct {
 	EmailError      string   `json:"email_error,omitempty"`
 }
 
+// ConsumerRelationStatus is the status of a producer-consumer relation. Its
+// values match the producer-consumer relation schema.
+type ConsumerRelationStatus = string
+
+// Canonical ConsumerRelationStatus values.
+const (
+	ConsumerRelationStatusProvisioning ConsumerRelationStatus = "provisioning"
+	ConsumerRelationStatusActive       ConsumerRelationStatus = "active"
+	ConsumerRelationStatusInactive     ConsumerRelationStatus = "inactive"
+)
+
 // ProducerConsumerRelation is one producer→consumer partner relation, as
 // returned by GET /v1/self/consumers. It matches the Go API source of
 // truth (self.ProducerConsumerRelation).
 type ProducerConsumerRelation struct {
-	ConsumerID      string   `json:"consumer_id"`
-	CompanyName     string   `json:"company_name,omitempty"`
-	BusinessEmail   string   `json:"business_email,omitempty"`
-	Status          string   `json:"status,omitempty"`
-	Tier            string   `json:"tier,omitempty"` // SubscriptionTier — canonical write value is "free"
-	ProducerID      string   `json:"producer_id"`
-	InvitedAt       string   `json:"invited_at"`
-	DeactivatedAt   *string  `json:"deactivated_at,omitempty"`
-	DatasetsGranted []string `json:"datasets_granted,omitempty"`
+	ConsumerID      string                 `json:"consumer_id"`
+	CompanyName     string                 `json:"company_name,omitempty"`
+	BusinessEmail   string                 `json:"business_email,omitempty"`
+	Status          ConsumerRelationStatus `json:"status,omitempty"`
+	Tier            CompanyTier            `json:"tier,omitempty"` // "free" or a paid tier, per the relation schema
+	ProducerID      string                 `json:"producer_id"`
+	InvitedAt       string                 `json:"invited_at"`
+	DeactivatedAt   *string                `json:"deactivated_at,omitempty"`
+	DatasetsGranted []string               `json:"datasets_granted,omitempty"`
 }
 
 // ListConsumersResponse is the envelope for GET /v1/self/consumers.

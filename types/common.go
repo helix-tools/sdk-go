@@ -149,6 +149,48 @@ const (
 	DatasetStatusArchived DatasetStatus = "archived"
 )
 
+// DatasetCategory is the category of a dataset. Its values match the dataset
+// schema.
+type DatasetCategory = string
+
+// Canonical DatasetCategory values.
+const (
+	DatasetCategoryPhoneNumbers       DatasetCategory = "phone-numbers"
+	DatasetCategoryContactData        DatasetCategory = "contact-data"
+	DatasetCategoryBusinessListings   DatasetCategory = "business-listings"
+	DatasetCategoryDemographicData    DatasetCategory = "demographic-data"
+	DatasetCategoryGeographicData     DatasetCategory = "geographic-data"
+	DatasetCategoryFinancialData      DatasetCategory = "financial-data"
+	DatasetCategoryTelecommunications DatasetCategory = "telecommunications"
+	DatasetCategoryMarketing          DatasetCategory = "marketing"
+	DatasetCategorySales              DatasetCategory = "sales"
+	DatasetCategoryAnalytics          DatasetCategory = "analytics"
+	DatasetCategoryGeneral            DatasetCategory = "general"
+	DatasetCategoryTest               DatasetCategory = "test"
+)
+
+// DatasetVisibility is who can see a dataset. Its values match the dataset
+// schema.
+type DatasetVisibility = string
+
+// Canonical DatasetVisibility values.
+const (
+	DatasetVisibilityPublic     DatasetVisibility = "public"
+	DatasetVisibilityPrivate    DatasetVisibility = "private"
+	DatasetVisibilityRestricted DatasetVisibility = "restricted"
+)
+
+// AccessTier is the access tier of a dataset. Its values match the dataset
+// schema.
+type AccessTier = string
+
+// Canonical AccessTier values.
+const (
+	AccessTierFree       AccessTier = "free"
+	AccessTierPremium    AccessTier = "premium"
+	AccessTierEnterprise AccessTier = "enterprise"
+)
+
 // DatasetUpdateInput contains fields for updating a dataset via PATCH.
 // All fields are optional (pointer types) - nil means "no change".
 type DatasetUpdateInput struct {
@@ -177,19 +219,19 @@ type DatasetUpdateInput struct {
 // straight to Producer.UpdateDataset / Consumer.GetDataset. IDAlias always
 // holds the raw "id" value.
 type Dataset struct {
-	ID            string        `json:"_id"`
-	IDAlias       string        `json:"id,omitempty"`
-	Name          string        `json:"name"`
-	Description   string        `json:"description"`
-	ProducerID    string        `json:"producer_id"`
-	Category      string        `json:"category"`
-	DataFreshness DataFreshness `json:"data_freshness"`
-	Visibility    string        `json:"visibility"`
-	Status        string        `json:"status"`
-	AccessTier    string        `json:"access_tier,omitempty"`
-	S3Key         string        `json:"s3_key"`
-	S3BucketName  string        `json:"s3_bucket_name,omitempty"`
-	S3Bucket      string        `json:"s3_bucket"`
+	ID            string            `json:"_id"`
+	IDAlias       string            `json:"id,omitempty"`
+	Name          string            `json:"name"`
+	Description   string            `json:"description"`
+	ProducerID    string            `json:"producer_id"`
+	Category      DatasetCategory   `json:"category"`
+	DataFreshness DataFreshness     `json:"data_freshness"`
+	Visibility    DatasetVisibility `json:"visibility"`
+	Status        DatasetStatus     `json:"status"`
+	AccessTier    AccessTier        `json:"access_tier,omitempty"`
+	S3Key         string            `json:"s3_key"`
+	S3BucketName  string            `json:"s3_bucket_name,omitempty"`
+	S3Bucket      string            `json:"s3_bucket"`
 	// Encryption is the API's top-level encryption flag. The create endpoint
 	// PROMOTES metadata.encryption_enabled to this field and drops it from
 	// metadata, so download must fall back here (mirrors the Python SDK).

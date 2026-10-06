@@ -24,20 +24,60 @@ const (
 	CompanyStatusOffboarded         CompanyStatus = "offboarded"
 )
 
+// CustomerType is whether a company is a producer, a consumer, or both. Its
+// values match the company schema.
+type CustomerType = string
+
+// Canonical CustomerType values.
+const (
+	CustomerTypeProducer CustomerType = "producer"
+	CustomerTypeConsumer CustomerType = "consumer"
+	CustomerTypeBoth     CustomerType = "both"
+)
+
+// CompanyTier is the tier on a company and on a producer-consumer relation.
+// Its values match the company schema.
+type CompanyTier = string
+
+// Canonical CompanyTier values. TierStarter through TierEnterprise keep their
+// names, so existing code still compiles: the alias types are identical.
+const (
+	CompanyTierFree  CompanyTier = "free"
+	TierStarter      CompanyTier = "starter"
+	TierBasic        CompanyTier = "basic"
+	TierPremium      CompanyTier = "premium"
+	TierProfessional CompanyTier = "professional"
+	TierEnterprise   CompanyTier = "enterprise"
+)
+
+// StripeStatus is the status of a company's Stripe subscription. Its values
+// match the company schema, which also allows null.
+type StripeStatus = string
+
+// Canonical StripeStatus values.
+const (
+	StripeStatusActive     StripeStatus = "active"
+	StripeStatusPastDue    StripeStatus = "past_due"
+	StripeStatusCanceled   StripeStatus = "canceled"
+	StripeStatusUnpaid     StripeStatus = "unpaid"
+	StripeStatusTrialing   StripeStatus = "trialing"
+	StripeStatusIncomplete StripeStatus = "incomplete"
+)
+
 // Company represents a company/customer in the system.
 type Company struct {
 	ID                   string           `json:"_id"`
 	CompanyName          string           `json:"company_name"`
 	BusinessEmail        string           `json:"business_email"`
 	BillingEmail         string           `json:"billing_email,omitempty"`
-	CustomerType         string           `json:"customer_type"` // "producer", "consumer", or "both"
+	CustomerType         CustomerType     `json:"customer_type"`
 	Phone                *string          `json:"phone,omitempty"`
 	Address              *Address         `json:"address,omitempty"`
 	StripeCustomerID     *string          `json:"stripe_customer_id,omitempty"`
 	StripeSubscriptionID string           `json:"stripe_subscription_id,omitempty"`
-	StripeStatus         string           `json:"stripe_status,omitempty"`
-	Status               string           `json:"status"`         // CompanyStatus: one of the 12 CompanyStatus* values (provisioning ... offboarded)
-	Tier                 string           `json:"tier,omitempty"` // SubscriptionTier — canonical write value is "free"
+	StripeStatus         StripeStatus     `json:"stripe_status,omitempty"`
+	Status               CompanyStatus    `json:"status"`         // one of the 12 CompanyStatus* values (provisioning ... offboarded)
+	Tier                 CompanyTier      `json:"tier,omitempty"` // "free" or a paid tier, per the company schema
 	FeatureFlags         FeatureFlags     `json:"feature_flags,omitempty"`
 	Settings             *CompanySettings `json:"settings,omitempty"`
 	Onboarding           *OnboardingInfo  `json:"onboarding,omitempty"`
