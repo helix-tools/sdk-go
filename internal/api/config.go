@@ -10,11 +10,11 @@ package api
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"testing"
 
 	stscreds "github.com/helix-tools/sdk-go/v2/credentials"
+	"github.com/helix-tools/sdk-go/v2/internal/sdkerr"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -152,6 +152,11 @@ func NewAWSConfig(ctx context.Context, creds Credentials, region string) (aws.Co
 	)
 }
 
+// newBrokerProvider builds the broker-backed provider for NewAWSConfigSTS. It
+// is a variable only so a test can drive the provider-setup failure branch with
+// a controlled cause.
+var newBrokerProvider = stscreds.NewProvider
+
 // NewAWSConfigSTS creates an AWS config using the credential-broker
 // auto-refresh provider (stscreds.NewCredentialsCache) instead of a static
 // key. It bootstrap-authenticates mint requests with the given static creds
@@ -163,7 +168,7 @@ func NewAWSConfig(ctx context.Context, creds Credentials, region string) (aws.Co
 // "sts" in consumer.NewConsumer/producer.NewProducer. NewAWSConfig is
 // untouched.
 func NewAWSConfigSTS(ctx context.Context, apiEndpoint string, creds Credentials, region string) (aws.Config, error) {
-	provider, err := stscreds.NewProvider(stscreds.BrokerConfig{
+	provider, err := newBrokerProvider(stscreds.BrokerConfig{
 		APIEndpoint:        apiEndpoint,
 		CustomerID:         creds.CustomerID,
 		Region:             region,
@@ -171,7 +176,7 @@ func NewAWSConfigSTS(ctx context.Context, apiEndpoint string, creds Credentials,
 		AWSSecretAccessKey: creds.AWSSecretAccessKey,
 	})
 	if err != nil {
-		return aws.Config{}, fmt.Errorf("failed to create the credentials provider: %w", err)
+		return aws.Config{}, sdkerr.Wrap("failed to create the credentials provider", err)
 	}
 
 	return config.LoadDefaultConfig(ctx,

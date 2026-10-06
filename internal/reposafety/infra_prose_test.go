@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -173,7 +174,7 @@ func frag(parts ...string) string {
 // from fragments.
 func TestInfraPatternMatchesProse(t *testing.T) {
 	mustMatch := []string{
-		"encrypted with " + frag("A", "ES-256-GCM"),
+		"encrypted with " + frag("A", "ES-256-", "G", "CM"),
 		"cipher " + frag("G", "CM") + " mode",
 		"the " + frag("K", "MS") + " Decrypt call",
 		"lower-case " + frag("k", "ms") + " in prose",
@@ -184,11 +185,11 @@ func TestInfraPatternMatchesProse(t *testing.T) {
 		"the key " + frag("A", "RN"),
 		"resource " + frag("a", "rn") + ":example",
 		"the " + frag("bucket ", "name"),
-		"account " + "123456789012",
-		"https://" + frag("s3.", "amazon", "aws.com"),
+		"account " + frag("1234", "56789012"),
+		"https://" + frag("s", "3.", "amazon", "aws.com"),
 		"resource " + frag("amazon", "aws") + " host",
 		"dme-" + "producer",
-		"ships to " + frag("s3", "://example"),
+		"ships to " + frag("s", "3", "://example"),
 		"access key " + frag("AK", "IAEXAMPLE000000000"),
 		"see " + frag("Dynamo", "DB"),
 		"behind " + frag("Cloud", "Front"),
@@ -204,14 +205,14 @@ func TestInfraPatternMatchesProse(t *testing.T) {
 	}
 
 	mustNotMatch := []string{
-		"ErrorCategory" + frag("KMS", "Decrypt"),
-		"Producer." + frag("KMS", "KeyID"),
+		"ErrorCategory" + frag("K", "MS", "Decrypt"),
+		"Producer." + frag("K", "MS", "KeyID"),
 		frag("s", "3", "_bucket_name"),
 		"sqs_queue_url",
 		"RateLimit" + frag("Bucket"),
-		"Load" + frag("Credentials", "From", "SSM"),
+		"Load" + frag("Credentials", "From", "S", "SM"),
 		"I" + frag("AMUser", "A", "RN"),
-		"Credential" + frag("Mode", "STS"),
+		"Credential" + frag("Mode", "S", "TS"),
 		`"` + frag("s", "ts") + `"`,
 		"the consumer notification mechanism is " + frag("SQS"),
 		"SQS queue",
@@ -267,5 +268,37 @@ func TestInfraScanCoversEverySourceKind(t *testing.T) {
 	mdHits := infraHitsIn([]proseSpan{{line: 1, text: md}})
 	if len(mdHits) != 1 || mdHits[0].term != frag("S", "SM") || mdHits[0].line != 1 {
 		t.Errorf("markdown scan = %+v, want exactly one hit on line 1 for the banned term; the allowlisted import path must not count", mdHits)
+	}
+}
+
+// TestNoInfrastructureProseInGuardTests applies the same term list to the raw
+// text of every test source in this package, this file included. The Go-prose
+// scan above reads only published non-test sources, so without this a plain
+// spelling in a test file, even in a comment, would go unchecked. The text is
+// matched raw on purpose: the samples above are split into fragments, and a
+// plain spelling anywhere in the file is the mistake this catches.
+func TestNoInfrastructureProseInGuardTests(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("published_content: could not determine this file's path via runtime.Caller")
+	}
+
+	files, err := filepath.Glob(filepath.Join(filepath.Dir(thisFile), "*_test.go"))
+	if err != nil {
+		t.Fatalf("published_content: listing the guard's test sources: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("published_content: no guard test sources found — refusing to run a guard that would trivially pass")
+	}
+
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("published_content: reading %s: %v", filepath.Base(f), err)
+		}
+
+		for _, h := range infraHitsIn([]proseSpan{{line: 1, text: string(data)}}) {
+			t.Errorf("%s:%d: infrastructure term %q in guard test source: %q", filepath.Base(f), h.line, h.term, h.excerpt)
+		}
 	}
 }

@@ -160,7 +160,7 @@ func TestUploadDataset_DefaultOptionsStayEncryptedAndCompressed(t *testing.T) {
 // TestUploadDataset_DeprecatedFlagsAreIgnored: Encrypt and Compress are
 // deprecated and ignored. A zero-value UploadOptions, a caller who leaves the
 // bools false, and the defaults all get the same upload. The check is at the
-// wire: the object the upload stored must decrypt and gunzip back to the
+// wire: the object the upload stored must decrypt and decompress back to the
 // original bytes, and the record must say encrypted and compressed.
 func TestUploadDataset_DeprecatedFlagsAreIgnored(t *testing.T) {
 	plaintext := []byte(strings.Repeat(`{"phone":"+15550100"}`+"\n", 40))
@@ -254,7 +254,7 @@ func newUploadFixture(t *testing.T) *uploadFixture {
 	return f
 }
 
-// openUploaded reverses what UploadDataset stored: envelope, then gzip.
+// openUploaded reverses what UploadDataset stored: envelope, then compression.
 func (f *uploadFixture) openUploaded(t *testing.T) []byte {
 	t.Helper()
 	obj := f.uploaded
@@ -373,7 +373,7 @@ func TestUploadDataset_AcmeCallPathIsUnchanged(t *testing.T) {
 		}
 	}
 
-	// The stored object is gzip inside the encryption envelope, and its length
+	// The stored object is compressed inside the encryption envelope, and its length
 	// is what the record reports.
 	if got := f.openUploaded(t); !bytes.Equal(got, plaintext) {
 		t.Fatalf("stored object decrypts+gunzips to %d bytes, want the original %d", len(got), len(plaintext))
@@ -483,7 +483,7 @@ func TestCreateDatasetRecord_FlagsAreAlwaysTrue(t *testing.T) {
 
 // TestProcessFile_ResultAlwaysSaysEncryptedAndCompressed: the sizes a real
 // processFile pass hands to the record carry both flags as true, and the bytes
-// it returns are the gzip-then-envelope object, not the input.
+// it returns are the compressed-then-envelope object, not the input.
 func TestProcessFile_ResultAlwaysSaysEncryptedAndCompressed(t *testing.T) {
 	f := newUploadFixture(t)
 	plaintext := []byte(strings.Repeat(`{"a":1}`+"\n", 50))

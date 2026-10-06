@@ -87,7 +87,7 @@ const (
 )
 
 // errNotEncrypted and errNotCompressed mark a downloaded object that does not
-// have the shape every upload produces (gzip, then the encryption envelope).
+// have the shape every upload produces (compressed, then the encryption envelope).
 // A download never passes such an object through: it is an error.
 var (
 	errNotEncrypted  = errors.New("object is not in the encrypted format every upload produces; refusing to return it unencrypted")
@@ -479,8 +479,8 @@ func (c *Consumer) GetDownloadURL(ctx context.Context, datasetID string) (*Downl
 // overridden when metadata.encryption_enabled is explicitly present. The create
 // endpoint PROMOTES metadata.encryption_enabled to the top-level `encryption`
 // field and drops it from metadata, so a metadata-only read wrongly sees false
-// and skips decrypt (then gunzips still-encrypted bytes -> "gzip: invalid
-// header"). Mirrors the Python SDK's
+// and skips decrypt (then decompresses still-encrypted bytes and fails on the
+// header). Mirrors the Python SDK's
 // metadata.get("encryption_enabled", dataset.get("encryption", False)).
 //
 // isCompressed is metadata-only (default false): the API keeps
@@ -706,7 +706,7 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 	return nil
 }
 
-// decryptAndDecompress reverses what every upload does — gzip, then encrypt —
+// decryptAndDecompress reverses what every upload does — compress, then encrypt —
 // and is the only way DownloadDataset turns a stored object into dataset
 // bytes: there is no option to skip either step. An object that is not
 // encrypted, or not compressed, is an error, never a pass-through. On failure
@@ -845,7 +845,7 @@ func (c *Consumer) decryptData(ctx context.Context, data []byte) ([]byte, error)
 	return plaintext, nil
 }
 
-// decompressData gunzips data. Bytes that are not a gzip stream are refused
+// decompressData decompresses data. Bytes that are not a compressed stream are refused
 // with errNotCompressed: a download never returns an uncompressed object.
 func (c *Consumer) decompressData(data []byte) ([]byte, error) {
 	gr, err := gzip.NewReader(bytes.NewReader(data))

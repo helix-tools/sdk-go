@@ -167,9 +167,9 @@ func TestDownloadDataset_RejectsObjectNotEncryptedAndCompressed(t *testing.T) {
 		{"envelope with a zero-length wrapped key", zeroKeyLen, errNotEncrypted, "", 0},
 		{"envelope cut short", truncated, errNotEncrypted, "", 0},
 		{"encrypted but never compressed", sealEnvelope(plaintext), errNotCompressed, "", 1},
-		// A cut-short gzip stream fails mid-decompress, not at the gzip
+		// A cut-short compressed stream fails mid-decompress, not at the
 		// header check, so it is a "decompression failed" error like the
-		// trailing-garbage case below — never the raw stdlib flate/gzip
+		// trailing-garbage case below — never the raw stdlib decompression library
 		// text (see TestDecompressData_UpstreamCauseNeverLeaksIntoMessage
 		// for the clean-message-plus-cause contract this pins).
 		{"encrypted gzip cut short", sealEnvelope(gzipBytes(plaintext)[:20]), nil, "decompression failed", 1},
@@ -252,7 +252,7 @@ func TestDecryptData_WithoutKMSClientIsAnError(t *testing.T) {
 
 // TestDownloadOutcome_RefusedObject_ReportsCategory: a refused object is
 // reported through the outcome callback like any other download failure —
-// kms_decrypt for a bad envelope, decompress for a missing gzip layer.
+// kms_decrypt for a bad envelope, decompress for a missing compression layer.
 func TestDownloadOutcome_RefusedObject_ReportsCategory(t *testing.T) {
 	plaintext := []byte("just some plaintext rows\n")
 

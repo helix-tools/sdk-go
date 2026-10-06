@@ -328,12 +328,12 @@ func TestDownloadOutcome_ErrorMessageDoesNotLeakUpstreamCause(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
-// decompressData (gzip).
+// decompressData (compressed).
 // ----------------------------------------------------------------------------
 
 // TestDecompressData_TruncatedStreamCauseNeverLeaksIntoMessage is the
 // bypass/regression test for the "encrypted gzip cut short" case: a
-// TRUNCATED (but header-valid) gzip stream fails inside io.ReadAll, not at
+// TRUNCATED (but header-valid) compressed stream fails inside io.ReadAll, not at
 // gzip.NewReader, so it must go through the SAME clean-message-plus-cause
 // path as any other decompression failure — not surface the raw
 // io.ErrUnexpectedEOF text the way the pre-fix code did.
@@ -361,7 +361,7 @@ func TestDecompressData_TruncatedStreamCauseNeverLeaksIntoMessage(t *testing.T) 
 // TestDecompressData_NotCompressed_SentinelAndCauseBothReachable pins that
 // errNotCompressed — an EXISTING exported-package sentinel other code and
 // callers use errors.Is against — keeps matching after the fix, while the
-// raw gzip header-parse error is ALSO reachable for debugging, and never
+// raw compression header-parse error is ALSO reachable for debugging, and never
 // printed into the message.
 func TestDecompressData_NotCompressed_SentinelAndCauseBothReachable(t *testing.T) {
 	c := newTestConsumer("https://objects.test")

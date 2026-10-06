@@ -373,7 +373,7 @@ func TestUploadDataset_NothingUploadedWhenPOSTRefused(t *testing.T) {
 // (compressed+encrypted) bytes, not zeros — only possible if processFile ran
 // before createDatasetRecord built the payload. It also exercises the
 // presigned PUT and the trailing GET, and — using the fake KMS server's
-// captured (real) data key — fully AES-256-GCM DECRYPTS and gunzips the
+// captured (real) data key — fully AES-256-GCM DECRYPTS and decompresses the
 // uploaded envelope back to the exact original plaintext, proving a real
 // round trip rather than just the envelope's byte-length shape. A tampered
 // copy of the same envelope must fail to decrypt (negative control), which
@@ -607,7 +607,7 @@ func TestCreateDatasetRecord_SizeBytesTopLevel_TracksProcessedBytes(t *testing.T
 // encryptData at all (only call order and payload construction changed,
 // verified by `git diff` leaving both functions untouched): it proves
 // compressData — the exact function processFile calls, unmodified by this
-// PR — still gunzips back to the original plaintext byte-for-byte, the same
+// PR — still decompresses back to the original plaintext byte-for-byte, the same
 // compressData v2.15.0 shipped. (processFile itself can't isolate
 // compression alone: it hard-requires Encrypt=true, covered by the
 // KMS-mocked end-to-end tests above.)

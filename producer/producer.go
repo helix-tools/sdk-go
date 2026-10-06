@@ -209,6 +209,11 @@ const producerConfigPath = "/v1/self/producer-config"
 // an unreachable API delays construction instead of hanging it.
 var producerConfigTimeout = 30 * time.Second
 
+// newGCMWithNonceSize builds the AEAD for encryptData. It is a variable only so
+// a test can drive the cipher-setup failure branch, which cannot fail for the
+// fixed 16-byte nonce.
+var newGCMWithNonceSize = cipher.NewGCMWithNonceSize
+
 // maxProducerConfigBytes caps how much of the producer-config answer is read.
 const maxProducerConfigBytes = 64 << 10
 
@@ -325,7 +330,7 @@ func validateCredentials(ctx context.Context, stsClient *sts.Client, apiKeyConfi
 	return nil
 }
 
-// compressData compresses data using gzip.
+// compressData compresses data.
 func (p *Producer) compressData(data []byte, level int) ([]byte, error) {
 	var buf bytes.Buffer
 	gzWriter, err := gzip.NewWriterLevel(&buf, level)
@@ -377,9 +382,9 @@ func (p *Producer) encryptData(ctx context.Context, data []byte) ([]byte, error)
 	}
 
 	// Use 16-byte nonce to match Python's os.urandom(16).
-	aesGCM, err := cipher.NewGCMWithNonceSize(block, 16)
+	aesGCM, err := newGCMWithNonceSize(block, 16)
 	if err != nil {
-		return nil, fmt.Errorf("failed to prepare encryption: %w", err)
+		return nil, sdkerr.Wrap("failed to prepare encryption", err)
 	}
 
 	// Encrypt the data (auth tag is automatically appended).
@@ -688,7 +693,7 @@ var flagKeysThatMustStayOn = []string{"encryption", "encryption_enabled", "compr
 const minDescriptionLength = 10
 
 // validateUploadOptions enforces the upload invariant: every upload is
-// gzip-compressed and then encrypted, and no option turns either off. It runs
+// compressed and then encrypted, and no option turns either off. It runs
 // before the file is read and before any network call (the key lookup included), and it
 // refuses:
 //   - a Producer without an encryption key,
