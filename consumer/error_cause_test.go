@@ -332,7 +332,7 @@ func TestDownloadOutcome_ErrorMessageDoesNotLeakUpstreamCause(t *testing.T) {
 // ----------------------------------------------------------------------------
 
 // TestDecompressData_TruncatedStreamCauseNeverLeaksIntoMessage is the
-// bypass/regression test for the "encrypted gzip cut short" case: a
+// bypass/regression test for the "encrypted compressed data cut short" case: a
 // TRUNCATED (but header-valid) compressed stream fails inside io.ReadAll, not at
 // gzip.NewReader, so it must go through the SAME clean-message-plus-cause
 // path as any other decompression failure — not surface the raw

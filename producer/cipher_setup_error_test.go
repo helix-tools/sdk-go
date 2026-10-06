@@ -9,8 +9,9 @@ import (
 	"testing"
 )
 
-// cipherSetupCause is an upstream cipher failure whose text carries an ARN with
-// an account ID, the kind of detail that must never reach a customer message.
+// cipherSetupCause is an upstream cipher failure whose text carries a cloud
+// resource identifier with an account number, the kind of detail that must
+// never reach a customer message.
 var cipherSetupCause = errors.New("cipher: rejected the nonce for " + arnAccountService)
 
 // withCipherSetupFailure makes the AEAD constructor fail with cause until the

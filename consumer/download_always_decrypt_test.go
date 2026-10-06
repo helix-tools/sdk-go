@@ -172,7 +172,7 @@ func TestDownloadDataset_RejectsObjectNotEncryptedAndCompressed(t *testing.T) {
 		// trailing-garbage case below — never the raw stdlib decompression library
 		// text (see TestDecompressData_UpstreamCauseNeverLeaksIntoMessage
 		// for the clean-message-plus-cause contract this pins).
-		{"encrypted gzip cut short", sealEnvelope(gzipBytes(plaintext)[:20]), nil, "decompression failed", 1},
+		{"encrypted compressed data cut short", sealEnvelope(gzipBytes(plaintext)[:20]), nil, "decompression failed", 1},
 		{"encrypted gzip with garbage after it", sealEnvelope(append(gzipBytes(plaintext), []byte("trailing garbage")...)), nil, "decompression failed", 1},
 		{"ciphertext tampered with", tampered, nil, "decryption failed", 1},
 	}

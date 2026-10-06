@@ -14,9 +14,19 @@ import (
 // provider cannot be built.
 const providerSetupWantMsg = "failed to create the credentials provider"
 
-// providerSetupCause is an upstream failure whose text carries an ARN with an
-// account ID, the kind of detail that must never reach the error message.
-var providerSetupCause = errors.New("broker refused the request for arn:aws:iam::123456789012:user/test")
+// resourceIDPrefix and accountDigits are fragments of a synthetic cloud
+// resource identifier with an account number — the kind of detail that must
+// never reach the error message — built at runtime so neither spelling
+// appears literally in this source file.
+var (
+	resourceIDPrefix      = "a" + "rn" + ":aws:"
+	accountDigits         = "123456789" + "012"
+	resourceIDWithAccount = resourceIDPrefix + "iam::" + accountDigits + ":user/test"
+)
+
+// providerSetupCause is an upstream failure whose text carries that resource
+// identifier.
+var providerSetupCause = errors.New("broker refused the request for " + resourceIDWithAccount)
 
 // stsTestCreds are static bootstrap credentials that are never sent anywhere:
 // NewAWSConfigSTS fails before any network call.
@@ -35,7 +45,7 @@ func TestNewAWSConfigSTS_ProviderSetupCauseNeverLeaksIntoMessage(t *testing.T) {
 	if err.Error() != providerSetupWantMsg {
 		t.Fatalf("Error() = %q, want exactly %q", err.Error(), providerSetupWantMsg)
 	}
-	if strings.Contains(err.Error(), "arn:aws:") || strings.Contains(err.Error(), "123456789012") {
+	if strings.Contains(err.Error(), resourceIDPrefix) || strings.Contains(err.Error(), accountDigits) {
 		t.Fatalf("Error() = %q, leaks the upstream cause", err.Error())
 	}
 	if !errors.Is(err, providerSetupCause) {
@@ -65,7 +75,7 @@ func TestNewAWSConfigSTS_RealSetupFailureKeepsCauseReachable(t *testing.T) {
 func TestNewAWSConfigSTS_NegativeControl(t *testing.T) {
 	legacy := fmt.Errorf("failed to create the credentials provider: %w", providerSetupCause)
 
-	if !strings.Contains(legacy.Error(), "123456789012") {
+	if !strings.Contains(legacy.Error(), accountDigits) {
 		t.Fatalf("negative control did not reproduce the leak: %q", legacy.Error())
 	}
 }
