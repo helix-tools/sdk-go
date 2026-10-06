@@ -27,7 +27,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: helix-tools/sdk-schemas
-        ref: v1.14.0
+        ref: v1.15.0
         path: schemas
         token: ${{ secrets.GH_PAT }}
 
