@@ -11,8 +11,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -50,6 +52,32 @@ func assertCauseReachable(t *testing.T, err error, wantSubstring string) {
 	}
 	if !strings.Contains(cause.Error(), wantSubstring) {
 		t.Fatalf("unwrapped cause = %q, want it to contain %q", cause.Error(), wantSubstring)
+	}
+}
+
+// assertSanitizedCauseReachable is assertCauseReachable's counterpart for
+// the two call sites sdkerr.SanitizeCause is explicitly applied at: (a) a
+// genuine no-response transport failure (http.Client.Do returning a nil
+// *http.Response — an unreachable host, never a response-bearing error,
+// which keeps using assertCauseReachable above), and (b) a request-
+// construction failure (http.NewRequestWithContext failing on a malformed
+// presigned URL) — a DIFFERENT path that never even reaches
+// httpClient.Do, but is sanitized for the same reason: the URL it was
+// given carries a SigV4 signature/credential scope. Either way, the cause
+// stays non-nil (for debugging) but its own Error() text — at every depth
+// the chain goes to — must never contain the host/URL substring the
+// pre-fix code used to leak.
+func assertSanitizedCauseReachable(t *testing.T, err error, neverContains string) {
+	t.Helper()
+	depth := 0
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		depth++
+		if depth > 1 && strings.Contains(e.Error(), neverContains) {
+			t.Fatalf("chain node #%d (%T).Error() = %q, leaks %q", depth, e, e.Error(), neverContains)
+		}
+	}
+	if depth < 2 {
+		t.Fatalf("errors.Unwrap(err) = nil, want a sanitized cause still reachable for debugging")
 	}
 }
 
@@ -222,7 +250,7 @@ func TestDownloadDataset_RequestBuildFailureCauseNeverLeaksIntoMessage(t *testin
 	err := c.DownloadDataset(context.Background(), "ds-1", t.TempDir()+"/out.ndjson")
 
 	assertClean(t, err, "failed to build download request")
-	assertCauseReachable(t, err, arnAccountService)
+	assertSanitizedCauseReachable(t, err, arnAccountService)
 }
 
 type malformedDownloadURLTransport struct{}
@@ -462,10 +490,11 @@ func TestDeleteNotification_SQSCauseNeverLeaksIntoMessage(t *testing.T) {
 // TestResolveQueueURL_NestedTwoLevelsDeep is the bypass test named in the
 // brief: an upstream error wrapped ONCE by makeAPIRequest (clean) and then
 // wrapped AGAIN by resolveQueueURL's own "failed to get subscriptions: %w"
-// must still not leak the original cause into the final, doubly-wrapped
-// message — and the cause must still be reachable by unwrapping twice.
+// must still not leak the internal API host into the final, doubly-wrapped
+// message, or anywhere in a full Unwrap walk past it — a sanitized cause
+// still reachable for debugging.
 func TestResolveQueueURL_NestedTwoLevelsDeep(t *testing.T) {
-	transport := &arnTransportOnce{arn: arnAccountService}
+	transport := &dialFailureTransportOnce{}
 	c := newTestConsumer("https://api.test")
 	c.httpClient = &http.Client{Transport: transport}
 
@@ -474,31 +503,24 @@ func TestResolveQueueURL_NestedTwoLevelsDeep(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error")
 	}
-	if strings.Contains(err.Error(), arnAccountService) {
+	if strings.Contains(err.Error(), "api.test") {
 		t.Fatalf("Error() = %q, leaks the cause nested two levels deep", err.Error())
 	}
 	if !strings.HasPrefix(err.Error(), "failed to get subscriptions: request failed") {
 		t.Fatalf("Error() = %q, want the doubly-wrapped clean message", err.Error())
 	}
-	// Unwrap twice: resolveQueueURL's fmt.Errorf(%w) -> makeAPIRequest's
-	// sdkerr.Wrap -> the raw transport error carrying the ARN.
-	inner := errors.Unwrap(err)
-	if inner == nil {
-		t.Fatal("errors.Unwrap(err) = nil at the first layer")
-	}
-	cause := errors.Unwrap(inner)
-	if cause == nil || !strings.Contains(cause.Error(), arnAccountService) {
-		t.Fatalf("unwrapped cause = %v, want the original ARN-carrying error reachable", cause)
-	}
+	assertSanitizedCauseReachable(t, err, "api.test")
 }
 
-// arnTransportOnce fails the FIRST request (the subscriptions list call) with
-// a raw transport error carrying an ARN, so PollNotifications/ClearQueue's
-// makeAPIRequest -> resolveQueueURL double-wrap is exercised.
-type arnTransportOnce struct{ arn string }
+// dialFailureTransportOnce fails the FIRST request (the subscriptions list
+// call) with a generic connection-refused error — the shape a real dial
+// failure takes — so PollNotifications/ClearQueue's makeAPIRequest ->
+// resolveQueueURL double-wrap is exercised. http.Client.Do wraps it in a
+// *url.Error carrying the real (internal) API host in its URL field.
+type dialFailureTransportOnce struct{}
 
-func (a *arnTransportOnce) RoundTrip(*http.Request) (*http.Response, error) {
-	return nil, fmt.Errorf("dial tcp: connection refused talking to a host serving %s", a.arn)
+func (*dialFailureTransportOnce) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("connection refused")
 }
 
 // ----------------------------------------------------------------------------
@@ -507,16 +529,17 @@ func (a *arnTransportOnce) RoundTrip(*http.Request) (*http.Response, error) {
 
 // TestMakeAPIRequest_TransportFailureCauseNeverLeaksIntoMessage covers the
 // bare `return err` sites this fix converts to sdkerr.Wrap: a raw transport
-// error (which can carry a presigned URL's SigV4 query string — itself
-// account/credential-bearing) must never reach the customer unwrapped.
+// error (which can carry the internal API host, via http.Client.Do's own
+// *url.Error wrapping) must never reach the customer unwrapped, at any
+// depth.
 func TestMakeAPIRequest_TransportFailureCauseNeverLeaksIntoMessage(t *testing.T) {
 	c := newTestConsumer("https://api.test")
-	c.httpClient = &http.Client{Transport: &arnTransportOnce{arn: arnAccountService}}
+	c.httpClient = &http.Client{Transport: &dialFailureTransportOnce{}}
 
 	_, err := c.GetDataset(context.Background(), "ds-1")
 
 	assertClean(t, err, "request failed")
-	assertCauseReachable(t, err, arnAccountService)
+	assertSanitizedCauseReachable(t, err, "api.test")
 }
 
 // TestDownloadDataset_PresignedURLTransportFailureCauseNeverLeaksIntoMessage
@@ -530,20 +553,218 @@ func TestDownloadDataset_PresignedURLTransportFailureCauseNeverLeaksIntoMessage(
 	err := c.DownloadDataset(context.Background(), "ds-1", t.TempDir()+"/out.ndjson")
 
 	assertClean(t, err, "failed to download")
-	assertCauseReachable(t, err, "X-Amz-Signature")
+	assertSanitizedCauseReachable(t, err, "X-Amz-Signature")
 }
 
 type downloadFailsOnObjectFetch struct{}
 
+// RoundTrip fails the GET to the presigned object URL with a generic
+// connection-reset error — the shape a real dropped connection takes.
+// http.Client.Do wraps it in a *url.Error carrying the REAL presigned URL
+// (with its X-Amz-Signature query string) in its URL field, exactly like a
+// real presigned-download failure.
 func (downloadFailsOnObjectFetch) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.URL.Path == "/object" {
-		return nil, fmt.Errorf("dial tcp: connection reset fetching %s?X-Amz-Signature=deadbeef", req.URL.Path)
+		return nil, errors.New("connection reset by peer")
 	}
 	switch {
 	case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/download"):
-		return jsonResponse(req, `{"download_url":"https://objects.test/object"}`), nil
+		return jsonResponse(req, `{"download_url":"https://objects.test/object?X-Amz-Signature=deadbeef"}`), nil
 	default:
 		return jsonResponse(req, `{"_id":"ds-1","name":"n","metadata":{"compression_enabled":false,"encryption_enabled":false}}`), nil
+	}
+}
+
+// redirectResponse builds the *http.Response http.Client.Do sees for a 3xx
+// with a Location header — used below to drive its CheckRedirect callback
+// without a real httptest server (net/http itself reads and closes the
+// body before deciding whether to follow it; http.NoBody is enough).
+func redirectResponse(req *http.Request, location string) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusFound,
+		Status:     "302 Found",
+		Header:     http.Header{"Location": []string{location}},
+		Body:       http.NoBody,
+		Request:    req,
+	}
+}
+
+type redirectingTransport struct{}
+
+func (redirectingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return redirectResponse(req, "https://api.test/redirected"), nil
+}
+
+// TestMakeAPIRequest_RefusedRedirectKeepsRawURLError: when the caller's own
+// httpClient refuses a redirect via CheckRedirect, http.Client.Do returns
+// the (non-nil) Response alongside the (non-nil) error together — the
+// service DID answer, so this is not a genuine no-response transport
+// failure and must never be run through SanitizeCause. Mirrors
+// credentials.TestProvider_Mint_RefusedRedirectKeepsRawURLError.
+func TestMakeAPIRequest_RefusedRedirectKeepsRawURLError(t *testing.T) {
+	errRefused := errors.New("redirect refused by test policy")
+	c := newTestConsumer("https://api.test")
+	c.httpClient = &http.Client{
+		Transport:     redirectingTransport{},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return errRefused },
+	}
+
+	_, err := c.GetDataset(context.Background(), "ds-1")
+	if err == nil {
+		t.Fatal("expected an error for a refused redirect")
+	}
+
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		t.Fatalf("errors.As(err, *url.Error) = false, want true for a response-bearing refused redirect (err=%v)", err)
+	}
+	if !errors.Is(err, errRefused) {
+		t.Error("errors.Is(err, errRefused) = false, want the refusal reachable as the cause")
+	}
+}
+
+// singleCloseBody errors if Close is called more than once — unlike
+// http.NoBody (what redirectResponse above uses), which tolerates a second
+// Close silently. net/http has already closed the response body itself by
+// the time a refused-redirect error comes back (Client.Do's own doc: "even
+// then the returned Response.Body is already closed"), so a wrap site
+// closing it again on top of that is a double Close that this type makes
+// caller-visible instead of silently swallowed.
+type singleCloseBody struct{ closeCalls int }
+
+func (b *singleCloseBody) Read([]byte) (int, error) { return 0, io.EOF }
+func (b *singleCloseBody) Close() error {
+	b.closeCalls++
+	if b.closeCalls > 1 {
+		return fmt.Errorf("Close called %d times, want at most 1", b.closeCalls)
+	}
+	return nil
+}
+
+// singleCloseRedirectingTransport is redirectingTransport, but with a
+// caller-supplied body the test can inspect afterward instead of the
+// shared, Close-tolerant http.NoBody.
+type singleCloseRedirectingTransport struct{ body *singleCloseBody }
+
+func (t singleCloseRedirectingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusFound,
+		Status:     "302 Found",
+		Header:     http.Header{"Location": []string{"https://api.test/redirected"}},
+		Body:       t.body,
+		Request:    req,
+	}, nil
+}
+
+// TestMakeAPIRequest_RefusedRedirectClosesBodyExactlyOnce is the regression
+// test for the double-Close fix: net/http already closes resp.Body itself
+// before returning a refused-redirect error, so makeAPIRequest's own
+// explicit Close call on that branch — removed by this fix — must never
+// run. A second Close call on singleCloseBody surfaces as an error from
+// Close instead of a silently-swallowed double Close.
+func TestMakeAPIRequest_RefusedRedirectClosesBodyExactlyOnce(t *testing.T) {
+	body := &singleCloseBody{}
+	c := newTestConsumer("https://api.test")
+	c.httpClient = &http.Client{
+		Transport:     singleCloseRedirectingTransport{body: body},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect refused by test policy") },
+	}
+
+	_, err := c.GetDataset(context.Background(), "ds-1")
+	if err == nil {
+		t.Fatal("expected an error for a refused redirect")
+	}
+	if body.closeCalls != 1 {
+		t.Fatalf("resp.Body.Close was called %d time(s), want exactly 1", body.closeCalls)
+	}
+}
+
+type downloadRedirectsOnObjectFetch struct{}
+
+// RoundTrip redirects the GET to the presigned object URL — the service
+// DID answer, with a redirect the test's CheckRedirect then refuses —
+// while answering the earlier /download and dataset-metadata calls
+// normally, exactly like downloadFailsOnObjectFetch above.
+func (downloadRedirectsOnObjectFetch) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Path == "/object" {
+		return redirectResponse(req, "https://objects.test/object-redirected"), nil
+	}
+	switch {
+	case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/download"):
+		return jsonResponse(req, `{"download_url":"https://objects.test/object?X-Amz-Signature=deadbeef"}`), nil
+	default:
+		return jsonResponse(req, `{"_id":"ds-1","name":"n","metadata":{"compression_enabled":false,"encryption_enabled":false}}`), nil
+	}
+}
+
+// TestDownloadDataset_PresignedURLRefusedRedirectKeepsRawURLError is
+// TestMakeAPIRequest_RefusedRedirectKeepsRawURLError's counterpart for the
+// download path's own httpClient.Do call (site 1 — fetching the object
+// from the presigned URL), the second of the two sdkerr.Wrap call sites in
+// this package's HTTP wrapping audit.
+func TestDownloadDataset_PresignedURLRefusedRedirectKeepsRawURLError(t *testing.T) {
+	errRefused := errors.New("redirect refused by test policy")
+	c := newTestConsumer("https://api.test")
+	c.httpClient = &http.Client{
+		Transport:     downloadRedirectsOnObjectFetch{},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return errRefused },
+	}
+
+	err := c.DownloadDataset(context.Background(), "ds-1", t.TempDir()+"/out.ndjson")
+	if err == nil {
+		t.Fatal("expected an error for a refused redirect")
+	}
+
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		t.Fatalf("errors.As(err, *url.Error) = false, want true for a response-bearing refused redirect (err=%v)", err)
+	}
+	if !errors.Is(err, errRefused) {
+		t.Error("errors.Is(err, errRefused) = false, want the refusal reachable as the cause")
+	}
+}
+
+// singleCloseDownloadRedirectsOnObjectFetch is downloadRedirectsOnObjectFetch,
+// but the /object redirect response carries a singleCloseBody the test can
+// inspect afterward instead of the shared, Close-tolerant http.NoBody.
+type singleCloseDownloadRedirectsOnObjectFetch struct{ body *singleCloseBody }
+
+func (t singleCloseDownloadRedirectsOnObjectFetch) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Path == "/object" {
+		return &http.Response{
+			StatusCode: http.StatusFound,
+			Status:     "302 Found",
+			Header:     http.Header{"Location": []string{"https://objects.test/object-redirected"}},
+			Body:       t.body,
+			Request:    req,
+		}, nil
+	}
+	switch {
+	case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/download"):
+		return jsonResponse(req, `{"download_url":"https://objects.test/object?X-Amz-Signature=deadbeef"}`), nil
+	default:
+		return jsonResponse(req, `{"_id":"ds-1","name":"n","metadata":{"compression_enabled":false,"encryption_enabled":false}}`), nil
+	}
+}
+
+// TestDownloadDataset_PresignedURLRefusedRedirectClosesBodyExactlyOnce is
+// TestMakeAPIRequest_RefusedRedirectClosesBodyExactlyOnce's counterpart for
+// the download path's own httpClient.Do call, the other site this
+// package's double-Close fix touches.
+func TestDownloadDataset_PresignedURLRefusedRedirectClosesBodyExactlyOnce(t *testing.T) {
+	body := &singleCloseBody{}
+	c := newTestConsumer("https://api.test")
+	c.httpClient = &http.Client{
+		Transport:     singleCloseDownloadRedirectsOnObjectFetch{body: body},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect refused by test policy") },
+	}
+
+	err := c.DownloadDataset(context.Background(), "ds-1", t.TempDir()+"/out.ndjson")
+	if err == nil {
+		t.Fatal("expected an error for a refused redirect")
+	}
+	if body.closeCalls != 1 {
+		t.Fatalf("resp.Body.Close was called %d time(s), want exactly 1", body.closeCalls)
 	}
 }
 
@@ -563,7 +784,7 @@ func (n *nopCloserReader) Close() error               { return nil }
 type failingReadCloser struct{ failMsg string }
 
 func (f *failingReadCloser) Read([]byte) (int, error) { return 0, errors.New(f.failMsg) }
-func (f *failingReadCloser) Close() error              { return nil }
+func (f *failingReadCloser) Close() error             { return nil }
 
 // TestValidateCredentials_APIKeyCallerNeverToldAWSKeys: when the identity
 // service rejects an API-key caller's minted credentials, the message names
