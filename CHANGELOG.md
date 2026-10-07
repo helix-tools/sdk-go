@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-10-07 (v2.22.2)
 
 ### Fixed
 - A producer whose encryption-key lookup got no answer when it was created
