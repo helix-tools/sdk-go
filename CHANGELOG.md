@@ -18,6 +18,8 @@
   longer closes the response body a second time. Closing it twice could
   panic, or misbehave, against a response body that isn't safe to close
   more than once.
+- Shipped test fixtures no longer carry a real company or customer id. No
+  code behaviour changes.
 
 ## 2026-10-07 (v2.22.2)
 

@@ -52,7 +52,7 @@ func TestFeatureFlagJSONTags(t *testing.T) {
 // keyed by feature name (e.g. "partner_invite").
 func TestCompanyFeatureFlagsRoundTrip(t *testing.T) {
 	in := Company{
-		ID:           "company-1760724651304-acme",
+		ID:           "company-0000000000000-example",
 		CompanyName:  "Acme",
 		CustomerType: "both",
 		Status:       CompanyStatusActive,

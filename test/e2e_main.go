@@ -14,8 +14,8 @@ import (
 )
 
 var (
-	CustomerIDProducer = "company-1760724651304-acme"
-	CustomerIDConsumer = "customer-1e334b29-1a51-4787-a583-a410114befa7"
+	CustomerIDProducer = "company-0000000000000-example"
+	CustomerIDConsumer = "customer-00000000-0000-0000-0000-0000000000ab"
 )
 
 // Test data structure
