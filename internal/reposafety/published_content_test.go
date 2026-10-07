@@ -18,7 +18,7 @@ import (
 // out as a literal regex would put them in plain text in the repo. The
 // encoding hides the terms from a text search, not from a reader, which is
 // why the file must also stay out of the published module.
-const bannedContentPatternB64 = "KD9pKXJpbmdib29zdHxwaG9uZVwuY29tfGNsaWNrID91cHxkaXNjb3JkfFxiODZbMC05YS16XXs3fVxifC9Vc2Vycy9bQS1aYS16XXwvcHJpdmF0ZS90bXAvY2xhdWRlfGRtZS1wcm9kdWNlci18aGVsaXhbLV8uXSthZG1pbnxoZWxpeC1wcm9kdWNlci18aGVsaXhfc3NtX3wvaGVsaXgoLXRvb2xzKT8vW2EtejAtOSV7fSRfLV0rL2N1c3RvbWVyc1xifFNUUy1QTEFOfEMtc2RrXC5tZHxcYmNvZGV4XGJ8XGJ0aGFsZXNmc3BcYnxyZXZpZXdbIF8tXT9yb3VuZHxyb3VuZCBbMC05XXwoPy1pOlxiRlswLTldK1xiKXxwb2xpY3kgYW1lbmRtZW50"
+const bannedContentPatternB64 = "KD9pKXJpbmdib29zdHxwaG9uZVwuY29tfGNsaWNrID91cHxkaXNjb3JkfFxiODZbMC05YS16XXs3fVxifC9Vc2Vycy9bQS1aYS16XXwvcHJpdmF0ZS90bXAvY2xhdWRlfGRtZS1wcm9kdWNlci18aGVsaXhbLV8uXSthZG1pbnxoZWxpeC1wcm9kdWNlci18aGVsaXhfc3NtX3wvaGVsaXgoLXRvb2xzKT8vW2EtejAtOSV7fSRfLV0rL2N1c3RvbWVyc1xifFNUUy1QTEFOfEMtc2RrXC5tZHxcYmNvZGV4XGJ8XGJ0aGFsZXNmc3BcYnxyZXZpZXdbXHNfLV0/cm91bmR8cm91bmQgWzAtOV0rIChyZXZpZXd8ZmluZGluZyl8cmV2aWV3W1xzXy1dP3Byb2Nlc3N8KD8taTpcYkZbMC05XStcYil8cG9saWN5IGFtZW5kbWVudA=="
 
 // bannedContentPattern is the exact banned-content list applied to every
 // published Helix SDK artifact (this module's zip, the npm tarball, the
@@ -45,10 +45,19 @@ const bannedContentPatternB64 = "KD9pKXJpbmdib29zdHxwaG9uZVwuY29tfGNsaWNrID91cHx
 // own verdict vocabulary is caught by the same bare-word match, so no
 // separate alternative is needed for it), a maintainer's personal
 // source-forge handle, and traces of the internal review process a change
-// went through before publication ("review round", a bare "round N" where N
-// is any digit, a numbered finding label like "F1", and "policy amendment")
-// — a published comment describing WHAT a test proves must never describe
-// WHICH internal review pass asked for it. Case-insensitive throughout,
+// went through before publication ("review round" with any run of
+// whitespace/underscore/hyphen between the two words, so a line-wrapped
+// "review\nround N" is caught the same as an inline one; "round N review" or
+// "round N finding" when the review context follows the number instead of
+// preceding it; "review process" or "code-review process" naming the process
+// itself, independent of any "round"; a numbered finding label like "F1";
+// and "policy amendment") — a published comment describing WHAT a test
+// proves must never describe WHICH internal review pass asked for it, nor
+// name the process by which it was asked for. An ordinary, non-review "round
+// N" (a retry round, a round-trip) is never flagged merely for containing a
+// number — it must carry review context either immediately before (via
+// "review") or immediately after (via "review"/"finding") the number.
+// Case-insensitive throughout,
 // except the finding-label alternative, which is scoped case-sensitive
 // (capital "F" only) so it doesn't flag ordinary lowercase uses such as an
 // "f16" pixel/texture format. None of these belong in the published tree
@@ -299,23 +308,30 @@ func TestBannedContentPatternMatchesPlanningAndToolingRefs(t *testing.T) {
 
 // TestBannedContentPatternMatchesReviewProcessRefs is a regression test for
 // the review-process alternatives in bannedContentPatternB64: a comment
-// that traces a test or fix back to an internal review pass must be
-// caught — in a test file as readily as in production source, which is why
-// this is a bannedContentPattern alternative (scanned by
-// TestNoBannedContentInPublishedFiles over every published file) rather
-// than a bannedInternalNamesPattern one (non-test sources only). Ordinary
-// uses of the word "round" that are not a review-process reference (a
-// retry round, round-trip, context.Background(), "surrounding") must stay
-// allowed. Every sample is assembled at runtime from fragments, so no
-// banned string appears contiguously in this file.
+// that traces a test or fix back to an internal review pass, or names the
+// review process itself, must be caught — in a test file as readily as in
+// production source, which is why this is a bannedContentPattern
+// alternative (scanned by TestNoBannedContentInPublishedFiles over every
+// published file) rather than a bannedInternalNamesPattern one (non-test
+// sources only). Ordinary uses of the word "round" that are not a
+// review-process reference (a retry round, round-trip,
+// context.Background(), "surrounding") must stay allowed — including a
+// bare "round N" with no review context attached, such as "round 2 of
+// retries succeeded": the pattern requires "review" immediately before, or
+// "review"/"finding" immediately after, the number, never a bare digit
+// alone. Every sample is assembled at runtime from fragments, so no banned
+// string appears contiguously in this file.
 func TestBannedContentPatternMatchesReviewProcessRefs(t *testing.T) {
 	mustMatch := []string{
 		"required negative case for " + "review round" + " 4's second finding",
 		"exactly the sliding-window bug " + "review round" + " 4 found",
 		"is review\n" + "round 5" + "'s corrected version",
+		"review " + "round 3",
 		"the pre-fix code (" + "F" + "3) bypassed the shared budget",
 		"flagged as " + "F" + "12 in the writeup",
 		"shipped under a " + "policy amendment" + " agreed last quarter",
+		"removed internal code-" + "review process" + " references",
+		"traces of the internal " + "review process",
 	}
 	for _, s := range mustMatch {
 		if !bannedContentPattern.MatchString(s) {
@@ -331,6 +347,7 @@ func TestBannedContentPatternMatchesReviewProcessRefs(t *testing.T) {
 		"Do/" + "RoundTrip" + " returning a non-nil Response",
 		"the " + "F" + "ull backup ran overnight",
 		"a " + "f" + "16 texture format",
+		"round 2 of retries succeeded",
 	}
 	for _, s := range mustNotMatch {
 		if bannedContentPattern.MatchString(s) {

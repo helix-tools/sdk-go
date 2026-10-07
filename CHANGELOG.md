@@ -9,9 +9,9 @@
   cause. The error's timeout/cancellation signal is unchanged.
 
 ### Documentation
-- docs: content-policy scrub -- removed internal code-review process
-  references from test file comments; extended the published-content guard
-  to catch this pattern going forward. No behavior change.
+- docs: content-policy scrub -- removed leftover development notes from
+  test file comments; extended the published-content guard to catch this
+  pattern going forward. No behavior change.
 - Documented an already-shipped behavior change from v2.22.4: a dataset
   upload answered with a redirect is no longer followed; the upload fails
   with the redirect status instead.
