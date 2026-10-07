@@ -32,6 +32,7 @@ import (
 
 	stscreds "github.com/helix-tools/sdk-go/v2/credentials"
 	"github.com/helix-tools/sdk-go/v2/internal/sdkerr"
+	"github.com/helix-tools/sdk-go/v2/internal/transferclient"
 	"github.com/helix-tools/sdk-go/v2/internal/useragent"
 	"github.com/helix-tools/sdk-go/v2/types"
 
@@ -69,6 +70,14 @@ type Producer struct {
 	httpClient *http.Client
 	kmsClient  *kms.Client
 	s3Client   *s3.Client
+
+	// storageClient is used only for the presigned-URL upload — never for a
+	// call to the Helix API — so a slow but healthy transfer is never cut by
+	// a total-duration cap. A Producer built directly (bypassing
+	// NewProducer, as tests do but production code never does) leaves this
+	// nil; uploadToPresignedURL falls back to httpClient in that case so
+	// existing tests that only ever set httpClient keep working unchanged.
+	storageClient *http.Client
 
 	// keyLookupAttempted is set once NewProducer has made its
 	// construction-time key lookup, gating the retry in
@@ -226,10 +235,11 @@ func NewProducer(cfg types.Config) (*Producer, error) {
 		CustomerID:  cfg.CustomerID,
 		Region:      cfg.Region,
 
-		awsConfig:  awsCfg,
-		httpClient: &http.Client{},
-		kmsClient:  kms.NewFromConfig(awsCfg),
-		s3Client:   s3.NewFromConfig(awsCfg),
+		awsConfig:     awsCfg,
+		httpClient:    &http.Client{},
+		kmsClient:     kms.NewFromConfig(awsCfg),
+		s3Client:      s3.NewFromConfig(awsCfg),
+		storageClient: transferclient.New(),
 	}
 
 	// Get the producer's encryption key id from the API. Without one the
@@ -1038,6 +1048,18 @@ func metadataObject(v any) (map[string]any, error) {
 	return m, nil
 }
 
+// storageHTTPClient returns the client used for a direct transfer to
+// storage: no total-duration cap, only a connect timeout and an inactivity
+// timeout (see internal/transferclient). Falls back to httpClient when
+// storageClient is nil — a Producer built directly, bypassing NewProducer —
+// so a hand-built Producer behaves as it always has.
+func (p *Producer) storageHTTPClient() *http.Client {
+	if p.storageClient != nil {
+		return p.storageClient
+	}
+	return p.httpClient
+}
+
 // uploadToPresignedURL uploads the processed data to the presigned URL.
 // This is step 3 of the new POST-first upload flow.
 func (p *Producer) uploadToPresignedURL(ctx context.Context, uploadURL string, data []byte) error {
@@ -1057,7 +1079,7 @@ func (p *Producer) uploadToPresignedURL(ctx context.Context, uploadURL string, d
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.ContentLength = int64(len(data))
 
-	resp, err := p.httpClient.Do(req)
+	resp, err := p.storageHTTPClient().Do(req)
 	if err != nil {
 		if resp != nil {
 			// net/http pairs a non-nil Response with a non-nil error only

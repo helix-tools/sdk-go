@@ -12,6 +12,14 @@
   the connection but never answers no longer blocks indefinitely: it now
   reports the same temporary-failure error, within the same bound, as
   starting a consumer under the same condition.
+- Uploading or downloading a dataset no longer has a fixed overall time
+  limit. Previously, uploading could hang indefinitely if the connection
+  stalled, and downloading could fail even on a healthy connection once it
+  ran past a fixed duration. Now, a connection that keeps moving bytes
+  succeeds however long it takes; a connection that goes quiet — no bytes in
+  either direction, and no response — for about a minute still fails
+  cleanly. Connecting itself still times out quickly if the remote side
+  doesn't respond. Calls to the Helix API are unaffected.
 
 ## 2026-10-07 (v2.22.3)
 

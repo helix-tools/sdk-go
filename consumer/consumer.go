@@ -28,6 +28,7 @@ import (
 
 	stscreds "github.com/helix-tools/sdk-go/v2/credentials"
 	"github.com/helix-tools/sdk-go/v2/internal/sdkerr"
+	"github.com/helix-tools/sdk-go/v2/internal/transferclient"
 	"github.com/helix-tools/sdk-go/v2/internal/useragent"
 	"github.com/helix-tools/sdk-go/v2/types"
 
@@ -149,6 +150,14 @@ type Consumer struct {
 	kmsClient  *kms.Client
 	queueURL   *string // Cache for per-consumer queue URL.
 	sqsClient  *sqs.Client
+
+	// storageClient is used only for the presigned-URL download — never for
+	// a call to the Helix API — so a slow but healthy transfer is never cut
+	// by a total-duration cap. A Consumer built directly (bypassing
+	// NewConsumer, as tests do but production code never does) leaves this
+	// nil; the download falls back to httpClient in that case so existing
+	// tests that only ever set httpClient keep working unchanged.
+	storageClient *http.Client
 }
 
 // DownloadURLInfo contains information about a dataset download URL.
@@ -362,10 +371,11 @@ func NewConsumer(cfg types.Config) (*Consumer, error) {
 		CustomerID:  cfg.CustomerID,
 		Region:      cfg.Region,
 
-		awsConfig:  awsCfg,
-		httpClient: &http.Client{Timeout: defaultHTTPClientTimeout},
-		kmsClient:  kms.NewFromConfig(awsCfg),
-		sqsClient:  sqs.NewFromConfig(awsCfg),
+		awsConfig:     awsCfg,
+		httpClient:    &http.Client{Timeout: defaultHTTPClientTimeout},
+		kmsClient:     kms.NewFromConfig(awsCfg),
+		sqsClient:     sqs.NewFromConfig(awsCfg),
+		storageClient: transferclient.New(),
 	}, nil
 }
 
@@ -581,6 +591,18 @@ func resolveEncryptCompress(dataset *types.Dataset) (isEncrypted, isCompressed b
 	return isEncrypted, isCompressed
 }
 
+// storageHTTPClient returns the client used for a direct transfer from
+// storage: no total-duration cap, only a connect timeout and an inactivity
+// timeout (see internal/transferclient). Falls back to httpClient when
+// storageClient is nil — a Consumer built directly, bypassing NewConsumer —
+// so a hand-built Consumer behaves as it always has.
+func (c *Consumer) storageHTTPClient() *http.Client {
+	if c.storageClient != nil {
+		return c.storageClient
+	}
+	return c.httpClient
+}
+
 // DownloadDataset downloads and processes a dataset to a local file.
 //
 // Observability: after the URL is issued by the API a server-side
@@ -689,7 +711,7 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 		errorMessage = wrapped.Error()
 		return wrapped
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.storageHTTPClient().Do(req)
 	if err != nil {
 		if resp != nil {
 			// net/http pairs a non-nil Response with a non-nil error only
