@@ -81,7 +81,7 @@ func fakeSTSAccessDenied(t *testing.T) *sts.Client {
 }
 
 func TestValidateCredentials_UpstreamCauseNeverLeaksIntoMessage(t *testing.T) {
-	err := validateCredentials(context.Background(), fakeSTSAccessDenied(t), false)
+	err := validateCredentials(context.Background(), fakeSTSAccessDenied(t), false, true)
 
 	assertClean(t, err, "invalid AWS credentials")
 	assertCauseReachable(t, err, arnAccountService)
@@ -570,7 +570,7 @@ func (f *failingReadCloser) Close() error              { return nil }
 // the credential service, not AWS keys they never configured, and the
 // upstream ARN stays out of it but reachable.
 func TestValidateCredentials_APIKeyCallerNeverToldAWSKeys(t *testing.T) {
-	err := validateCredentials(context.Background(), fakeSTSAccessDenied(t), true)
+	err := validateCredentials(context.Background(), fakeSTSAccessDenied(t), true, false)
 
 	assertClean(t, err, "Helix credential service error: could not get working credentials for this API key")
 	assertCauseReachable(t, err, arnAccountService)

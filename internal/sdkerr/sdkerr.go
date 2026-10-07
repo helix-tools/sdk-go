@@ -10,6 +10,7 @@ package sdkerr
 
 import (
 	"errors"
+	"net/http"
 	"strconv"
 )
 
@@ -36,6 +37,39 @@ func CredentialServiceMessage(statusCode int, code, message string) string {
 		return msg + ": HTTP " + strconv.Itoa(statusCode)
 	}
 	return msg + ": " + message
+}
+
+// IsRetryableIdentityStatus reports whether statusCode — 0 or negative
+// meaning no HTTP response arrived at all (DNS, connection, TLS, timeout, or
+// a canceled context) — means a static-credentials identity check (a direct
+// call to the cloud provider, no Helix credential service involved) should
+// be treated as a temporary failure rather than a credential rejection: 408,
+// 429, or a status in the 500-599 range, or no response at all. A status
+// outside that range (including one at or above 600) is a definitive
+// answer, never temporary.
+func IsRetryableIdentityStatus(statusCode int) bool {
+	return statusCode <= 0 ||
+		statusCode == http.StatusRequestTimeout ||
+		statusCode == http.StatusTooManyRequests ||
+		(statusCode >= http.StatusInternalServerError && statusCode <= 599)
+}
+
+// IdentityCheckTemporaryFailureMessage is the customer-facing text for a
+// static-credentials identity check that IsRetryableIdentityStatus marked
+// temporary: the provider itself could not complete the check, so the
+// caller is never told their own credentials are invalid. statusCode 0 (or
+// negative) means no response arrived at all; any other value is reported
+// plainly, with no raw provider exception name, request id, or message
+// attached. The caller must attach no cause to this message either — unlike
+// every other error this package wraps, nothing about this one is reachable
+// through errors.Unwrap, since the point of dropping the provider's name
+// here is defeated if a caller's own %+v or further unwrapping still finds
+// it.
+func IdentityCheckTemporaryFailureMessage(statusCode int) string {
+	if statusCode <= 0 {
+		return "could not verify credentials: the identity check got no response, try again"
+	}
+	return "could not verify credentials: the identity check answered with a temporary error (HTTP " + strconv.Itoa(statusCode) + "), try again"
 }
 
 // KeyCallerServiceFailure is the customer-facing text when an API-key caller
@@ -88,3 +122,26 @@ type sentinelWrapped struct {
 
 func (w *sentinelWrapped) Error() string   { return w.sentinel.Error() }
 func (w *sentinelWrapped) Unwrap() []error { return []error{w.sentinel, w.cause} }
+
+// WrapMarkers returns an error whose Error() is exactly msg and whose
+// errors.Is/errors.As reach each of markers — a sentinel value for
+// errors.Is, or a value of a specific type for errors.As — via the
+// multi-error Unwrap() []error form, with no other cause attached at all.
+// Unlike Wrap/WrapSentinel, msg, Error(), and a caller's fmt "%+v" (which
+// for any error value calls only Error(), never reflects into fields) never
+// include any text from the markers themselves: this is for a failure whose
+// customer-facing message must stay clean of upstream detail while specific,
+// pre-existing errors.Is/errors.As relationships (e.g. context.Canceled, or
+// an SDK's own response-error type carrying nothing but what the caller is
+// allowed to see) still have to resolve for callers that check them.
+func WrapMarkers(msg string, markers ...error) error {
+	return &markedChain{msg: msg, markers: markers}
+}
+
+type markedChain struct {
+	msg     string
+	markers []error
+}
+
+func (w *markedChain) Error() string   { return w.msg }
+func (w *markedChain) Unwrap() []error { return w.markers }

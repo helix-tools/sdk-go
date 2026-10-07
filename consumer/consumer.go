@@ -34,6 +34,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
@@ -342,6 +343,7 @@ func NewConsumer(cfg types.Config) (*Consumer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to select AWS credentials provider: %w", err)
 	}
+	isStaticMode := isStaticCredentialsProvider(credProvider)
 
 	// Load AWS config.
 	awsCfg, err := loadAWSConfig(context.Background(), cfg.Region, credProvider, awsHTTPClient)
@@ -351,7 +353,7 @@ func NewConsumer(cfg types.Config) (*Consumer, error) {
 
 	// Validate credentials.
 	stsClient := sts.NewFromConfig(awsCfg)
-	if err := validateCredentials(context.Background(), stsClient, strings.TrimSpace(cfg.APIKey) != ""); err != nil {
+	if err := validateCredentials(context.Background(), stsClient, strings.TrimSpace(cfg.APIKey) != "", isStaticMode); err != nil {
 		return nil, err
 	}
 
@@ -400,7 +402,34 @@ func loadAWSConfig(ctx context.Context, region string, credProvider aws.Credenti
 // "invalid AWS credentials" is the right advice for them. Any other failure
 // for an API-key caller (e.g. an unusable answer from the service, or its
 // credentials being rejected) still names the credential service.
-func validateCredentials(ctx context.Context, stsClient *sts.Client, apiKeyConfigured bool) error {
+//
+// isStaticMode is true only for the legacy static-credentials bootstrap —
+// the aws.CredentialsProvider SelectProvider returned was a plain
+// credentials.StaticCredentialsProvider, never a broker. Only then does a
+// failure that means the identity check itself could not complete — a
+// canceled/expired context, or a response the cloud SDK reports as a
+// retryable HTTP status (via *smithyhttp.ResponseError: 408, 429, or
+// 500-599) — get classified as a temporary failure instead of "invalid AWS
+// credentials": a provider outage is not the same thing as a credential
+// rejection. That classification never applies in broker/sts mode: there,
+// any failure other than a *stscreds.MintError or
+// ErrCredentialServiceUnreachable — whether it came from the broker mint
+// call or from the GetCallerIdentity call itself, including a canceled
+// context or a retryable status — falls straight through to today's
+// unchanged fallback below, byte-for-byte as on origin/main.
+//
+// The temporary-failure message itself carries no raw upstream detail:
+// nothing from it is reachable via errors.Unwrap onto the real cause, or
+// fmt's "%+v". But two caller-checkable relationships that existed before
+// this classification was added are preserved regardless:
+// errors.Is(err, context.Canceled) / errors.Is(err, context.DeadlineExceeded)
+// still report true when that is why the check failed, and
+// errors.As(err, &respErr) for a *smithyhttp.ResponseError still matches —
+// populated with only the HTTP status code, never the real response's body,
+// headers, or wrapped error. A definitive answer (401/403, or anything else
+// the identity check rejected the request with) keeps today's behavior,
+// cause included, unchanged.
+func validateCredentials(ctx context.Context, stsClient *sts.Client, apiKeyConfigured, isStaticMode bool) error {
 	if _, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); err != nil {
 		if errors.Is(err, sdkerr.ErrCredentialServiceUnreachable) {
 			return sdkerr.WrapSentinel(sdkerr.ErrCredentialServiceUnreachable, err)
@@ -415,6 +444,25 @@ func validateCredentials(ctx context.Context, stsClient *sts.Client, apiKeyConfi
 			if !rejectedAWSKeys {
 				return sdkerr.Wrap(sdkerr.CredentialServiceMessage(mintErr.StatusCode, mintErr.Code, mintErr.Message), err)
 			}
+		} else if isStaticMode {
+			if errors.Is(err, context.Canceled) {
+				// No HTTP response was ever received, so there is no
+				// *smithyhttp.ResponseError to find — but context.Canceled
+				// itself is attached as a marker, so errors.Is keeps
+				// matching it without the raw upstream error ever being
+				// reachable.
+				return sdkerr.WrapMarkers(sdkerr.IdentityCheckTemporaryFailureMessage(0), context.Canceled)
+			}
+			if errors.Is(err, context.DeadlineExceeded) {
+				return sdkerr.WrapMarkers(sdkerr.IdentityCheckTemporaryFailureMessage(0), context.DeadlineExceeded)
+			}
+			var respErr *smithyhttp.ResponseError
+			if errors.As(err, &respErr) && sdkerr.IsRetryableIdentityStatus(respErr.HTTPStatusCode()) {
+				return sdkerr.WrapMarkers(
+					sdkerr.IdentityCheckTemporaryFailureMessage(respErr.HTTPStatusCode()),
+					sanitizedResponseError(respErr.HTTPStatusCode()),
+				)
+			}
 		}
 		if apiKeyConfigured {
 			return sdkerr.Wrap(sdkerr.KeyCallerServiceFailure, err)
@@ -422,6 +470,38 @@ func validateCredentials(ctx context.Context, stsClient *sts.Client, apiKeyConfi
 		return sdkerr.Wrap("invalid AWS credentials", err)
 	}
 	return nil
+}
+
+// sanitizedResponseError returns a *smithyhttp.ResponseError carrying only
+// statusCode, so a caller's pre-existing errors.As(err, &respErr) for the
+// cloud SDK's response-error type keeps matching after a temporary-failure
+// classification, without the real response's body, headers, request, or
+// wrapped error ever becoming reachable through it. Body and Header are
+// non-nil and empty (never the real upstream values) so a caller that reads
+// or closes them after errors.As does not hit a nil pointer. Request is a
+// non-nil stand-in pointed at a neutral, reserved (RFC 2606) host, so a
+// caller that reads Response.Request.URL or .Method — as the real SDK
+// response always has both populated — does not hit a nil pointer either.
+func sanitizedResponseError(statusCode int) error {
+	return &smithyhttp.ResponseError{
+		Response: &smithyhttp.Response{Response: &http.Response{
+			StatusCode: statusCode,
+			Header:     http.Header{},
+			Body:       io.NopCloser(strings.NewReader("")),
+			Request: &http.Request{
+				Method: http.MethodPost,
+				URL:    &url.URL{Scheme: "https", Host: "identity.invalid", Path: "/"},
+			},
+		}},
+	}
+}
+
+// isStaticCredentialsProvider reports whether p is the plain
+// credentials.StaticCredentialsProvider that SelectProvider returns for the
+// legacy static-keys bootstrap — never true for a broker/sts-mode provider.
+func isStaticCredentialsProvider(p aws.CredentialsProvider) bool {
+	_, ok := p.(credentials.StaticCredentialsProvider)
+	return ok
 }
 
 // GetDataset retrieves metadata for a specific dataset.
