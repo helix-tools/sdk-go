@@ -608,6 +608,24 @@ func dialThroughSOCKS5Proxy(ctx context.Context, network, addr string, proxyURL 
 	return ic, nil
 }
 
+// socks5EncodeLen converts n — a length already validated by the caller to
+// be at most 255, the single byte RFC 1928 (the method count) and RFC 1929
+// (a username or password's length) use for this exact field — to that
+// byte. Centralizing the cast here, after the bound is enforced at each
+// call site, gives a security scanner looking for a truncating int-to-byte
+// conversion exactly one place to review for the invariant instead of
+// several scattered ones.
+func socks5EncodeLen(n int) byte {
+	return byte(n) // #nosec G115 -- every caller has already checked n <= 255
+}
+
+// socks5EncodePort splits port — already validated by the caller to be in
+// [1, 0xffff] — into the big-endian two-byte field RFC 1928 uses for a
+// CONNECT request's destination port.
+func socks5EncodePort(port int) (hi, lo byte) {
+	return byte(port >> 8), byte(port) // #nosec G115 -- port is bounded to [1, 0xffff] by socks5Handshake's check before this is called
+}
+
 // socks5Handshake performs the client side of a SOCKS5 CONNECT handshake
 // (RFC 1928, plus RFC 1929 username/password authentication when proxyUser
 // carries credentials) over conn, asking the proxy to connect to addr. conn
@@ -636,7 +654,7 @@ func socks5Handshake(conn net.Conn, addr string, proxyUser *url.Userinfo) error 
 	if proxyUser != nil {
 		methods = append(methods, 0x02)
 	}
-	greeting := append([]byte{0x05, byte(len(methods))}, methods...)
+	greeting := append([]byte{0x05, socks5EncodeLen(len(methods))}, methods...)
 	if _, err := conn.Write(greeting); err != nil {
 		return err
 	}
@@ -677,10 +695,11 @@ func socks5Handshake(conn net.Conn, addr string, proxyUser *url.Userinfo) error 
 	} else if len(host) > 255 {
 		return errors.New("transferclient: socks5 target hostname too long")
 	} else {
-		req = append(req, 0x03, byte(len(host)))
+		req = append(req, 0x03, socks5EncodeLen(len(host)))
 		req = append(req, host...)
 	}
-	req = append(req, byte(port>>8), byte(port))
+	portHi, portLo := socks5EncodePort(port)
+	req = append(req, portHi, portLo)
 	if _, err := conn.Write(req); err != nil {
 		return err
 	}
@@ -725,9 +744,9 @@ func socks5Authenticate(conn net.Conn, username, password string) error {
 		return errors.New("transferclient: socks5 proxy: invalid username/password length")
 	}
 	req := make([]byte, 0, 3+len(username)+len(password))
-	req = append(req, 0x01, byte(len(username)))
+	req = append(req, 0x01, socks5EncodeLen(len(username)))
 	req = append(req, username...)
-	req = append(req, byte(len(password)))
+	req = append(req, socks5EncodeLen(len(password)))
 	req = append(req, password...)
 	if _, err := conn.Write(req); err != nil {
 		return err
