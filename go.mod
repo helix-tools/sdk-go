@@ -11,6 +11,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.42.13
 	github.com/aws/aws-sdk-go-v2/service/sts v1.39.1
 	github.com/aws/smithy-go v1.24.2
+	golang.org/x/net v0.58.0
 )
 
 require (
