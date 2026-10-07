@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- A producer whose encryption-key lookup got no answer when it was created
+  (a brief outage, a network blip) no longer refuses every upload forever.
+  The next upload retries that lookup on its own; once it succeeds, the key
+  is cached as before. Uploads are still never sent unencrypted, and an
+  account the API has definitively confirmed has no key configured behaves
+  exactly as it always has.
+- Canceling an upload's context now stops that upload from waiting on a
+  retried lookup right away, instead of blocking until the retry finishes.
+  It never affects any other upload relying on that same retry.
+
 ## 2026-10-06 (v2.22.1)
 
 ### Fixed
