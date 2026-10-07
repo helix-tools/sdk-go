@@ -12,6 +12,11 @@
 - Canceling an upload's context now stops that upload from waiting on a
   retried lookup right away, instead of blocking until the retry finishes.
   It never affects any other upload relying on that same retry.
+- The startup credential check for static credentials no longer calls a
+  provider outage "invalid credentials". When that check gets no response,
+  or the provider answers with a status that means try again,
+  `NewProducer`/`NewConsumer` now report it as a temporary failure instead.
+  A genuine rejection (bad or revoked keys) is unaffected.
 
 ## 2026-10-06 (v2.22.1)
 

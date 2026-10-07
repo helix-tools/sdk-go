@@ -153,3 +153,54 @@ func TestCredentialServiceMessage(t *testing.T) {
 		}
 	}
 }
+
+func TestIsRetryableIdentityStatus(t *testing.T) {
+	cases := []struct {
+		status int
+		want   bool
+	}{
+		{0, true},   // no response arrived at all
+		{-1, true},  // defensive: treated the same as "no response"
+		{408, true}, // request timeout
+		{429, true}, // too many requests
+		{500, true},
+		{503, true},
+		{599, true},
+		// 600 is the negative boundary: statusCode >= 500 is not enough on
+		// its own, the range must stop at 599. Before this fix the
+		// condition was a bare ">= 500" and this case would wrongly be true.
+		{600, false},
+		{700, false},
+		{200, false},
+		{400, false},
+		{401, false},
+		{403, false},
+		{404, false},
+	}
+	for _, tc := range cases {
+		if got := IsRetryableIdentityStatus(tc.status); got != tc.want {
+			t.Errorf("IsRetryableIdentityStatus(%d) = %v, want %v", tc.status, got, tc.want)
+		}
+	}
+}
+
+func TestIdentityCheckTemporaryFailureMessage(t *testing.T) {
+	cases := []struct {
+		status int
+		want   string
+	}{
+		{0, "could not verify credentials: the identity check got no response, try again"},
+		{503, "could not verify credentials: the identity check answered with a temporary error (HTTP 503), try again"},
+		{429, "could not verify credentials: the identity check answered with a temporary error (HTTP 429), try again"},
+		{408, "could not verify credentials: the identity check answered with a temporary error (HTTP 408), try again"},
+	}
+	for _, tc := range cases {
+		got := IdentityCheckTemporaryFailureMessage(tc.status)
+		if got != tc.want {
+			t.Errorf("IdentityCheckTemporaryFailureMessage(%d) = %q, want %q", tc.status, got, tc.want)
+		}
+		if strings.Contains(got, "AWS") {
+			t.Errorf("IdentityCheckTemporaryFailureMessage(%d) = %q, names a cloud provider; must stay provider-neutral", tc.status, got)
+		}
+	}
+}
