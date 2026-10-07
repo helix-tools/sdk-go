@@ -35,15 +35,15 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"sync"
 	"time"
+
+	"golang.org/x/net/proxy"
 )
 
 // maxProxyConnectResponseBytes caps how much of a proxy's CONNECT response
@@ -568,20 +568,39 @@ func dialTLSThroughProxy(ctx context.Context, network, addr string, proxyURL *ur
 // other proxy shape this package handles. bodyDone, if non-nil, is wired
 // into the returned connection exactly like every other dial path — see
 // WrapUploadBody.
+//
+// The SOCKS5 CONNECT handshake itself (RFC 1928, plus RFC 1929
+// username/password authentication when proxyURL carries credentials) is
+// performed by golang.org/x/net/proxy's SOCKS5 dialer rather than a
+// hand-rolled client: its DialContext honors ctx's deadline across the
+// whole handshake (it sets that deadline on the proxy connection, exactly
+// like dialTLSThroughProxy's own CONNECT exchange does, and additionally
+// aborts early on ctx cancellation), so the proxy dial, the SOCKS5
+// handshake, and the target TLS handshake below still share the one
+// ConnectTimeout budget this function has always provided. socks5ForwardDialer
+// routes that dialer's own connection to the proxy through this package's
+// dial package var — the same dial path, and the same test override hook,
+// every other proxy shape here uses — rather than a plain net.Dialer.
 func dialThroughSOCKS5Proxy(ctx context.Context, network, addr string, proxyURL *url.URL, idleTimeout time.Duration, bodyDone *bodyDoneSignal) (net.Conn, error) {
-	rawConn, err := dial(ctx, network, proxyHostPort(proxyURL, "1080"))
+	var auth *proxy.Auth
+	if proxyURL.User != nil {
+		password, _ := proxyURL.User.Password()
+		auth = &proxy.Auth{User: proxyURL.User.Username(), Password: password}
+	}
+	d, err := proxy.SOCKS5(network, proxyHostPort(proxyURL, "1080"), auth, socks5ForwardDialer{})
 	if err != nil {
 		return nil, err
 	}
-	if deadline, ok := ctx.Deadline(); ok {
-		if err := rawConn.SetDeadline(deadline); err != nil {
-			_ = rawConn.Close()
-			return nil, err
-		}
+	cd, ok := d.(proxy.ContextDialer)
+	if !ok {
+		// proxy.SOCKS5 always returns a dialer satisfying ContextDialer in
+		// every x/net release this package has been built against; this
+		// guards against a panic if that ever stopped being true instead of
+		// asserting it blindly.
+		return nil, fmt.Errorf("transferclient: socks5 dialer %T does not support DialContext", d)
 	}
-
-	if err := socks5Handshake(rawConn, addr, proxyURL.User); err != nil {
-		_ = rawConn.Close()
+	rawConn, err := cd.DialContext(ctx, network, addr)
+	if err != nil {
 		return nil, err
 	}
 
@@ -608,160 +627,20 @@ func dialThroughSOCKS5Proxy(ctx context.Context, network, addr string, proxyURL 
 	return ic, nil
 }
 
-// socks5EncodeLen converts n — a length already validated by the caller to
-// be at most 255, the single byte RFC 1928 (the method count) and RFC 1929
-// (a username or password's length) use for this exact field — to that
-// byte. Centralizing the cast here, after the bound is enforced at each
-// call site, gives a security scanner looking for a truncating int-to-byte
-// conversion exactly one place to review for the invariant instead of
-// several scattered ones.
-func socks5EncodeLen(n int) byte {
-	return byte(n) // #nosec G115 -- every caller has already checked n <= 255
+// socks5ForwardDialer adapts this package's own dial package var to
+// proxy.ContextDialer (and proxy.Dialer, which the latter embeds) so
+// proxy.SOCKS5's returned dialer connects to the proxy through dial —
+// the same overridable dial path dialTLSThroughProxy and DialContext/
+// DialTLSContext use for every other stage — instead of a plain
+// net.Dialer that a test's overrideDial could never see.
+type socks5ForwardDialer struct{}
+
+func (socks5ForwardDialer) Dial(network, address string) (net.Conn, error) {
+	return dial(context.Background(), network, address)
 }
 
-// socks5EncodePort splits port — already validated by the caller to be in
-// [1, 0xffff] — into the big-endian two-byte field RFC 1928 uses for a
-// CONNECT request's destination port.
-func socks5EncodePort(port int) (hi, lo byte) {
-	return byte(port >> 8), byte(port) // #nosec G115 -- port is bounded to [1, 0xffff] by socks5Handshake's check before this is called
-}
-
-// socks5Handshake performs the client side of a SOCKS5 CONNECT handshake
-// (RFC 1928, plus RFC 1929 username/password authentication when proxyUser
-// carries credentials) over conn, asking the proxy to connect to addr. conn
-// must already have whatever deadline governs the overall connect budget
-// set on it by the caller (see dialThroughSOCKS5Proxy) — this function
-// performs no I/O timing of its own, exactly like dialTLSThroughProxy's own
-// CONNECT exchange. It mirrors net/http's own built-in SOCKS5 client wire
-// behavior (golang.org/x/net/internal/socks, vendored into the Go standard
-// library): the same address-type selection (IPv4 or IPv6 when host parses
-// as an IP, a fully-qualified domain name otherwise, so a hostname is
-// resolved by the proxy exactly as it is for both the socks5:// and
-// socks5h:// schemes) and the same two supported authentication methods —
-// switching from net/http's handling to this one changes only how the
-// connect phase is timed, never the proxy wire protocol.
-func socks5Handshake(conn net.Conn, addr string, proxyUser *url.Userinfo) error {
-	host, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		return err
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil || port < 1 || port > 0xffff {
-		return fmt.Errorf("transferclient: socks5 target port %q out of range", portStr)
-	}
-
-	methods := []byte{0x00}
-	if proxyUser != nil {
-		methods = append(methods, 0x02)
-	}
-	greeting := append([]byte{0x05, socks5EncodeLen(len(methods))}, methods...)
-	if _, err := conn.Write(greeting); err != nil {
-		return err
-	}
-
-	selected := make([]byte, 2)
-	if _, err := io.ReadFull(conn, selected); err != nil {
-		return err
-	}
-	if selected[0] != 0x05 {
-		return fmt.Errorf("transferclient: socks5 proxy: unexpected version %d", selected[0])
-	}
-	switch selected[1] {
-	case 0x00:
-		// No authentication required.
-	case 0x02:
-		if proxyUser == nil {
-			return errors.New("transferclient: socks5 proxy requires username/password authentication")
-		}
-		password, _ := proxyUser.Password()
-		if err := socks5Authenticate(conn, proxyUser.Username(), password); err != nil {
-			return err
-		}
-	case 0xff:
-		return errors.New("transferclient: socks5 proxy: no acceptable authentication method")
-	default:
-		return fmt.Errorf("transferclient: socks5 proxy: unsupported authentication method %d", selected[1])
-	}
-
-	req := []byte{0x05, 0x01, 0x00}
-	if ip := net.ParseIP(host); ip != nil {
-		if ip4 := ip.To4(); ip4 != nil {
-			req = append(req, 0x01)
-			req = append(req, ip4...)
-		} else {
-			req = append(req, 0x04)
-			req = append(req, ip.To16()...)
-		}
-	} else if len(host) > 255 {
-		return errors.New("transferclient: socks5 target hostname too long")
-	} else {
-		req = append(req, 0x03, socks5EncodeLen(len(host)))
-		req = append(req, host...)
-	}
-	portHi, portLo := socks5EncodePort(port)
-	req = append(req, portHi, portLo)
-	if _, err := conn.Write(req); err != nil {
-		return err
-	}
-
-	head := make([]byte, 4)
-	if _, err := io.ReadFull(conn, head); err != nil {
-		return err
-	}
-	if head[0] != 0x05 {
-		return fmt.Errorf("transferclient: socks5 proxy: unexpected version %d", head[0])
-	}
-	if head[1] != 0x00 {
-		return fmt.Errorf("transferclient: socks5 proxy: CONNECT failed with status %d", head[1])
-	}
-
-	var boundAddrLen int
-	switch head[3] {
-	case 0x01:
-		boundAddrLen = net.IPv4len
-	case 0x04:
-		boundAddrLen = net.IPv6len
-	case 0x03:
-		lenByte := make([]byte, 1)
-		if _, err := io.ReadFull(conn, lenByte); err != nil {
-			return err
-		}
-		boundAddrLen = int(lenByte[0])
-	default:
-		return fmt.Errorf("transferclient: socks5 proxy: unknown bound address type %d", head[3])
-	}
-	// The bound address and port are discarded; this package never needs
-	// them (it always dials the single target address it was given).
-	_, err = io.ReadFull(conn, make([]byte, boundAddrLen+2))
-	return err
-}
-
-// socks5Authenticate performs the RFC 1929 username/password subnegotiation
-// after the proxy has selected that method during socks5Handshake's initial
-// greeting.
-func socks5Authenticate(conn net.Conn, username, password string) error {
-	if len(username) == 0 || len(username) > 255 || len(password) > 255 {
-		return errors.New("transferclient: socks5 proxy: invalid username/password length")
-	}
-	req := make([]byte, 0, 3+len(username)+len(password))
-	req = append(req, 0x01, socks5EncodeLen(len(username)))
-	req = append(req, username...)
-	req = append(req, socks5EncodeLen(len(password)))
-	req = append(req, password...)
-	if _, err := conn.Write(req); err != nil {
-		return err
-	}
-	reply := make([]byte, 2)
-	if _, err := io.ReadFull(conn, reply); err != nil {
-		return err
-	}
-	if reply[0] != 0x01 {
-		return fmt.Errorf("transferclient: socks5 proxy: unexpected username/password auth version %d", reply[0])
-	}
-	if reply[1] != 0x00 {
-		return errors.New("transferclient: socks5 proxy: username/password authentication failed")
-	}
-	return nil
+func (socks5ForwardDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	return dial(ctx, network, address)
 }
 
 // proxyHostPort returns proxyURL's host:port, defaulting the port to

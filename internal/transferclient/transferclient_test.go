@@ -1212,6 +1212,160 @@ func TestNew_SOCKS5TLS_ConnectBudget_SharedAcrossDialHandshakeAndTLS(t *testing.
 	}
 }
 
+// newSOCKS5AuthTLSStub starts a stub that speaks the server side of a SOCKS5
+// handshake requiring RFC 1929 username/password authentication for exactly
+// one connection: reply "username/password required" to the client's
+// greeting, check the submitted credentials against wantUser/wantPassword,
+// and only on a match proceed through the CONNECT exchange and hand the
+// still-raw tunneled connection to handle — otherwise fail the
+// subnegotiation and close, exactly like a real proxy rejecting bad
+// credentials. The SOCKS5 analogue of newSOCKS5TLSStub, which never
+// requires authentication.
+func newSOCKS5AuthTLSStub(t *testing.T, wantUser, wantPassword string, handle func(net.Conn, tls.Certificate)) *stub {
+	t.Helper()
+
+	cert := newSelfSignedCert(t)
+	pool := x509.NewCertPool()
+	pool.AddCert(cert.Leaf)
+	overrideTLSConfig(t, &tls.Config{RootCAs: pool})
+
+	return newStub(t, func(conn net.Conn) {
+		greeting := make([]byte, 2)
+		if _, err := io.ReadFull(conn, greeting); err != nil {
+			return
+		}
+		methods := make([]byte, greeting[1])
+		if _, err := io.ReadFull(conn, methods); err != nil {
+			return
+		}
+		if _, err := conn.Write([]byte{0x05, 0x02}); err != nil { // version 5, username/password required
+			return
+		}
+
+		authHead := make([]byte, 2)
+		if _, err := io.ReadFull(conn, authHead); err != nil {
+			return
+		}
+		uname := make([]byte, authHead[1])
+		if _, err := io.ReadFull(conn, uname); err != nil {
+			return
+		}
+		plenByte := make([]byte, 1)
+		if _, err := io.ReadFull(conn, plenByte); err != nil {
+			return
+		}
+		passwd := make([]byte, plenByte[0])
+		if _, err := io.ReadFull(conn, passwd); err != nil {
+			return
+		}
+		if string(uname) != wantUser || string(passwd) != wantPassword {
+			_, _ = conn.Write([]byte{0x01, 0x01}) // version 1, authentication failed
+			return
+		}
+		if _, err := conn.Write([]byte{0x01, 0x00}); err != nil { // version 1, succeeded
+			return
+		}
+
+		head := make([]byte, 4)
+		if _, err := io.ReadFull(conn, head); err != nil {
+			return
+		}
+		var addrLen int
+		switch head[3] {
+		case 0x01:
+			addrLen = net.IPv4len
+		case 0x04:
+			addrLen = net.IPv6len
+		case 0x03:
+			lenByte := make([]byte, 1)
+			if _, err := io.ReadFull(conn, lenByte); err != nil {
+				return
+			}
+			addrLen = int(lenByte[0])
+		default:
+			return
+		}
+		if _, err := io.ReadFull(conn, make([]byte, addrLen+2)); err != nil {
+			return
+		}
+		// version 5, succeeded, reserved, IPv4 bound address 0.0.0.0:0.
+		if _, err := conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
+			return
+		}
+		handle(conn, cert)
+	})
+}
+
+// TestNew_SOCKS5TLS_UsernamePasswordAuthentication proves the x/net/proxy
+// swap in dialThroughSOCKS5Proxy still drives RFC 1929 username/password
+// authentication end to end when the proxy URL carries credentials — a path
+// the hand-rolled client it replaced supported but that, before this test,
+// no existing test exercised, so a library swap that silently dropped it
+// could otherwise ship unnoticed.
+func TestNew_SOCKS5TLS_UsernamePasswordAuthentication(t *testing.T) {
+	s := newSOCKS5AuthTLSStub(t, "produser", "s3cr3t", func(conn net.Conn, cert tls.Certificate) {
+		tlsConn := tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{cert}})
+		if err := tlsConn.Handshake(); err != nil {
+			return
+		}
+		defer func() { _ = tlsConn.Close() }()
+		buf := make([]byte, 4096)
+		_, _ = tlsConn.Read(buf)
+		_, _ = tlsConn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+	})
+	overrideProxyForRequest(t, func(*http.Request) (*url.URL, error) {
+		return &url.URL{Scheme: "socks5", Host: s.addr, User: url.UserPassword("produser", "s3cr3t")}, nil
+	})
+
+	client := New()
+	req, err := http.NewRequest(http.MethodGet, s.tlsURL("/object"), nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v (expected the correct SOCKS5 username/password to authenticate successfully)", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(body) != "ok" {
+		t.Fatalf("body = %q, want %q", body, "ok")
+	}
+}
+
+// TestNew_SOCKS5TLS_UsernamePasswordAuthentication_WrongCredentialsFails is
+// the negative control for the test above: it proves the same stub actually
+// rejects a mismatched password rather than accepting anything, so a
+// regression that stopped sending the real submitted credentials — for
+// example authenticating with an empty password regardless of what the
+// proxy URL carries — cannot pass silently as "authentication succeeded."
+func TestNew_SOCKS5TLS_UsernamePasswordAuthentication_WrongCredentialsFails(t *testing.T) {
+	s := newSOCKS5AuthTLSStub(t, "produser", "s3cr3t", func(conn net.Conn, cert tls.Certificate) {
+		tlsConn := tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{cert}})
+		_ = tlsConn.Handshake()
+	})
+	overrideProxyForRequest(t, func(*http.Request) (*url.URL, error) {
+		return &url.URL{Scheme: "socks5", Host: s.addr, User: url.UserPassword("produser", "wrong-password")}, nil
+	})
+
+	client := New()
+	req, err := http.NewRequest(http.MethodGet, s.tlsURL("/object"), nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("expected the wrong SOCKS5 proxy password to fail authentication, got a successful response")
+	}
+}
+
 // TestIdleConn_MidBodyStall_UsesIdleTimeout is the self-attack's "upload
 // stalls before the whole body is handed off" case for the response-window
 // policy: a Write that blocks because the peer never reads must still fail
