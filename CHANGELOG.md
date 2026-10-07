@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-10-07 (v2.22.4)
 
 ### Fixed
 - When a call to the encryption or notification services gets no response at
