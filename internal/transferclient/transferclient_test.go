@@ -1051,10 +1051,17 @@ func TestNew_ProxiedHTTPSProxy_ConnectBudget_SharedAcrossAllStages(t *testing.T)
 // newSOCKS5TLSStub starts a stub that speaks the server side of a SOCKS5
 // proxy handshake for exactly one connection: read the client's method
 // greeting and reply "no authentication required", wait handshakeDelay,
-// read the CONNECT request, wait connectDelay, reply with success, then
-// hand the still-raw tunneled connection to handle to drive the TLS
-// handshake — the SOCKS5 analogue of newProxyTLSStub's HTTP CONNECT tunnel.
-func newSOCKS5TLSStub(t *testing.T, handshakeDelay, connectDelay time.Duration, handle func(net.Conn, tls.Certificate)) *stub {
+// read the CONNECT request, wait connectDelay, reply with success, wait
+// targetHandshakeDelay, then hand the still-raw tunneled connection to
+// handle to drive the TLS handshake — the SOCKS5 analogue of
+// newProxyTLSStub's HTTP CONNECT tunnel. targetHandshakeDelay is applied
+// the same way newHTTPSProxyTLSStub applies its own: a sleep BEFORE handle
+// runs, which delays the server side ever engaging in the TLS handshake and
+// so delays the CLIENT's handshake completion by the same amount — this is
+// what lets a test actually delay the REAL target TLS handshake, as opposed
+// to only the SOCKS5 protocol's own internal stages (handshakeDelay,
+// connectDelay) around it.
+func newSOCKS5TLSStub(t *testing.T, handshakeDelay, connectDelay, targetHandshakeDelay time.Duration, handle func(net.Conn, tls.Certificate)) *stub {
 	t.Helper()
 
 	cert := newSelfSignedCert(t)
@@ -1103,26 +1110,29 @@ func newSOCKS5TLSStub(t *testing.T, handshakeDelay, connectDelay time.Duration, 
 		if _, err := conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
 			return
 		}
+		time.Sleep(targetHandshakeDelay)
 		handle(conn, cert)
 	})
 }
 
 // TestNew_SOCKS5TLS_SucceedsWithinBudget is the SOCKS5-proxy companion to
-// TestNew_ProxiedTLS_SucceedsWithinBudget: a dial, the SOCKS5 handshake, and
-// the target TLS handshake that together stay under ConnectTimeout must
-// still succeed through an env-configured SOCKS5 proxy — proving the
-// shared budget didn't just make every SOCKS5-proxied TLS connect fail.
+// TestNew_ProxiedTLS_SucceedsWithinBudget: a dial, the SOCKS5 protocol
+// stages, and the REAL target TLS handshake that together stay under
+// ConnectTimeout must still succeed through an env-configured SOCKS5 proxy
+// — proving the shared budget didn't just make every SOCKS5-proxied TLS
+// connect fail.
 func TestNew_SOCKS5TLS_SucceedsWithinBudget(t *testing.T) {
 	const (
 		connectTimeout       = 600 * time.Millisecond
 		dialDelay            = 50 * time.Millisecond
 		handshakeDelay       = 50 * time.Millisecond
+		connectDelay         = 50 * time.Millisecond
 		targetHandshakeDelay = 50 * time.Millisecond
 	)
 	overrideConnectTimeout(t, connectTimeout)
 	overrideDial(t, slowDial(dialDelay))
 
-	s := newSOCKS5TLSStub(t, handshakeDelay, targetHandshakeDelay, func(conn net.Conn, cert tls.Certificate) {
+	s := newSOCKS5TLSStub(t, handshakeDelay, connectDelay, targetHandshakeDelay, func(conn net.Conn, cert tls.Certificate) {
 		tlsConn := tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{cert}})
 		if err := tlsConn.Handshake(); err != nil {
 			return
@@ -1144,8 +1154,8 @@ func TestNew_SOCKS5TLS_SucceedsWithinBudget(t *testing.T) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		t.Fatalf("Do: %v (dial %v + socks5 handshake %v + target TLS handshake %v is well within the %v combined budget)",
-			err, dialDelay, handshakeDelay, targetHandshakeDelay, connectTimeout)
+		t.Fatalf("Do: %v (dial %v + socks5 handshake %v + connect reply %v + target TLS handshake %v is well within the %v combined budget)",
+			err, dialDelay, handshakeDelay, connectDelay, targetHandshakeDelay, connectTimeout)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -1161,26 +1171,31 @@ func TestNew_SOCKS5TLS_SucceedsWithinBudget(t *testing.T) {
 // TestNew_SOCKS5TLS_ConnectBudget_SharedAcrossDialHandshakeAndTLS is the
 // SOCKS5-proxy companion to
 // TestNew_ProxiedTLS_ConnectBudget_SharedAcrossDialConnectAndHandshake, and
-// review round 4's required test: with a socks5 proxy configured, the
-// proxy dial, the SOCKS5 handshake, and the target TLS handshake must share
-// ONE ConnectTimeout budget. Each of the three stages here is individually
-// well under ConnectTimeout, but their sum is not — net/http's own built-in
-// SOCKS5 handling (what this package left in place for this combination
-// before this fix) let the SOCKS5 handshake ride IdleTimeout and gave the
-// TLS handshake that follows a separate TLSHandshakeTimeout on top, so this
-// scenario used to succeed at roughly the stages' sum instead of failing
-// near ConnectTimeout.
+// review round 5's corrected version of review round 4's required test:
+// with a socks5 proxy configured, the proxy dial and the SOCKS5 protocol's
+// own stages (method negotiation, CONNECT reply) individually and together
+// stay comfortably under ConnectTimeout — see
+// TestNew_SOCKS5TLS_SucceedsWithinBudget — but adding the REAL target TLS
+// handshake's delay pushes the total over it, so the connect phase must
+// still fail. Review round 4's version of this test delayed only the
+// SOCKS5-internal stages and left the actual tls.Server handshake inside
+// handle running with no injected delay at all, so a corrected
+// implementation that stopped sharing the budget with the target TLS
+// handshake specifically would never have been caught by it; this version
+// closes that gap by delaying the handshake itself via
+// newSOCKS5TLSStub's targetHandshakeDelay.
 func TestNew_SOCKS5TLS_ConnectBudget_SharedAcrossDialHandshakeAndTLS(t *testing.T) {
 	const (
 		connectTimeout       = 300 * time.Millisecond
-		dialDelay            = 150 * time.Millisecond
-		handshakeDelay       = 150 * time.Millisecond
-		targetHandshakeDelay = 150 * time.Millisecond
+		dialDelay            = 50 * time.Millisecond
+		handshakeDelay       = 50 * time.Millisecond
+		connectDelay         = 50 * time.Millisecond
+		targetHandshakeDelay = 250 * time.Millisecond
 	)
 	overrideConnectTimeout(t, connectTimeout)
 	overrideDial(t, slowDial(dialDelay))
 
-	s := newSOCKS5TLSStub(t, handshakeDelay, targetHandshakeDelay, func(conn net.Conn, cert tls.Certificate) {
+	s := newSOCKS5TLSStub(t, handshakeDelay, connectDelay, targetHandshakeDelay, func(conn net.Conn, cert tls.Certificate) {
 		tlsConn := tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{cert}})
 		_ = tlsConn.Handshake()
 	})
@@ -1199,16 +1214,15 @@ func TestNew_SOCKS5TLS_ConnectBudget_SharedAcrossDialHandshakeAndTLS(t *testing.
 	elapsed := time.Since(start)
 	if err == nil {
 		_ = resp.Body.Close()
-		t.Fatalf("expected the SOCKS5-proxied connect phase to fail: dial (%v) + socks5 handshake (%v) + target TLS handshake (%v) together exceed the %v combined budget",
-			dialDelay, handshakeDelay, targetHandshakeDelay, connectTimeout)
+		t.Fatalf("expected the SOCKS5-proxied connect phase to fail: dial (%v) + socks5 stages (%v) alone stay under the %v budget (see TestNew_SOCKS5TLS_SucceedsWithinBudget), but adding the target TLS handshake (%v) pushes the total over it",
+			dialDelay, handshakeDelay+connectDelay, connectTimeout, targetHandshakeDelay)
 	}
-	// Separately-timed stages (net/http's own built-in SOCKS5 handling)
-	// would let this succeed at roughly the three stages' sum (~450ms) or
-	// later. A single shared budget must cut it off close to ConnectTimeout
-	// (~300ms).
+	// A target TLS handshake that ran OUTSIDE the shared budget would let
+	// this succeed at roughly the four stages' sum (~400ms) instead. A
+	// single shared budget must cut it off close to ConnectTimeout (~300ms).
 	if elapsed > connectTimeout+200*time.Millisecond {
 		t.Fatalf("took %v to fail; a %v combined SOCKS5-proxied-connect budget should have cut it well before the stages' sum of %v",
-			elapsed, connectTimeout, dialDelay+handshakeDelay+targetHandshakeDelay)
+			elapsed, connectTimeout, dialDelay+handshakeDelay+connectDelay+targetHandshakeDelay)
 	}
 }
 
@@ -1414,7 +1428,13 @@ func TestIdleConn_MidBodyStall_UsesIdleTimeout(t *testing.T) {
 // Write and the next successful Read — is governed by the fixed
 // post-handoff window markDone computed, not idleTimeout, even though the
 // deadline active entering that gap was set by an EARLIER mid-body write
-// under the shorter basis.
+// under the shorter basis. The final flush is modeled as armPendingDone
+// BEFORE that Write, then the Write itself — exactly uploadBodyReader's
+// EOF-with-data shape (see TestUploadBodyReader_EOFWithData_ArmsPendingDoneNotMarkDone)
+// — rather than calling markDone directly before the write, which would
+// bless the fixed window starting a write early that review round 5 found:
+// see TestIdleConn_FinalFlushStall_UsesIdleTimeoutNotResponseTimeout for the
+// negative control proving that distinction actually matters.
 func TestIdleConn_PostHandoff_ExtendsToResponseTimeout(t *testing.T) {
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
@@ -1433,17 +1453,22 @@ func TestIdleConn_PostHandoff_ExtendsToResponseTimeout(t *testing.T) {
 
 	// A mid-body write, drained immediately: succeeds under idleTimeout and
 	// leaves the deadline set on that basis, exactly like every write
-	// before the body finishes (bodyDone is not yet marked).
+	// before the body finishes (bodyDone is not yet marked pending).
 	go func() { buf := make([]byte, 64); _, _ = server.Read(buf) }()
 	if _, err := wrapped.Write([]byte("mid-body chunk")); err != nil {
 		t.Fatalf("mid-body Write: %v", err)
 	}
 
-	// The body is now fully handed off — this is the final write. markDone
-	// fixes the post-handoff deadline at now+400ms (the responseTimeout
-	// bind captured above).
-	signal.markDone()
+	// The wrapped body's Read has now reported io.EOF together with its
+	// final bytes, exactly as uploadBodyReader.Read does — but net/http has
+	// not yet written those bytes to the connection, so the fixed window
+	// must not start yet.
+	signal.armPendingDone()
 	go func() { buf := make([]byte, 64); _, _ = server.Read(buf) }()
+	// This IS the final flush: the Write carrying the body's last bytes to
+	// the connection. Only once it succeeds does resolvePendingDone (called
+	// from inside Write) fire markDone, fixing the post-handoff deadline at
+	// now+400ms (the responseTimeout bind captured above).
 	if _, err := wrapped.Write([]byte("final flush")); err != nil {
 		t.Fatalf("final-flush Write: %v", err)
 	}
@@ -1465,6 +1490,210 @@ func TestIdleConn_PostHandoff_ExtendsToResponseTimeout(t *testing.T) {
 	}
 	if elapsed < 100*time.Millisecond {
 		t.Fatalf("Read returned in %v, expected it to have waited for the delayed response (~150ms)", elapsed)
+	}
+}
+
+// TestIdleConn_FinalFlushStall_UsesIdleTimeoutNotResponseTimeout is review
+// round 5's required negative control: the Write carrying the body's
+// actual final bytes must itself still be governed by IdleTimeout, not the
+// (far longer) fixed post-handoff window, even though the wrapped body has
+// already reported io.EOF together with those bytes (armPendingDone was
+// called) — the fixed window must not begin until THAT write succeeds. On
+// the pre-fix code, which called markDone (and so switched the deadline to
+// the fixed window) the instant the body's Read returned EOF, before
+// net/http ever got to write the pending bytes, this exact stall would
+// incorrectly run for the full ResponseTimeout instead of failing at
+// IdleTimeout — four extra minutes in production, scaled here to
+// milliseconds.
+func TestIdleConn_FinalFlushStall_UsesIdleTimeoutNotResponseTimeout(t *testing.T) {
+	client, _ := net.Pipe()
+	defer func() { _ = client.Close() }()
+
+	signal := &bodyDoneSignal{}
+	wrapped := &idleConn{
+		Conn:        client,
+		idleTimeout: 80 * time.Millisecond,
+		bodyDone:    signal,
+	}
+	// Deliberately far longer than idleTimeout: if the fixed window wrongly
+	// governed this write, the test would hang for seconds instead of
+	// failing quickly.
+	signal.bind(wrapped, 5*time.Second)
+	if err := wrapped.SetDeadline(time.Now().Add(wrapped.idleTimeout)); err != nil {
+		t.Fatalf("SetDeadline: %v", err)
+	}
+
+	// The wrapped body's Read has reported io.EOF together with its final
+	// bytes (see uploadBodyReader.Read), but net/http has not yet written
+	// them to the connection.
+	signal.armPendingDone()
+
+	start := time.Now()
+	_, err := wrapped.Write([]byte("final flush, nobody ever reads the other end"))
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected the final flush write to time out: nothing ever reads the other end of the pipe")
+	}
+	netErr, ok := err.(net.Error)
+	if !ok || !netErr.Timeout() {
+		t.Fatalf("err = %v (%T), want a net.Error reporting Timeout() == true", err, err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("took %v to time out; an 80ms idle timeout should have cut it well before this (armPendingDone alone must not apply the 5s fixed window — only a SUCCEEDED final write may, via resolvePendingDone)", elapsed)
+	}
+}
+
+// eofWithDataReader reports io.EOF together with its one and only chunk of
+// data, in a single Read call, instead of needing a subsequent zero-byte
+// call to report EOF on its own (the bytes.Reader/strings.Reader shape) —
+// both are legal per the io.Reader contract, and this is the shape
+// uploadBodyReader's armPendingDone path exists for.
+type eofWithDataReader struct {
+	data []byte
+	done bool
+}
+
+func (r *eofWithDataReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data)
+	r.done = true
+	return n, io.EOF
+}
+
+// TestUploadBodyReader_EOFWithData_ArmsPendingDoneNotMarkDone proves
+// uploadBodyReader defers the done transition when the wrapped reader folds
+// its final bytes and io.EOF into the same call: review round 5 found that
+// marking done immediately here (the pre-fix behavior) starts the fixed
+// response window before net/http ever gets to write those bytes to the
+// connection — see TestIdleConn_FinalFlushStall_UsesIdleTimeoutNotResponseTimeout
+// for why that specifically matters.
+func TestUploadBodyReader_EOFWithData_ArmsPendingDoneNotMarkDone(t *testing.T) {
+	signal := &bodyDoneSignal{}
+	reader := &uploadBodyReader{r: &eofWithDataReader{data: []byte("final chunk")}, signal: signal}
+
+	buf := make([]byte, 64)
+	n, err := reader.Read(buf)
+	if err != io.EOF {
+		t.Fatalf("Read err = %v, want io.EOF", err)
+	}
+	if n != len("final chunk") {
+		t.Fatalf("Read n = %d, want %d", n, len("final chunk"))
+	}
+
+	signal.mu.Lock()
+	done, pending := signal.done, signal.pending
+	signal.mu.Unlock()
+	if done {
+		t.Fatal("markDone fired directly from Read's EOF-with-data case; the fixed window must wait for the pending Write to actually succeed (resolvePendingDone)")
+	}
+	if !pending {
+		t.Fatal("expected armPendingDone to have recorded the pending final write")
+	}
+}
+
+// TestUploadBodyReader_EOFWithoutData_MarksDoneImmediately is the companion
+// shape: when the wrapped reader's EOF arrives on its own (the common case
+// for e.g. bytes.Reader/strings.Reader, which net/http's own body copy
+// already fully wrote to the connection on an earlier call before this one
+// ever runs), there is no pending write left to wait for, so markDone fires
+// right away — the pre-existing, unchanged behavior for that shape.
+func TestUploadBodyReader_EOFWithoutData_MarksDoneImmediately(t *testing.T) {
+	signal := &bodyDoneSignal{}
+	reader := &uploadBodyReader{r: strings.NewReader(""), signal: signal}
+
+	buf := make([]byte, 64)
+	n, err := reader.Read(buf)
+	if err != io.EOF || n != 0 {
+		t.Fatalf("Read = (%d, %v), want (0, io.EOF)", n, err)
+	}
+
+	signal.mu.Lock()
+	done := signal.done
+	signal.mu.Unlock()
+	if !done {
+		t.Fatal("expected markDone to fire immediately: no pending bytes are left to write")
+	}
+}
+
+// fakeDeadlineConn is a minimal net.Conn whose only meaningful behavior is
+// recording the last deadline passed to SetDeadline, guarded by its own
+// mutex — used to observe, from concurrent goroutines, which deadline a
+// race between markDone and markHeadersReceived actually left in place.
+type fakeDeadlineConn struct {
+	mu       sync.Mutex
+	deadline time.Time
+}
+
+func (f *fakeDeadlineConn) Read([]byte) (int, error)    { return 0, io.EOF }
+func (f *fakeDeadlineConn) Write(b []byte) (int, error) { return len(b), nil }
+func (f *fakeDeadlineConn) Close() error                { return nil }
+func (f *fakeDeadlineConn) LocalAddr() net.Addr         { return nil }
+func (f *fakeDeadlineConn) RemoteAddr() net.Addr        { return nil }
+func (f *fakeDeadlineConn) SetDeadline(t time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deadline = t
+	return nil
+}
+func (f *fakeDeadlineConn) SetReadDeadline(t time.Time) error  { return f.SetDeadline(t) }
+func (f *fakeDeadlineConn) SetWriteDeadline(t time.Time) error { return f.SetDeadline(t) }
+func (f *fakeDeadlineConn) lastDeadline() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.deadline
+}
+
+// TestBodyDoneSignal_ConcurrentMarkDoneAndHeadersReceived_RaceSafe is review
+// round 5's required race-safety proof. markDone (called from the
+// request-writing goroutine once the body is fully handed off) and
+// markHeadersReceived (called from whichever goroutine called client.Do,
+// once it returns) can legitimately run concurrently in production —
+// nothing serializes which happens first. Regardless of that order, once
+// both have completed, the connection must end up on the normal
+// IdleTimeout-based deadline, never the fixed response window: on the
+// pre-fix code, an interleaving where markDone's state check ran (reading
+// headersDone as still false) before markHeadersReceived started, but
+// markHeadersReceived's own SetDeadline call then landed BEFORE markDone's
+// later, unconditional one, left the connection on the far-longer fixed
+// deadline even though headers had already arrived — exactly the
+// four-extra-minutes bug review round 5 found. Run with -race (must stay
+// free of actual data races) and -count=20 (interleaving timing is
+// inherently nondeterministic; the many internal iterations below plus
+// repeated process runs together give real confidence it can't recur).
+func TestBodyDoneSignal_ConcurrentMarkDoneAndHeadersReceived_RaceSafe(t *testing.T) {
+	const (
+		idleTimeout = 50 * time.Millisecond
+		// Deliberately far from idleTimeout so a leaked fixed deadline is
+		// unmistakable in the assertion below.
+		responseTimeout = 10 * time.Second
+	)
+
+	for i := 0; i < 200; i++ {
+		conn := &fakeDeadlineConn{}
+		signal := &bodyDoneSignal{}
+		wrapped := &idleConn{Conn: conn, idleTimeout: idleTimeout, bodyDone: signal}
+		signal.bind(wrapped, responseTimeout)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			signal.markDone()
+		}()
+		go func() {
+			defer wg.Done()
+			signal.markHeadersReceived()
+		}()
+		wg.Wait()
+
+		got := conn.lastDeadline()
+		maxIdleDeadline := time.Now().Add(idleTimeout + 500*time.Millisecond)
+		if got.After(maxIdleDeadline) {
+			t.Fatalf("iteration %d: final deadline %v is far enough in the future to be the stale %v fixed window, not the %v idle one — markDone's SetDeadline raced ahead of markHeadersReceived's", i, got, responseTimeout, idleTimeout)
+		}
 	}
 }
 

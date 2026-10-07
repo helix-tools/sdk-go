@@ -109,14 +109,11 @@ var proxyForRequest = http.ProxyFromEnvironment
 type bodyDoneContextKey struct{}
 
 // bodyDoneSignal is the handoff between a wrapped request body and the
-// connection carrying it. markDone, called by the body the instant it is
-// fully drained, immediately sets the connection's deadline to a FIXED
-// point in time, now+responseTimeout — not just on the next successful
-// Read or Write, since for a Content-Length body the last data-carrying
-// Write to the connection already happened (with the old, shorter deadline)
-// before the body's own Read ever reports io.EOF; waiting for a subsequent
-// I/O to notice would leave the critical gap — the wait for storage's
-// response — governed by whatever deadline that last Write set.
+// connection carrying it. markDone, called once the body's bytes have
+// actually reached the connection (see armPendingDone/resolvePendingDone
+// for why that is not always the same moment as the body's Read reporting
+// io.EOF), sets the connection's deadline to a FIXED point in time,
+// now+responseTimeout.
 //
 // That deadline is deliberately FIXED, not pushed forward by every
 // subsequent successful read, for as long as storage's response headers
@@ -125,29 +122,24 @@ type bodyDoneContextKey struct{}
 // of a slow-but-healthy transfer this package otherwise exists to tolerate
 // — but tolerating it here would mean no bound at all on how long a caller
 // waits for a response to even begin arriving. Once MarkResponseHeadersReceived
-// reports those headers are fully read, idleConn.extendDeadline goes back
-// to extending the deadline by IdleTimeout on every successful read, exactly
+// reports those headers are fully read, extendDeadline goes back to
+// extending the deadline by IdleTimeout on every successful read, exactly
 // as it does for every read before the request body was ever handed off —
 // the (typically small) response body that follows is bound the same way a
 // download's body is, never held to the now-elapsed-or-elapsing fixed
 // window that only ever governed the wait for headers.
 //
-// bind connects the signal to its connection once DialContext/DialTLSContext
-// construct it (always before the body is read, since net/http dials before
-// it writes), capturing the ResponseTimeout package variable at that same
-// moment for markDone to use later — not read again at markDone's own,
-// later call time. Only a caller that actually gets as far as dialing a
-// connection through this package's own DialContext/DialTLSContext (that
-// is, one using the *http.Client New returns) ever touches ResponseTimeout
-// at all; one that supplies a different http.Client but still wraps its
-// body with WrapUploadBody (as the self-attack and negative-control tests
-// deliberately do, to compare against the pre-fix client shape) must not
-// — reading it unconditionally from the body reader itself, regardless of
-// which client is in play, raced one such test's leaked goroutine against
-// a later test's override of the same package variable. A mutex guards all
-// of this because the body is drained on one goroutine (net/http's request
-// writer) while the connection may be read concurrently on another (its
-// response reader).
+// Every method that decides a deadline and then applies it (markDone,
+// markHeadersReceived, extendDeadline) does both steps — the state check
+// and the SetDeadline call — under s.mu, never one inside the lock and the
+// other after releasing it: markDone and markHeadersReceived can
+// legitimately run concurrently (markDone from the request-writing
+// goroutine, markHeadersReceived from whichever goroutine called
+// client.Do), and splitting "decide" from "apply" across the lock boundary
+// let whichever one's SetDeadline call happened to land LAST win, even if
+// it was the one that read the staler state — letting markDone's fixed,
+// far-longer deadline overwrite a markHeadersReceived that had already
+// correctly re-armed the connection on the normal basis.
 type bodyDoneSignal struct {
 	mu              sync.Mutex
 	conn            *idleConn
@@ -155,8 +147,14 @@ type bodyDoneSignal struct {
 	// responseDeadline is the fixed point in time markDone computed for the
 	// wait on response headers; meaningful only once done is true.
 	responseDeadline time.Time
-	headersDone      bool
-	done             bool
+	// pending records that the wrapped body's Read reported io.EOF together
+	// with its final bytes (see armPendingDone) and those bytes have not
+	// yet been written to the connection; resolvePendingDone clears it once
+	// the Write carrying them succeeds, which is the point markDone
+	// actually fires for that case.
+	pending     bool
+	headersDone bool
+	done        bool
 }
 
 func (s *bodyDoneSignal) bind(conn *idleConn, responseTimeout time.Duration) {
@@ -166,27 +164,67 @@ func (s *bodyDoneSignal) bind(conn *idleConn, responseTimeout time.Duration) {
 	s.responseTimeout = responseTimeout
 }
 
-// markDone is called by the wrapped body the instant it is fully drained.
-// It fixes responseDeadline unconditionally (idleConn.extendDeadline reads
-// it only once headersDone is false, so a stale value sitting unused is
-// harmless), but only force-sets it on the connection when headers have not
-// already arrived: a storage service that responds before the request body
-// has finished sending (an early validation error, say) can call
-// markHeadersReceived before this fires, and the connection's deadline is
-// already correctly back on the normal IdleTimeout basis by then — forcing
-// it down to the (likely much shorter) fixed window here would wrongly
-// re-impose the header-wait bound after the headers it was ever meant to
-// bound have already arrived.
+// armPendingDone records that the wrapped upload body's Read reported
+// io.EOF together with its final bytes — an io.Reader is explicitly
+// allowed to do this, rather than needing a separate, later zero-byte call
+// to report EOF on its own — before net/http has written those bytes to
+// the connection (see uploadBodyReader.Read). The fixed ResponseTimeout
+// window must not begin here: that Write is still pending, and a peer that
+// then stalls receiving it must still fail at the (shorter) IdleTimeout
+// that governs it, not ride the far longer response window. See
+// resolvePendingDone, which finalizes the transition once that Write
+// actually succeeds.
+func (s *bodyDoneSignal) armPendingDone() {
+	s.mu.Lock()
+	s.pending = true
+	s.mu.Unlock()
+}
+
+// resolvePendingDone is called by idleConn after every successful Write. A
+// pending flag armPendingDone set means THIS Write is the one carrying the
+// body's deferred final bytes, so the transition markDone performs applies
+// now — the first Write to succeed after armPendingDone, never a moment
+// earlier.
+func (s *bodyDoneSignal) resolvePendingDone() {
+	s.mu.Lock()
+	pending := s.pending
+	s.pending = false
+	s.mu.Unlock()
+	if pending {
+		s.markDone()
+	}
+}
+
+// markDone is called once the wrapped body's bytes have actually reached
+// the connection: directly by the body the instant a Read call reports
+// io.EOF on its own (the common shape, e.g. bytes.Reader/strings.Reader),
+// or via resolvePendingDone once the deferred final Write succeeds (the
+// EOF-with-data shape, see armPendingDone). It is idempotent — a reader
+// that calls Read again after already reporting io.EOF (legal, if unusual)
+// must not re-arm the fixed window later than its first, correct firing,
+// pushing it further into the future.
+//
+// The state check and the SetDeadline call happen under the same lock
+// acquisition rather than the check first and the call after releasing it
+// (see bodyDoneSignal's doc comment for why that split is exactly the race
+// this guards against). Only force-sets the connection's deadline when
+// headers have not already arrived: a storage service that responds before
+// the request body has finished sending (an early validation error, say)
+// can call markHeadersReceived before this fires, and the connection's
+// deadline is already correctly back on the normal IdleTimeout basis by
+// then — forcing it down to the (likely much shorter) fixed window here
+// would wrongly re-impose the header-wait bound after the headers it was
+// ever meant to bound have already arrived.
 func (s *bodyDoneSignal) markDone() {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.done {
+		return
+	}
 	s.done = true
 	s.responseDeadline = time.Now().Add(s.responseTimeout)
-	headersAlreadyDone := s.headersDone
-	conn := s.conn
-	deadline := s.responseDeadline
-	s.mu.Unlock()
-	if conn != nil && !headersAlreadyDone {
-		_ = conn.SetDeadline(deadline)
+	if s.conn != nil && !s.headersDone {
+		_ = s.conn.SetDeadline(s.responseDeadline)
 	}
 }
 
@@ -200,25 +238,33 @@ func (s *bodyDoneSignal) markDone() {
 // header-wait deadline landed on — which a header wait that ran close to
 // the full window would leave on the verge of expiring, or already
 // expired, wrongly timing out a response body that is merely slow to
-// start, not stalled.
+// start, not stalled. The state update and the SetDeadline call happen
+// under the same lock acquisition for the same reason markDone's do.
 func (s *bodyDoneSignal) markHeadersReceived() {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.headersDone = true
-	conn := s.conn
-	s.mu.Unlock()
-	if conn != nil {
-		_ = conn.SetDeadline(time.Now().Add(conn.idleTimeout))
+	if s.conn != nil {
+		_ = s.conn.SetDeadline(time.Now().Add(s.conn.idleTimeout))
 	}
 }
 
-// state reports whether the body has been fully handed off, the fixed
-// deadline markDone computed for that case, and whether markHeadersReceived
-// has since fired — the three pieces idleConn.extendDeadline needs to pick
-// the right deadline on each Read or Write.
-func (s *bodyDoneSignal) state() (done bool, deadline time.Time, headersDone bool) {
+// extendDeadline picks, and immediately applies, the deadline idleConn's
+// Read or Write should leave in place after a successful I/O — called
+// under s.mu, exactly like markDone and markHeadersReceived, so this
+// decision can never race against either of them re-arming the same
+// connection's deadline for a different reason.
+func (s *bodyDoneSignal) extendDeadline() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.done, s.responseDeadline, s.headersDone
+	if s.conn == nil {
+		return
+	}
+	if s.done && !s.headersDone {
+		_ = s.conn.SetDeadline(s.responseDeadline)
+		return
+	}
+	_ = s.conn.SetDeadline(time.Now().Add(s.conn.idleTimeout))
 }
 
 // bodyDoneFromContext returns the *bodyDoneSignal a prior WrapUploadBody
@@ -270,8 +316,19 @@ func MarkResponseHeadersReceived(ctx context.Context) {
 	}
 }
 
-// uploadBodyReader marks its bodyDoneSignal the moment the wrapped reader
-// reports io.EOF.
+// uploadBodyReader signals its bodyDoneSignal the moment the wrapped reader
+// reports io.EOF. An io.Reader is allowed to report io.EOF either on its
+// own, in a later zero-byte call (bytes.Reader/strings.Reader and most
+// others), or together with its final bytes in the same call — both are
+// legal per the io.Reader contract, and net/http's own body-copy loop
+// writes those final bytes to the connection either way (io.Copy always
+// calls Write for however many bytes a Read returned, checking the error
+// only afterward). Read tells those two shapes apart: a bare EOF means
+// there is nothing left to write, so markDone fires immediately; an EOF
+// carrying bytes means a Write for them is still coming, so this only arms
+// the pending transition — see armPendingDone and resolvePendingDone for
+// why firing markDone here instead would start the fixed response window
+// before that Write even reaches the connection.
 type uploadBodyReader struct {
 	r      io.Reader
 	signal *bodyDoneSignal
@@ -280,7 +337,11 @@ type uploadBodyReader struct {
 func (b *uploadBodyReader) Read(p []byte) (int, error) {
 	n, err := b.r.Read(p)
 	if err == io.EOF {
-		b.signal.markDone()
+		if n > 0 {
+			b.signal.armPendingDone()
+		} else {
+			b.signal.markDone()
+		}
 	}
 	return n, err
 }
@@ -676,13 +737,15 @@ type idleConn struct {
 // extendDeadline picks the deadline the next Read or Write's success should
 // leave in place — see idleConn's doc comment for why the fixed,
 // header-wait deadline is deliberately not recomputed here the way the
-// normal IdleTimeout-based one is.
+// normal IdleTimeout-based one is. Delegates the actual decision to
+// bodyDone.extendDeadline when a body-completion signal is wired in, so it
+// shares that method's single lock acquisition with markDone and
+// markHeadersReceived — see bodyDoneSignal's doc comment for why splitting
+// the check from the SetDeadline call is exactly the race this avoids.
 func (c *idleConn) extendDeadline() {
 	if c.bodyDone != nil {
-		if done, deadline, headersDone := c.bodyDone.state(); done && !headersDone {
-			_ = c.SetDeadline(deadline)
-			return
-		}
+		c.bodyDone.extendDeadline()
+		return
 	}
 	_ = c.SetDeadline(time.Now().Add(c.idleTimeout))
 }
@@ -695,9 +758,17 @@ func (c *idleConn) Read(b []byte) (int, error) {
 	return n, err
 }
 
+// Write resolves a pending body-completion transition (see
+// bodyDoneSignal.armPendingDone) before extending the deadline: this Write
+// may be the deferred final flush uploadBodyReader.Read armed, in which
+// case the fixed response window must begin now, having just succeeded —
+// not any earlier.
 func (c *idleConn) Write(b []byte) (int, error) {
 	n, err := c.Conn.Write(b)
 	if n > 0 {
+		if c.bodyDone != nil {
+			c.bodyDone.resolvePendingDone()
+		}
 		c.extendDeadline()
 	}
 	return n, err
