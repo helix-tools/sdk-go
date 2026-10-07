@@ -21,6 +21,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
@@ -151,6 +152,61 @@ func TestEncryptData_KMSCauseNeverLeaksIntoMessage(t *testing.T) {
 
 	assertClean(t, err, "encryption failed")
 	assertCauseReachable(t, err, arnAccountService)
+}
+
+// TestEncryptData_KMSNoResponseCauseIsSanitized covers the no-response case
+// for producer's own AWS-SDK call site: a KMS Encrypt call that gets no
+// response at all (a refused connection) must not leak the KMS endpoint
+// host or URL through the error chain — the same guarantee SanitizeCause
+// already gives every SDK-owned HTTP call site.
+func TestEncryptData_KMSNoResponseCauseIsSanitized(t *testing.T) {
+	p := newTestProducer("https://api.test")
+	p.KMSKeyID = "test-kms-key"
+	p.kmsClient = kms.NewFromConfig(p.awsConfig, func(o *kms.Options) {
+		o.BaseEndpoint = aws.String("http://127.0.0.1:1")
+		o.Credentials = credentials.NewStaticCredentialsProvider("AKIDTEST", "SECRETTEST", "")
+		o.RetryMaxAttempts = 1
+	})
+
+	_, err := p.encryptData(context.Background(), []byte("compressed-bytes"))
+
+	assertClean(t, err, "encryption failed")
+
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		t.Fatalf("errors.As(err, *url.Error) = true, want the no-response cause sanitized away: %v", urlErr)
+	}
+	assertSanitizedCauseReachable(t, err, "127.0.0.1")
+}
+
+// TestEncryptData_KMSNoResponseNegativeControl proves the fabricated
+// no-response KMS call really does carry the endpoint host, reachable via
+// errors.As(*url.Error) before sanitizing — exactly the leak the
+// verification report found — so a green assertion above is not vacuous.
+func TestEncryptData_KMSNoResponseNegativeControl(t *testing.T) {
+	kmsClient := kms.NewFromConfig(aws.Config{
+		Region:      "us-east-1",
+		Credentials: credentials.NewStaticCredentialsProvider("AKIDTEST", "SECRETTEST", ""),
+	}, func(o *kms.Options) {
+		o.BaseEndpoint = aws.String("http://127.0.0.1:1")
+		o.RetryMaxAttempts = 1
+	})
+
+	_, rawErr := kmsClient.Encrypt(context.Background(), &kms.EncryptInput{
+		KeyId:     aws.String("test-kms-key"),
+		Plaintext: []byte("data-key"),
+	})
+	if rawErr == nil {
+		t.Fatal("expected the refused connection to fail")
+	}
+
+	var urlErr *url.Error
+	if !errors.As(rawErr, &urlErr) {
+		t.Fatalf("expected rawErr to carry a *url.Error, got %T: %v", rawErr, rawErr)
+	}
+	if !strings.Contains(urlErr.Error(), "127.0.0.1:1") {
+		t.Fatalf("negative control did not reproduce the leak: %v", urlErr)
+	}
 }
 
 // ----------------------------------------------------------------------------

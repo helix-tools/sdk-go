@@ -308,9 +308,9 @@ func TestGetDatasetSubscribers_ServerIgnoresPageParam_ReturnsError(t *testing.T)
 	}
 }
 
-// TestListMyDatasets_ServerOmitsPageWithMultiplePages_ReturnsError is the
-// review round-3 finding: a server whose page-mismatch check has nothing
-// to compare against because it never sends "page" at all bypassed the
+// TestListMyDatasets_ServerOmitsPageWithMultiplePages_ReturnsError covers
+// a server whose page-mismatch check has nothing to compare against
+// because it never sends "page" at all, which bypassed the
 // TestListMyDatasets_ServerIgnoresPageParam_ReturnsError guard entirely
 // (respPage stayed nil, so `respPage != nil && *respPage != page` never
 // fired), so a page-ignoring server that also omits "page" made
@@ -327,7 +327,7 @@ func TestListMyDatasets_ServerOmitsPageWithMultiplePages_ReturnsError(t *testing
 		atomic.AddInt32(&requestCount, 1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		// Exactly the reviewer's server: total_pages > 1, "page" absent.
+		// Exactly the scenario this guards against: total_pages > 1, "page" absent.
 		_, _ = w.Write([]byte(`{"datasets":[{"id":"A"}],"total_pages":3}`))
 	}))
 	defer server.Close()
@@ -347,8 +347,8 @@ func TestListMyDatasets_ServerOmitsPageWithMultiplePages_ReturnsError(t *testing
 }
 
 // TestGetDatasetSubscribers_ServerOmitsPageWithMultiplePages_ReturnsError
-// is the same round-3 finding for GetDatasetSubscribers, pinning that the
-// guard applies to both paginateAll callers in this package, not just
+// covers the same gap for GetDatasetSubscribers, pinning that the guard
+// applies to both paginateAll callers in this package, not just
 // ListMyDatasets.
 func TestGetDatasetSubscribers_ServerOmitsPageWithMultiplePages_ReturnsError(t *testing.T) {
 	var requestCount int32
@@ -406,8 +406,8 @@ func TestListMyDatasets_SinglePageOmitsPage_Accepted(t *testing.T) {
 	}
 }
 
-// TestListMyDatasets_ServerOmitsPageAndDropsTotalPages_ReturnsError is the
-// review round-4 finding: the round-3 guard checks each response only
+// TestListMyDatasets_ServerOmitsPageAndDropsTotalPages_ReturnsError covers
+// a gap in the single-response guard above: it checks each response only
 // against ITSELF (respPage vs totalPages on that same response), so a
 // server that flips its story between requests can dodge both existing
 // checks at once — page 1 honestly reports {page:1, total_pages:3}, then

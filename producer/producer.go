@@ -202,8 +202,15 @@ func NewProducer(cfg types.Config) (*Producer, error) {
 	}
 	isStaticMode := isStaticCredentialsProvider(credProvider)
 
+	// Bounds the start-up identity check so a connection that is accepted but
+	// never answered reports the same temporary-failure error as NewConsumer
+	// (consumer/consumer.go's awsHTTPClient) instead of blocking indefinitely.
+	awsHTTPClient := &http.Client{
+		Timeout: 25 * time.Second,
+	}
+
 	// Load AWS config.
-	awsCfg, err := loadAWSConfig(context.Background(), cfg.Region, credProvider)
+	awsCfg, err := loadAWSConfig(context.Background(), cfg.Region, credProvider, awsHTTPClient)
 	if err != nil {
 		return nil, err
 	}
@@ -432,10 +439,11 @@ func (p *Producer) runKeyLookup(call *keyLookupCall, lookupCtx context.Context) 
 // the customer sees a clean, capability-language message while the raw AWS
 // error (which can carry local shared-config-file paths or profile detail)
 // stays reachable via errors.Unwrap/errors.As for debugging.
-func loadAWSConfig(ctx context.Context, region string, credProvider aws.CredentialsProvider) (aws.Config, error) {
+func loadAWSConfig(ctx context.Context, region string, credProvider aws.CredentialsProvider, httpClient aws.HTTPClient) (aws.Config, error) {
 	awsCfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion(region),
 		config.WithCredentialsProvider(credProvider),
+		config.WithHTTPClient(httpClient),
 	)
 	if err != nil {
 		return aws.Config{}, sdkerr.Wrap("failed to load AWS config", err)
@@ -633,7 +641,7 @@ func (p *Producer) encryptData(ctx context.Context, data []byte) ([]byte, error)
 		Plaintext: dataKey,
 	})
 	if err != nil {
-		return nil, sdkerr.Wrap("encryption failed", err)
+		return nil, sdkerr.Wrap("encryption failed", sdkerr.SanitizeCause(err))
 	}
 
 	// Package: [4 bytes: key length][encrypted key][16 bytes: IV][16 bytes: tag][encrypted data].

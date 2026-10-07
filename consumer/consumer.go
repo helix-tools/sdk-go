@@ -908,7 +908,7 @@ func (c *Consumer) decryptData(ctx context.Context, data []byte) ([]byte, error)
 		CiphertextBlob: encryptedKey,
 	})
 	if err != nil {
-		return nil, sdkerr.Wrap("decryption failed", err)
+		return nil, sdkerr.Wrap("decryption failed", sdkerr.SanitizeCause(err))
 	}
 
 	// Decrypt the payload. Every failure branch below uses the
@@ -1290,7 +1290,7 @@ func (c *Consumer) PollNotifications(ctx context.Context, opts PollNotifications
 		WaitTimeSeconds:       opts.WaitTimeSeconds,
 	}, optFns...)
 	if err != nil {
-		return nil, sdkerr.Wrap("failed to poll SQS queue", err)
+		return nil, sdkerr.Wrap("failed to poll SQS queue", sdkerr.SanitizeCause(err))
 	}
 
 	var notifications []Notification
@@ -1517,7 +1517,7 @@ func (c *Consumer) DeleteNotification(ctx context.Context, receiptHandle string)
 		QueueUrl:      aws.String(queueURL),
 		ReceiptHandle: aws.String(receiptHandle),
 	}); err != nil {
-		return sdkerr.Wrap("failed to delete notification", err)
+		return sdkerr.Wrap("failed to delete notification", sdkerr.SanitizeCause(err))
 	}
 
 	return nil
@@ -1632,7 +1632,7 @@ func (c *Consumer) ClearQueue(ctx context.Context) error {
 			return sdkerr.Wrap("queue purge already in progress. AWS limits PurgeQueue to once every 60 seconds per queue", err)
 		}
 
-		return sdkerr.Wrap("failed to clear queue", err)
+		return sdkerr.Wrap("failed to clear queue", sdkerr.SanitizeCause(err))
 	}
 
 	return nil
