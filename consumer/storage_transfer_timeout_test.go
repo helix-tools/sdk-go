@@ -13,6 +13,7 @@ package consumer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -160,6 +161,122 @@ func TestDownloadDataset_StorageStall_HeadersThenStallMidBody(t *testing.T) {
 	if elapsed > 3*time.Second {
 		t.Fatalf("took %v to fail; a 100ms idle timeout should have cut it well before this", elapsed)
 	}
+}
+
+// TestDownloadDataset_StorageStall_MidBody_TimeoutStillDetectable proves
+// SanitizeCause's stand-in preserves net.Error.Timeout() for a sanitized
+// body-read failure: a caller that retries on Timeout() must keep working
+// exactly as it did when the raw, unsanitized *net.OpError was reachable.
+func TestDownloadDataset_StorageStall_MidBody_TimeoutStillDetectable(t *testing.T) {
+	overrideStorageIdleTimeout(t, 100*time.Millisecond)
+
+	stall := newRawStub(t, func(conn net.Conn) {
+		buf := make([]byte, 4096)
+		_, _ = conn.Read(buf)
+		_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n"))
+	})
+
+	c, _ := consumerAgainstStorageStub(t, stall.url("/object"), transferclient.New())
+
+	out := filepath.Join(t.TempDir(), "out.bin")
+	err := c.DownloadDataset(context.Background(), "ds-1", out)
+
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Fatalf("errors.As(err, &net.Error) = false; want the sanitized cause to still answer Timeout()")
+	}
+	if !netErr.Timeout() {
+		t.Error("Timeout() = false, want true for an idle-timeout-triggered body-read failure")
+	}
+	assertSanitizedCauseReachable(t, err, stall.addr)
+}
+
+// TestDownloadDataset_ContextCanceledMidBodyStall_StaysDetectableAndClean is
+// the self-attack input most likely to evade the body-read fix: canceling
+// the caller's context DURING a body stall. The resulting cause is the bare
+// context.Canceled sentinel (net/http surfaces it directly, with no
+// host-bearing wrapper), so SanitizeCause must recognize there is nothing
+// to sanitize and leave it reachable — proving the fix never accidentally
+// swallows context detectability while closing the address leak.
+func TestDownloadDataset_ContextCanceledMidBodyStall_StaysDetectableAndClean(t *testing.T) {
+	overrideStorageIdleTimeout(t, 5*time.Second) // Idle timeout must not be what fires here.
+
+	stall := newRawStub(t, func(conn net.Conn) {
+		buf := make([]byte, 4096)
+		_, _ = conn.Read(buf)
+		_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n"))
+	})
+
+	c, _ := consumerAgainstStorageStub(t, stall.url("/object"), transferclient.New())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		cancel()
+	}()
+
+	out := filepath.Join(t.TempDir(), "out.bin")
+	err := c.DownloadDataset(ctx, "ds-1", out)
+
+	if err == nil {
+		t.Fatal("expected DownloadDataset to fail once its context is canceled mid-stall")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("errors.Is(err, context.Canceled) = false, want true: %v", err)
+	}
+	assertSanitizedCauseReachable(t, err, stall.addr)
+}
+
+// TestDownloadDataset_StorageStall_MidBody_ErrorNeverLeaksStorageAddress is
+// the small-file path's (io.ReadAll(resp.Body)) counterpart to
+// TestDownloadDataset_StorageStall_HeadersThenStallMidBody: a stall AFTER
+// headers arrive — the idle timeout firing mid-Read — surfaces a real
+// *net.OpError naming the stub's own 127.0.0.1 address, exactly the shape
+// consumer/error_cause_test.go's failingReadCloser-based tests cannot
+// produce (a plain synthetic error is never host-bearing, so it was never
+// a case SanitizeCause needed to touch). This is the one that must never
+// reach a caller.
+func TestDownloadDataset_StorageStall_MidBody_ErrorNeverLeaksStorageAddress(t *testing.T) {
+	overrideStorageIdleTimeout(t, 100*time.Millisecond)
+
+	stall := newRawStub(t, func(conn net.Conn) {
+		buf := make([]byte, 4096)
+		_, _ = conn.Read(buf)
+		_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n"))
+		// The declared body never arrives: idle timeout fires on the body Read.
+	})
+
+	c, _ := consumerAgainstStorageStub(t, stall.url("/object"), transferclient.New())
+
+	out := filepath.Join(t.TempDir(), "out.bin")
+	err := c.DownloadDataset(context.Background(), "ds-1", out)
+
+	assertClean(t, err, "failed to read response")
+	assertSanitizedCauseReachable(t, err, stall.addr)
+}
+
+// TestDownloadDataset_StorageStall_LargeFile_ErrorNeverLeaksStorageAddress is
+// the large-file path's (io.Copy(tempFile, resp.Body)) counterpart: same
+// stall-after-headers shape, but with a declared Content-Length over the
+// 100MB large-file threshold so DownloadDataset takes the streaming branch
+// instead of the in-memory one.
+func TestDownloadDataset_StorageStall_LargeFile_ErrorNeverLeaksStorageAddress(t *testing.T) {
+	overrideStorageIdleTimeout(t, 100*time.Millisecond)
+
+	stall := newRawStub(t, func(conn net.Conn) {
+		buf := make([]byte, 4096)
+		_, _ = conn.Read(buf)
+		_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 200000000\r\n\r\n"))
+		// The declared body never arrives: idle timeout fires on the body Read.
+	})
+
+	c, _ := consumerAgainstStorageStub(t, stall.url("/object"), transferclient.New())
+
+	out := filepath.Join(t.TempDir(), "out.bin")
+	err := c.DownloadDataset(context.Background(), "ds-1", out)
+
+	assertClean(t, err, "failed to stream to temp file")
+	assertSanitizedCauseReachable(t, err, stall.addr)
 }
 
 // TestDownloadDataset_StorageDrop_MidBody is a regression check: an abrupt

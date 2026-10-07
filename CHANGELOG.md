@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Security
+- When uploading or downloading a dataset stalls or is dropped mid-transfer,
+  the connection detail that failure used to carry internally — the storage
+  peer's network address — is no longer reachable by inspecting the error's
+  cause. The error's timeout/cancellation signal is unchanged.
+
+### Documentation
+- docs: content-policy scrub -- removed leftover development notes from
+  test file comments; extended the published-content guard to catch this
+  pattern going forward. No behavior change.
+- Documented an already-shipped behavior change from v2.22.4: a dataset
+  upload answered with a redirect is no longer followed; the upload fails
+  with the redirect status instead.
+
 ## 2026-10-07 (v2.22.4)
 
 ### Fixed

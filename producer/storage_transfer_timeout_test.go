@@ -21,6 +21,7 @@ package producer
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -170,6 +171,77 @@ func TestUploadToPresignedURL_StorageStall_NoReplyAfterAccept(t *testing.T) {
 	}
 }
 
+// TestUploadToPresignedURL_StorageStall_NoReplyAfterAccept_ErrorNeverLeaksStorageAddress
+// is the upload leg's counterpart to
+// consumer.TestDownloadDataset_StorageStall_MidBody_ErrorNeverLeaksStorageAddress:
+// a peer that accepts the whole request body and then never answers must
+// not surface the stub's 127.0.0.1 address through Error(), %+v, or the
+// unwrap chain, while still answering Timeout() and errors.Is(context
+// sentinels) exactly as the raw *net.OpError would have. Unlike the
+// download leg (consumer.go), uploadToPresignedURL already applies
+// sdkerr.SanitizeCause to this exact no-response case — this test locks
+// that guarantee in with a real network error, which the download leg's
+// original bug proves a synthetic one cannot stand in for.
+func TestUploadToPresignedURL_StorageStall_NoReplyAfterAccept_ErrorNeverLeaksStorageAddress(t *testing.T) {
+	overrideStorageIdleTimeout(t, 2*time.Second)
+	overrideStorageResponseTimeout(t, 100*time.Millisecond)
+
+	stall := newRawStub(t, func(conn net.Conn) {
+		buf := make([]byte, 4096)
+		_, _ = conn.Read(buf)
+	})
+
+	p := &Producer{storageClient: transferclient.New()}
+
+	err := p.uploadToPresignedURL(context.Background(), stall.url("/object"), []byte("payload"))
+
+	assertClean(t, err, "failed to upload to presigned URL")
+	assertSanitizedCauseReachable(t, err, stall.addr)
+
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Fatalf("errors.As(err, &net.Error) = false; want the sanitized cause to still answer Timeout()")
+	}
+	if !netErr.Timeout() {
+		t.Error("Timeout() = false, want true for a response-window timeout")
+	}
+}
+
+// TestUploadToPresignedURL_ContextCanceledDuringStall_StaysDetectableAndClean
+// is the upload leg's self-attack counterpart to
+// consumer.TestDownloadDataset_ContextCanceledMidBodyStall_StaysDetectableAndClean:
+// canceling the caller's context while waiting for storage's response must
+// still report errors.Is(err, context.Canceled) and must not leak the
+// stub's address, proving the fix doesn't trade one guarantee for the
+// other.
+func TestUploadToPresignedURL_ContextCanceledDuringStall_StaysDetectableAndClean(t *testing.T) {
+	overrideStorageIdleTimeout(t, 5*time.Second)
+	overrideStorageResponseTimeout(t, 5*time.Second) // Must not be what fires here.
+
+	stall := newRawStub(t, func(conn net.Conn) {
+		buf := make([]byte, 4096)
+		_, _ = conn.Read(buf)
+	})
+
+	p := &Producer{storageClient: transferclient.New()}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		cancel()
+	}()
+
+	err := p.uploadToPresignedURL(ctx, stall.url("/object"), []byte("payload"))
+
+	if err == nil {
+		t.Fatal("expected uploadToPresignedURL to fail once its context is canceled mid-wait")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("errors.Is(err, context.Canceled) = false, want true: %v", err)
+	}
+	assertSanitizedCauseReachable(t, err, stall.addr)
+}
+
 // TestUploadToPresignedURL_PostHandoff_SlowResponse_Succeeds is the policy
 // fix itself: once the whole request body has been handed off, the wait for
 // storage's response is bounded by ResponseTimeout, not IdleTimeout. A delay
@@ -238,14 +310,14 @@ func TestUploadToPresignedURL_StorageDrop_MidResponse(t *testing.T) {
 }
 
 // TestUploadToPresignedURL_HeaderTrickle_CannotExtendFixedWindow is the
-// required negative case for review round 4's second finding: once the
+// required negative case for the fixed response window: once the
 // whole request body has been handed off, a peer that trickles the
 // response's status line and headers one byte at a time — each gap
 // individually well under the response window, but their sum spanning
 // several multiples of it — must still fail once the fixed window elapses.
 // This replaces the previous version of this test, which asserted the
 // opposite (that such a trickle succeeds) — exactly the sliding-window bug
-// review round 4 found: a peer drip-feeding an incomplete response could
+// this guards against: a peer drip-feeding an incomplete response could
 // extend the wait forever.
 func TestUploadToPresignedURL_HeaderTrickle_CannotExtendFixedWindow(t *testing.T) {
 	overrideStorageIdleTimeout(t, 3*time.Second) // deliberately long: only the fixed response window should cut this off

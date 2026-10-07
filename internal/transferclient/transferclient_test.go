@@ -626,8 +626,7 @@ func TestProxyForRequest_DefaultsToHTTPProxyFromEnvironment(t *testing.T) {
 // passing through unchanged: it has no TLS handshake stage for this
 // package to need to unify, so net/http's own built-in SOCKS5 handling
 // (reached via the unmodified DialContext path, which is already bound by
-// ConnectTimeout for the dial itself) is left in place for it, exactly as
-// review round 4 found it.
+// ConnectTimeout for the dial itself) is left in place for it.
 func TestNew_ProxyFunc_DelegatesByScheme(t *testing.T) {
 	httpProxy := &url.URL{Scheme: "http", Host: "proxy.example:3128"}
 	httpsProxy := &url.URL{Scheme: "https", Host: "proxy.example:3129"}
@@ -1000,7 +999,7 @@ func TestNew_ProxiedHTTPSProxy_SucceedsWithinBudget(t *testing.T) {
 // CONNECT wait alone rides its hardcoded 1-minute cap rather than
 // ConnectTimeout) would let this succeed at roughly their sum; a single
 // shared budget must cut it off close to ConnectTimeout instead. This test
-// is what review round 3 flagged as missing: the pre-fix code bypassed the
+// covers a case the earlier test suite was missing: the pre-fix code bypassed the
 // shared budget entirely for an https:// proxy (TestNew_ProxyFunc_Delegates
 // ByScheme's "https target behind https proxy passes through unchanged"
 // case), so this scenario used to succeed at roughly the stages' sum instead
@@ -1171,13 +1170,13 @@ func TestNew_SOCKS5TLS_SucceedsWithinBudget(t *testing.T) {
 // TestNew_SOCKS5TLS_ConnectBudget_SharedAcrossDialHandshakeAndTLS is the
 // SOCKS5-proxy companion to
 // TestNew_ProxiedTLS_ConnectBudget_SharedAcrossDialConnectAndHandshake, and
-// review round 5's corrected version of review round 4's required test:
+// the corrected version of an earlier required test for this case:
 // with a socks5 proxy configured, the proxy dial and the SOCKS5 protocol's
 // own stages (method negotiation, CONNECT reply) individually and together
 // stay comfortably under ConnectTimeout — see
 // TestNew_SOCKS5TLS_SucceedsWithinBudget — but adding the REAL target TLS
 // handshake's delay pushes the total over it, so the connect phase must
-// still fail. Review round 4's version of this test delayed only the
+// still fail. The earlier version of this test delayed only the
 // SOCKS5-internal stages and left the actual tls.Server handshake inside
 // handle running with no injected delay at all, so a corrected
 // implementation that stopped sharing the budget with the target TLS
@@ -1432,7 +1431,7 @@ func TestIdleConn_MidBodyStall_UsesIdleTimeout(t *testing.T) {
 // BEFORE that Write, then the Write itself — exactly uploadBodyReader's
 // EOF-with-data shape (see TestUploadBodyReader_EOFWithData_ArmsPendingDoneNotMarkDone)
 // — rather than calling markDone directly before the write, which would
-// bless the fixed window starting a write early that review round 5 found:
+// bless the fixed window starting a write early, a bug this test guards against:
 // see TestIdleConn_FinalFlushStall_UsesIdleTimeoutNotResponseTimeout for the
 // negative control proving that distinction actually matters.
 func TestIdleConn_PostHandoff_ExtendsToResponseTimeout(t *testing.T) {
@@ -1493,8 +1492,8 @@ func TestIdleConn_PostHandoff_ExtendsToResponseTimeout(t *testing.T) {
 	}
 }
 
-// TestIdleConn_FinalFlushStall_UsesIdleTimeoutNotResponseTimeout is review
-// round 5's required negative control: the Write carrying the body's
+// TestIdleConn_FinalFlushStall_UsesIdleTimeoutNotResponseTimeout is the
+// required negative control: the Write carrying the body's
 // actual final bytes must itself still be governed by IdleTimeout, not the
 // (far longer) fixed post-handoff window, even though the wrapped body has
 // already reported io.EOF together with those bytes (armPendingDone was
@@ -1565,8 +1564,8 @@ func (r *eofWithDataReader) Read(p []byte) (int, error) {
 
 // TestUploadBodyReader_EOFWithData_ArmsPendingDoneNotMarkDone proves
 // uploadBodyReader defers the done transition when the wrapped reader folds
-// its final bytes and io.EOF into the same call: review round 5 found that
-// marking done immediately here (the pre-fix behavior) starts the fixed
+// its final bytes and io.EOF into the same call: marking done immediately
+// here (the pre-fix behavior) starts the fixed
 // response window before net/http ever gets to write those bytes to the
 // connection — see TestIdleConn_FinalFlushStall_UsesIdleTimeoutNotResponseTimeout
 // for why that specifically matters.
@@ -1646,8 +1645,8 @@ func (f *fakeDeadlineConn) lastDeadline() time.Time {
 	return f.deadline
 }
 
-// TestBodyDoneSignal_ConcurrentMarkDoneAndHeadersReceived_RaceSafe is review
-// round 5's required race-safety proof. markDone (called from the
+// TestBodyDoneSignal_ConcurrentMarkDoneAndHeadersReceived_RaceSafe is the
+// required race-safety proof. markDone (called from the
 // request-writing goroutine once the body is fully handed off) and
 // markHeadersReceived (called from whichever goroutine called client.Do,
 // once it returns) can legitimately run concurrently in production —
@@ -1659,7 +1658,7 @@ func (f *fakeDeadlineConn) lastDeadline() time.Time {
 // markHeadersReceived's own SetDeadline call then landed BEFORE markDone's
 // later, unconditional one, left the connection on the far-longer fixed
 // deadline even though headers had already arrived — exactly the
-// four-extra-minutes bug review round 5 found. Run with -race (must stay
+// four-extra-minutes bug this test guards against. Run with -race (must stay
 // free of actual data races) and -count=20 (interleaving timing is
 // inherently nondeterministic; the many internal iterations below plus
 // repeated process runs together give real confidence it can't recur).
@@ -1733,7 +1732,7 @@ func TestIdleConn_PostHandoff_FailsAtResponseTimeout(t *testing.T) {
 }
 
 // TestIdleConn_PostHandoff_HeaderTrickle_CannotExtendFixedWindow is the
-// required negative case for the fix (review round 4's finding): once
+// required negative case for the fix: once
 // bodyDone fires, a peer that keeps trickling a byte every gap — each gap
 // individually well under the fixed post-handoff window — must still fail
 // once the window's absolute point in time passes, instead of each

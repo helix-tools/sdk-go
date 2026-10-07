@@ -207,15 +207,22 @@ func (w *markedChain) Unwrap() []error { return w.markers }
 // safe sibling intact) is what SanitizeCause returns instead of it.
 //
 // SanitizeCause is deliberately NOT applied automatically by Wrap/
-// WrapMarked/WrapSentinel — call it explicitly, and only at two kinds of
+// WrapMarked/WrapSentinel — call it explicitly, and only at three kinds of
 // call sites: (a) wrapping an http.Client.Do error already confirmed to
 // have a nil *http.Response (a genuine no-response transport failure: DNS,
 // connection, TLS, or timeout — never a refused-redirect, which net/http
-// pairs with a non-nil Response instead); or (b) wrapping a request-
+// pairs with a non-nil Response instead); (b) wrapping a request-
 // construction error (http.NewRequest/url.Parse) for a URL that carries a
 // query string or was itself returned by the API, e.g. a presigned storage
-// upload/download URL. Every other wrap site passes its cause to Wrap/
-// WrapMarked/WrapSentinel unchanged.
+// upload/download URL; or (c) wrapping a read error from an
+// ALREADY-RECEIVED response's body (resp.Body.Read, directly or via
+// io.Copy/io.ReadAll) on the storage transfer path — a stall or an abrupt
+// drop mid-transfer surfaces a host-bearing *net.OpError naming the
+// storage peer's address exactly like case (a)'s no-response failure
+// does, even though headers were already read successfully. This covers
+// both legs of a storage transfer: a download's body read and an upload's
+// read of storage's response. Every other wrap site passes its cause to
+// Wrap/WrapMarked/WrapSentinel unchanged.
 func SanitizeCause(cause error) error {
 	return sanitizeTree(cause)
 }

@@ -762,8 +762,10 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 		if cerr != nil {
 			// io.Copy reads from the HTTP response body, so a network-level
 			// failure mid-stream surfaces here exactly as it would from
-			// resp.Body.Read directly.
-			wrapped := sdkerr.Wrap("failed to stream to temp file", cerr)
+			// resp.Body.Read directly — a stall or drop produces a
+			// host-bearing *net.OpError naming the storage peer's address,
+			// so SanitizeCause is applied (case (c) of its doc comment).
+			wrapped := sdkerr.Wrap("failed to stream to temp file", sdkerr.SanitizeCause(cerr))
 			errorMessage = wrapped.Error()
 			return wrapped
 		}
@@ -799,7 +801,11 @@ func (c *Consumer) DownloadDataset(ctx context.Context, datasetID, outputPath st
 	// Small-file path: process in memory.
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		wrapped := sdkerr.Wrap("failed to read response", err)
+		// Same reasoning as the large-file io.Copy above: a mid-body
+		// stall or drop surfaces a host-bearing *net.OpError naming the
+		// storage peer's address, so SanitizeCause is applied (case (c)
+		// of its doc comment).
+		wrapped := sdkerr.Wrap("failed to read response", sdkerr.SanitizeCause(err))
 		errorMessage = wrapped.Error()
 		return wrapped
 	}
