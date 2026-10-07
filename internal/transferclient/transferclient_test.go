@@ -1,6 +1,7 @@
 package transferclient
 
 import (
+	"bufio"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -16,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -90,6 +92,15 @@ func overrideConnectTimeout(t *testing.T, d time.Duration) {
 	orig := ConnectTimeout
 	ConnectTimeout = d
 	t.Cleanup(func() { ConnectTimeout = orig })
+}
+
+// overrideResponseTimeout sets ResponseTimeout for the duration of one test
+// and restores it on cleanup.
+func overrideResponseTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	orig := ResponseTimeout
+	ResponseTimeout = d
+	t.Cleanup(func() { ResponseTimeout = orig })
 }
 
 // overrideDial swaps the package's dial function so a test can inject a
@@ -171,6 +182,44 @@ func newProxyTLSStub(t *testing.T, connectDelay, handshakeDelay time.Duration, h
 		}
 		time.Sleep(handshakeDelay)
 		handle(conn, cert)
+	})
+}
+
+// newHTTPSProxyTLSStub starts a stub that speaks the server side of an
+// HTTPS forward proxy for exactly one connection: perform the outer TLS
+// handshake (the connection to the proxy itself), wait proxyHandshakeDelay,
+// read the CONNECT request sent over that tunnel, wait connectDelay, reply
+// 200 over the same tunnel, wait targetHandshakeDelay, then hand the
+// still-open tunnel to handle to drive the INNER TLS handshake to the
+// simulated target — the "double TLS" shape a request through a configured
+// HTTPS forward proxy actually takes on the wire. Proxy and target share one
+// self-signed certificate here because both resolve to this same stub
+// address in these tests (a real deployment would use two different
+// certificates, for two different hostnames); that distinction isn't needed
+// to prove the combined budget unifies all four stages.
+func newHTTPSProxyTLSStub(t *testing.T, proxyHandshakeDelay, connectDelay, targetHandshakeDelay time.Duration, handle func(net.Conn, tls.Certificate)) *stub {
+	t.Helper()
+
+	cert := newSelfSignedCert(t)
+	pool := x509.NewCertPool()
+	pool.AddCert(cert.Leaf)
+	overrideTLSConfig(t, &tls.Config{RootCAs: pool})
+
+	return newStub(t, func(conn net.Conn) {
+		time.Sleep(proxyHandshakeDelay)
+		outer := tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{cert}})
+		if err := outer.Handshake(); err != nil {
+			return
+		}
+		if err := readUntilBlankLine(outer); err != nil {
+			return
+		}
+		time.Sleep(connectDelay)
+		if _, err := outer.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+			return
+		}
+		time.Sleep(targetHandshakeDelay)
+		handle(outer, cert)
 	})
 }
 
@@ -566,15 +615,22 @@ func TestProxyForRequest_DefaultsToHTTPProxyFromEnvironment(t *testing.T) {
 
 // TestNew_ProxyFunc_DelegatesByScheme exercises New()'s Transport.Proxy
 // wrapper across every combination of target scheme and resolved-proxy
-// scheme it has to tell apart. It must return nil ONLY for an HTTPS target
-// behind an http:// proxy — handing that one combination to DialTLSContext's
-// single shared ConnectTimeout budget — and otherwise must pass whatever
-// proxyForRequest resolved straight through unchanged, preserving
-// NO_PROXY/HTTP_PROXY/HTTPS_PROXY semantics for every other combination
-// exactly like the bare http.ProxyFromEnvironment this replaces.
+// scheme it has to tell apart. It must return nil for an HTTPS target behind
+// an http:// OR an https:// proxy — handing either combination to
+// DialTLSContext's single shared ConnectTimeout budget — and otherwise must
+// pass whatever proxyForRequest resolved straight through unchanged,
+// preserving NO_PROXY/HTTP_PROXY/HTTPS_PROXY semantics for every other
+// combination exactly like the bare http.ProxyFromEnvironment this replaces.
+// A socks5 proxy is deliberately left passing through unchanged even for an
+// HTTPS target: net/http dials it as a plain TCP connection and performs the
+// SOCKS5 handshake itself afterward regardless of what Proxy returns, so
+// there is no CONNECT-tunnel path here to bypass (see dialTLSThroughProxy's
+// and isForwardProxyScheme's doc comments for how that case is still
+// bounded, just not by this unified budget).
 func TestNew_ProxyFunc_DelegatesByScheme(t *testing.T) {
 	httpProxy := &url.URL{Scheme: "http", Host: "proxy.example:3128"}
 	httpsProxy := &url.URL{Scheme: "https", Host: "proxy.example:3129"}
+	socks5Proxy := &url.URL{Scheme: "socks5", Host: "proxy.example:1080"}
 	resolveErr := errors.New("boom")
 
 	tests := []struct {
@@ -588,7 +644,9 @@ func TestNew_ProxyFunc_DelegatesByScheme(t *testing.T) {
 		{"no proxy configured, http target", "http", nil, nil, true},
 		{"https target behind http proxy delegates to DialTLSContext", "https", httpProxy, nil, true},
 		{"http target behind http proxy passes through unchanged", "http", httpProxy, nil, false},
-		{"https target behind https proxy passes through unchanged", "https", httpsProxy, nil, false},
+		{"https target behind https proxy delegates to DialTLSContext", "https", httpsProxy, nil, true},
+		{"http target behind https proxy passes through unchanged", "http", httpsProxy, nil, false},
+		{"https target behind socks5 proxy passes through unchanged", "https", socks5Proxy, nil, false},
 		{"resolution error propagates", "https", nil, resolveErr, false},
 	}
 
@@ -871,5 +929,353 @@ func TestNew_ProxiedTLS_ConnectBudget_SharedAcrossDialConnectAndHandshake(t *tes
 	if elapsed > connectTimeout+200*time.Millisecond {
 		t.Fatalf("took %v to fail; a %v combined proxied-connect budget should have cut it well before dial+CONNECT+handshake's %v",
 			elapsed, connectTimeout, dialDelay+connectDelay+handshakeDelay)
+	}
+}
+
+// TestNew_ProxiedHTTPSProxy_SucceedsWithinBudget is the HTTPS-forward-proxy
+// companion to TestNew_ProxiedTLS_SucceedsWithinBudget: a dial, the proxy's
+// own TLS handshake, a CONNECT reply delay, and the target TLS handshake
+// that together stay under ConnectTimeout must still succeed through an
+// env-configured HTTPS proxy — proving the shared budget didn't just make
+// every HTTPS-proxied TLS connect fail.
+func TestNew_ProxiedHTTPSProxy_SucceedsWithinBudget(t *testing.T) {
+	const (
+		connectTimeout       = 800 * time.Millisecond
+		dialDelay            = 50 * time.Millisecond
+		proxyHandshakeDelay  = 50 * time.Millisecond
+		connectDelay         = 50 * time.Millisecond
+		targetHandshakeDelay = 50 * time.Millisecond
+	)
+	overrideConnectTimeout(t, connectTimeout)
+	overrideDial(t, slowDial(dialDelay))
+
+	s := newHTTPSProxyTLSStub(t, proxyHandshakeDelay, connectDelay, targetHandshakeDelay, func(conn net.Conn, cert tls.Certificate) {
+		tlsConn := tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{cert}})
+		if err := tlsConn.Handshake(); err != nil {
+			return
+		}
+		defer func() { _ = tlsConn.Close() }()
+		buf := make([]byte, 4096)
+		_, _ = tlsConn.Read(buf)
+		_, _ = tlsConn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+	})
+	overrideProxyForRequest(t, func(*http.Request) (*url.URL, error) {
+		return &url.URL{Scheme: "https", Host: s.addr}, nil
+	})
+
+	client := New()
+	req, err := http.NewRequest(http.MethodGet, s.tlsURL("/object"), nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v (dial %v + proxy handshake %v + CONNECT reply %v + target handshake %v is well within the %v combined budget)",
+			err, dialDelay, proxyHandshakeDelay, connectDelay, targetHandshakeDelay, connectTimeout)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(body) != "ok" {
+		t.Fatalf("body = %q, want %q", body, "ok")
+	}
+}
+
+// TestNew_ProxiedHTTPSProxy_ConnectBudget_SharedAcrossAllStages is the
+// HTTPS-forward-proxy companion to
+// TestNew_ProxiedTLS_ConnectBudget_SharedAcrossDialConnectAndHandshake: with
+// an HTTPS proxy configured, the proxy dial, the proxy's own TLS handshake,
+// the CONNECT response wait, and the target TLS handshake must share ONE
+// ConnectTimeout budget. Each of the four stages here is individually well
+// under ConnectTimeout, but their sum is not — a client that times any stage
+// separately (as net/http's own built-in HTTPS-proxy handling does: the
+// CONNECT wait alone rides its hardcoded 1-minute cap rather than
+// ConnectTimeout) would let this succeed at roughly their sum; a single
+// shared budget must cut it off close to ConnectTimeout instead. This test
+// is what review round 3 flagged as missing: the pre-fix code bypassed the
+// shared budget entirely for an https:// proxy (TestNew_ProxyFunc_Delegates
+// ByScheme's "https target behind https proxy passes through unchanged"
+// case), so this scenario used to succeed at roughly the stages' sum instead
+// of failing near ConnectTimeout.
+func TestNew_ProxiedHTTPSProxy_ConnectBudget_SharedAcrossAllStages(t *testing.T) {
+	const (
+		connectTimeout       = 300 * time.Millisecond
+		dialDelay            = 100 * time.Millisecond
+		proxyHandshakeDelay  = 100 * time.Millisecond
+		connectDelay         = 100 * time.Millisecond
+		targetHandshakeDelay = 100 * time.Millisecond
+	)
+	overrideConnectTimeout(t, connectTimeout)
+	overrideDial(t, slowDial(dialDelay))
+
+	s := newHTTPSProxyTLSStub(t, proxyHandshakeDelay, connectDelay, targetHandshakeDelay, func(conn net.Conn, cert tls.Certificate) {
+		tlsConn := tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{cert}})
+		_ = tlsConn.Handshake()
+	})
+	overrideProxyForRequest(t, func(*http.Request) (*url.URL, error) {
+		return &url.URL{Scheme: "https", Host: s.addr}, nil
+	})
+
+	client := New()
+	req, err := http.NewRequest(http.MethodGet, s.tlsURL("/object"), nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	start := time.Now()
+	resp, err := client.Do(req)
+	elapsed := time.Since(start)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatalf("expected the HTTPS-proxied connect phase to fail: dial (%v) + proxy handshake (%v) + CONNECT reply (%v) + target handshake (%v) together exceed the %v combined budget",
+			dialDelay, proxyHandshakeDelay, connectDelay, targetHandshakeDelay, connectTimeout)
+	}
+	// Separately-timed stages would let this succeed at roughly the four
+	// stages' sum (~400ms) or later (and net/http's own CONNECT-wait cap is
+	// a full minute). A single shared budget must cut it off close to
+	// ConnectTimeout (~300ms).
+	if elapsed > connectTimeout+200*time.Millisecond {
+		t.Fatalf("took %v to fail; a %v combined HTTPS-proxied-connect budget should have cut it well before the stages' sum of %v",
+			elapsed, connectTimeout, dialDelay+proxyHandshakeDelay+connectDelay+targetHandshakeDelay)
+	}
+}
+
+// TestIdleConn_MidBodyStall_UsesIdleTimeout is the self-attack's "upload
+// stalls before the whole body is handed off" case for the response-window
+// policy: a Write that blocks because the peer never reads must still fail
+// at ~IdleTimeout, not ResponseTimeout, because bodyDone has not fired yet
+// — the response window must never cover a stall that happens before the
+// body finishes sending, only the wait that follows it. net.Pipe is used
+// for the same determinism reason as TestIdleConn_WriteTimesOutWhenPeerNeverReads:
+// a real TCP socket's kernel send buffer makes it unreliable to force a
+// Write to actually block.
+func TestIdleConn_MidBodyStall_UsesIdleTimeout(t *testing.T) {
+	client, _ := net.Pipe()
+	defer func() { _ = client.Close() }()
+
+	signal := &bodyDoneSignal{} // never marked done: this is mid-body.
+	wrapped := &idleConn{
+		Conn:            client,
+		idleTimeout:     80 * time.Millisecond,
+		bodyDone:        signal,
+		responseTimeout: 10 * time.Second,
+	}
+	signal.bind(wrapped, wrapped.responseTimeout)
+	if err := wrapped.SetDeadline(time.Now().Add(wrapped.idleTimeout)); err != nil {
+		t.Fatalf("SetDeadline: %v", err)
+	}
+
+	start := time.Now()
+	_, err := wrapped.Write([]byte("mid-body bytes with no reader on the other end"))
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected the write to time out with no reader ever draining the pipe")
+	}
+	netErr, ok := err.(net.Error)
+	if !ok || !netErr.Timeout() {
+		t.Fatalf("err = %v (%T), want a net.Error reporting Timeout() == true", err, err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("took %v to time out; an 80ms idle timeout should have cut it well before this (bodyDone unset means a 10s ResponseTimeout must not apply)", elapsed)
+	}
+}
+
+// TestIdleConn_PostHandoff_ExtendsToResponseTimeout is the policy fix
+// itself, proven directly on idleConn (see
+// TestIdleConn_MidBodyStall_UsesIdleTimeout's doc comment for why a real
+// socket isn't used here): once bodyDone reports the whole request body
+// handed off, the wait that follows — the gap between the last successful
+// Write and the next successful Read — is governed by responseTimeout, not
+// idleTimeout, even though the deadline active entering that gap was set by
+// an EARLIER mid-body write under the shorter basis.
+func TestIdleConn_PostHandoff_ExtendsToResponseTimeout(t *testing.T) {
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	signal := &bodyDoneSignal{}
+	wrapped := &idleConn{
+		Conn:            client,
+		idleTimeout:     80 * time.Millisecond,
+		bodyDone:        signal,
+		responseTimeout: 400 * time.Millisecond,
+	}
+	signal.bind(wrapped, wrapped.responseTimeout)
+	if err := wrapped.SetDeadline(time.Now().Add(wrapped.idleTimeout)); err != nil {
+		t.Fatalf("SetDeadline: %v", err)
+	}
+
+	// A mid-body write, drained immediately: succeeds under idleTimeout and
+	// leaves the deadline set on that basis, exactly like every write
+	// before the body finishes (bodyDone is not yet marked).
+	go func() { buf := make([]byte, 64); _, _ = server.Read(buf) }()
+	if _, err := wrapped.Write([]byte("mid-body chunk")); err != nil {
+		t.Fatalf("mid-body Write: %v", err)
+	}
+
+	// The body is now fully handed off — this is the final write.
+	signal.markDone()
+	go func() { buf := make([]byte, 64); _, _ = server.Read(buf) }()
+	if _, err := wrapped.Write([]byte("final flush")); err != nil {
+		t.Fatalf("final-flush Write: %v", err)
+	}
+
+	// The wait for the response. A 150ms gap exceeds idleTimeout (80ms) but
+	// stays under responseTimeout (400ms) — it can only succeed if the
+	// deadline really did switch bases, either when markDone fired above or
+	// when the final-flush write above succeeded.
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		_, _ = server.Write([]byte("resp"))
+	}()
+	start := time.Now()
+	buf := make([]byte, 4)
+	_, err := wrapped.Read(buf)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Read: %v (a 150ms gap is within the 400ms post-handoff responseTimeout; an idleTimeout-bound deadline would have failed at ~80ms)", err)
+	}
+	if elapsed < 100*time.Millisecond {
+		t.Fatalf("Read returned in %v, expected it to have waited for the delayed response (~150ms)", elapsed)
+	}
+}
+
+// TestIdleConn_PostHandoff_FailsAtResponseTimeout is the other required
+// shape: once bodyDone fires, a response that never arrives at all must
+// still fail — bounded by responseTimeout, not left to hang forever.
+func TestIdleConn_PostHandoff_FailsAtResponseTimeout(t *testing.T) {
+	client, _ := net.Pipe()
+	defer func() { _ = client.Close() }()
+
+	signal := &bodyDoneSignal{}
+	wrapped := &idleConn{
+		Conn: client,
+		// Deliberately long so only responseTimeout could plausibly cut
+		// this off.
+		idleTimeout:     3 * time.Second,
+		bodyDone:        signal,
+		responseTimeout: 100 * time.Millisecond,
+	}
+	signal.bind(wrapped, wrapped.responseTimeout)
+	signal.markDone()
+	if err := wrapped.SetDeadline(time.Now().Add(wrapped.responseTimeout)); err != nil {
+		t.Fatalf("SetDeadline: %v", err)
+	}
+
+	start := time.Now()
+	buf := make([]byte, 4)
+	_, err := wrapped.Read(buf)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected the read to time out: nothing ever writes a response on the other end of the pipe")
+	}
+	netErr, ok := err.(net.Error)
+	if !ok || !netErr.Timeout() {
+		t.Fatalf("err = %v (%T), want a net.Error reporting Timeout() == true", err, err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("took %v to time out; a 100ms responseTimeout should have cut it well before this", elapsed)
+	}
+}
+
+// TestNew_Upload_PostHandoff_SlowResponseSucceeds is the end-to-end proof,
+// through a real client.Do() PUT request wired via WrapUploadBody, that a
+// storage response arriving after longer than IdleTimeout but within
+// ResponseTimeout succeeds — the exact shape of the reported bug (a
+// slow-but-moving upload whose OS-buffer drain plus storage confirmation
+// legitimately takes longer than the per-byte inactivity window once the
+// client has handed off every byte). On the pre-fix code this is exactly
+// TestNew_Upload_PostHandoff_NoResponseFailsAtResponseTimeout's shape with a
+// shorter delay, and it would fail at ~IdleTimeout instead of succeeding.
+func TestNew_Upload_PostHandoff_SlowResponseSucceeds(t *testing.T) {
+	overrideIdleTimeout(t, 80*time.Millisecond)
+	overrideResponseTimeout(t, 1*time.Second)
+
+	const payload = "the entire request body, all of it, handed off at once"
+
+	s := newStub(t, func(conn net.Conn) {
+		br := bufio.NewReader(conn)
+		req, err := http.ReadRequest(br)
+		if err != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, req.Body) // drain the whole body
+		time.Sleep(200 * time.Millisecond)   // > IdleTimeout, < ResponseTimeout
+		_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+	})
+
+	client := New()
+	ctx, body := WrapUploadBody(context.Background(), strings.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, s.url("/object"), body)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.ContentLength = int64(len(payload))
+
+	start := time.Now()
+	resp, err := client.Do(req)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Do: %v (a 200ms post-handoff wait is within the 1s ResponseTimeout; an 80ms IdleTimeout-bound wait would have failed)", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(respBody) != "ok" {
+		t.Fatalf("body = %q, want %q", respBody, "ok")
+	}
+	if elapsed < 150*time.Millisecond {
+		t.Fatalf("Do returned in %v; expected it to have spanned the 200ms post-handoff delay to be a meaningful proof", elapsed)
+	}
+}
+
+// TestNew_Upload_PostHandoff_NoResponseFailsAtResponseTimeout is the other
+// required shape at the full client.Do() level: a server that reads the
+// entire request body and then never responds must fail at ~ResponseTimeout
+// — not hang forever, and not fail at ~IdleTimeout (which no longer governs
+// this exact wait once the whole body has been handed off).
+func TestNew_Upload_PostHandoff_NoResponseFailsAtResponseTimeout(t *testing.T) {
+	overrideIdleTimeout(t, 2*time.Second) // deliberately long: only ResponseTimeout should cut this off
+	overrideResponseTimeout(t, 150*time.Millisecond)
+
+	const payload = "the entire request body, all of it, handed off at once"
+
+	s := newStub(t, func(conn net.Conn) {
+		br := bufio.NewReader(conn)
+		req, err := http.ReadRequest(br)
+		if err != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, req.Body) // drain the whole body, then stay silent
+	})
+
+	client := New()
+	ctx, body := WrapUploadBody(context.Background(), strings.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, s.url("/object"), body)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.ContentLength = int64(len(payload))
+
+	start := time.Now()
+	resp, err := client.Do(req)
+	elapsed := time.Since(start)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("expected the upload to fail: the server read the whole body and never responded")
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("took %v to fail; a 150ms ResponseTimeout should have cut it well before this (and well before the 2s IdleTimeout)", elapsed)
+	}
+	if elapsed < 100*time.Millisecond {
+		t.Fatalf("took %v to fail; too fast to have been cut by the 150ms ResponseTimeout rather than something else", elapsed)
 	}
 }

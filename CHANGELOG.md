@@ -19,9 +19,14 @@
   succeeds however long it takes; a connection that goes quiet — no bytes in
   either direction, and no response — for about a minute still fails
   cleanly. Connecting itself, including setting up a secure connection and,
-  when a proxy is configured, connecting through it, is still bounded to one
-  quick step if the remote side doesn't respond — not several stacked ones.
-  Calls to the Helix API are unaffected.
+  when a proxy is configured (including one that itself requires a secure
+  connection), connecting through it, is still bounded to one quick step if
+  the remote side doesn't respond — not several stacked ones. Uploading a
+  large dataset over a slow connection no longer fails once every byte has
+  been sent and the platform is still confirming receipt: that wait is now
+  bounded by several minutes instead of the shorter one-minute inactivity
+  window, which previously could — and did — cut off a healthy upload right
+  at the finish line. Calls to the Helix API are unaffected.
 
 ## 2026-10-07 (v2.22.3)
 

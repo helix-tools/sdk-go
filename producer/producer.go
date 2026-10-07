@@ -1065,7 +1065,13 @@ func (p *Producer) storageHTTPClient() *http.Client {
 func (p *Producer) uploadToPresignedURL(ctx context.Context, uploadURL string, data []byte) error {
 	fmt.Printf("📤 Uploading %d bytes to presigned URL...\n", len(data))
 
-	req, err := http.NewRequestWithContext(ctx, "PUT", uploadURL, bytes.NewReader(data))
+	// Wrapping the body lets the storage client tell the moment the whole
+	// body has been handed off to net/http, and wait longer for storage's
+	// response from that point on than it waits for in-flight inactivity —
+	// see transferclient.WrapUploadBody's doc comment for why that distinct,
+	// longer wait exists.
+	uploadCtx, body := transferclient.WrapUploadBody(ctx, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(uploadCtx, "PUT", uploadURL, body)
 	if err != nil {
 		// uploadURL is a server-issued presigned URL carrying a SigV4
 		// signature/credential scope in its query string; a malformed
