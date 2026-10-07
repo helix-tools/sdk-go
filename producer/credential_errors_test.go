@@ -2,6 +2,7 @@ package producer
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -41,9 +42,15 @@ func TestNewProducer_APIKeyCredentialServiceUnreachable(t *testing.T) {
 	if !errors.Is(err, sdkerr.ErrCredentialServiceUnreachable) {
 		t.Error("errors.Is(err, ErrCredentialServiceUnreachable) = false, want true")
 	}
+	// The raw *net.OpError (which carries the closed port's host:port in
+	// its own Error() text) must no longer be reachable anywhere in the
+	// chain, nor in a full %+v dump of it.
 	var opErr *net.OpError
-	if !errors.As(err, &opErr) {
-		t.Error("errors.As(*net.OpError) = false; the raw connection error must stay reachable for debugging")
+	if errors.As(err, &opErr) {
+		t.Error("errors.As(*net.OpError) = true; the raw connection error (with host:port) must no longer be reachable")
+	}
+	if dump := fmt.Sprintf("%+v", err); strings.Contains(dump, "127.0.0.1") {
+		t.Errorf("%%+v = %q, leaks the closed port's host", dump)
 	}
 }
 

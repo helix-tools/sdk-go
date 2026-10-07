@@ -910,14 +910,23 @@ func (p *Provider) mint(ctx context.Context) (*mintSuccessResponse, bool, error)
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		// A refused redirect (refuseMintRedirect) is the one Do error that
-		// comes back WITH a response: the service answered, so it is not
-		// unreachable, and the same redirect would come back on a retry.
 		if resp != nil {
-			_ = resp.Body.Close()
+			// A refused redirect (refuseMintRedirect) is the one Do error
+			// that comes back WITH a response: the service answered, so
+			// it is not unreachable, and the same redirect would come
+			// back on a retry. resp != nil is itself the proof this is
+			// not a genuine no-response transport failure (net/http only
+			// pairs a non-nil Response with a non-nil error when
+			// CheckRedirect refuses), so this cause's real type/fields
+			// stay reachable exactly as they were before SanitizeCause
+			// existed. net/http has already closed resp.Body itself
+			// before returning in this case (see Client.Do's doc), so
+			// closing it again here would double-Close it.
 			return nil, false, sdkerr.Wrap("credentials: the Helix credential service answered with a redirect, which was refused", err)
 		}
-		return nil, true, sdkerr.WrapMarked("credentials: mint request failed", sdkerr.ErrCredentialServiceUnreachable, err)
+		// No response arrived at all: a genuine no-response transport
+		// failure, case (a) of SanitizeCause's doc comment.
+		return nil, true, sdkerr.WrapMarked("credentials: mint request failed", sdkerr.ErrCredentialServiceUnreachable, sdkerr.SanitizeCause(err))
 	}
 	defer resp.Body.Close()
 

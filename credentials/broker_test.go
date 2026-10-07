@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -2529,6 +2531,102 @@ func TestProvider_Mint_RefusedRedirectIsNotUnreachable(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&targetHit); n != 0 {
 		t.Errorf("redirect target hit %d time(s), want 0 — redirects must stay refused", n)
+	}
+}
+
+// TestProvider_Mint_RefusedRedirectKeepsRawURLError: this failure is
+// response-bearing (the server answered with a redirect — see
+// TestProvider_Mint_RefusedRedirectIsNotUnreachable above), so it is NOT a
+// genuine no-response transport failure and must never be run through
+// SanitizeCause. A caller's errors.As(err, *url.Error) must behave exactly
+// as it did before SanitizeCause existed, with its Err field unchanged.
+func TestProvider_Mint_RefusedRedirectKeepsRawURLError(t *testing.T) {
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/", http.StatusFound)
+	}))
+	defer server.Close()
+
+	cfg := testAPIKeyBrokerConfig(server.URL)
+	cfg.HTTPClient = server.Client()
+	p, err := NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+
+	_, mintErr := p.Retrieve(context.Background())
+	if mintErr == nil {
+		t.Fatal("expected an error for a refused redirect")
+	}
+
+	var urlErr *url.Error
+	if !errors.As(mintErr, &urlErr) {
+		t.Fatalf("errors.As(err, *url.Error) = false, want true for a response-bearing refused redirect (err=%v)", mintErr)
+	}
+	if urlErr.Err != errMintRedirectRefused {
+		t.Fatalf("urlErr.Err = %v, want errMintRedirectRefused unchanged", urlErr.Err)
+	}
+}
+
+// singleCloseBody errors if Close is called more than once — unlike the
+// real httptest-server body TestProvider_Mint_RefusedRedirectKeepsRawURLError
+// above exercises, which net/http's own connection-reuse machinery
+// tolerates closing twice. net/http has already closed the response body
+// itself by the time a refused-redirect error comes back (Client.Do's own
+// doc: "even then the returned Response.Body is already closed"), so a
+// wrap site closing it again on top of that is a double Close that this
+// type makes caller-visible instead of silently swallowed.
+type singleCloseBody struct{ closeCalls int }
+
+func (b *singleCloseBody) Read([]byte) (int, error) { return 0, io.EOF }
+func (b *singleCloseBody) Close() error {
+	b.closeCalls++
+	if b.closeCalls > 1 {
+		return fmt.Errorf("Close called %d times, want at most 1", b.closeCalls)
+	}
+	return nil
+}
+
+type singleCloseRedirectingTransport struct{ body *singleCloseBody }
+
+func (t singleCloseRedirectingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusFound,
+		Status:     "302 Found",
+		Header:     http.Header{"Location": []string{"https://broker.test/v2" + MintPath}},
+		Body:       t.body,
+		Request:    req,
+	}, nil
+}
+
+// TestProvider_Mint_RefusedRedirectClosesBodyExactlyOnce is the regression
+// test for the double-Close fix: net/http already closes resp.Body itself
+// before returning a refused-redirect error, so mint's own explicit Close
+// call on that branch — removed by this fix — must never run. A second
+// Close call on singleCloseBody surfaces as an error from Close instead of
+// a silently-swallowed double Close. refuseMintRedirect (installed by
+// NewProvider regardless of cfg.HTTPClient's own CheckRedirect — see its
+// doc comment) is what turns this fake redirect into the refused-redirect
+// branch; the test needs to supply only the Transport.
+func TestProvider_Mint_RefusedRedirectClosesBodyExactlyOnce(t *testing.T) {
+	body := &singleCloseBody{}
+	cfg := testAPIKeyBrokerConfig("https://broker.test")
+	cfg.HTTPClient = &http.Client{Transport: singleCloseRedirectingTransport{body: body}}
+	p, err := NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+
+	_, mintErr := p.Retrieve(context.Background())
+	if mintErr == nil {
+		t.Fatal("expected an error for a refused redirect")
+	}
+	if body.closeCalls != 1 {
+		t.Fatalf("resp.Body.Close was called %d time(s), want exactly 1", body.closeCalls)
 	}
 }
 

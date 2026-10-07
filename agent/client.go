@@ -165,7 +165,21 @@ func (c *Client) do(ctx context.Context, method, path string, body any, result a
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		return sdkerr.Wrap("agent: request failed", err)
+		if resp != nil {
+			// net/http pairs a non-nil Response with a non-nil error only
+			// when a CheckRedirect callback refuses to continue: the
+			// service DID answer, so this is not a genuine no-response
+			// transport failure and err's real type/fields (e.g. a
+			// caller's own *url.Error checks) must stay reachable
+			// exactly as they would have before SanitizeCause existed.
+			// net/http has already closed resp.Body itself before
+			// returning in this case (see Client.Do's doc), so closing
+			// it again here would double-Close it.
+			return sdkerr.Wrap("agent: request failed", err)
+		}
+		// No response arrived at all: a genuine no-response transport
+		// failure, case (a) of SanitizeCause's doc comment.
+		return sdkerr.Wrap("agent: request failed", sdkerr.SanitizeCause(err))
 	}
 	defer resp.Body.Close()
 

@@ -1040,8 +1040,9 @@ func (p *Producer) uploadToPresignedURL(ctx context.Context, uploadURL string, d
 		// uploadURL is a server-issued presigned URL carrying a SigV4
 		// signature/credential scope in its query string; a malformed
 		// version of it must not reach the caller via the raw *url.Error
-		// http.NewRequestWithContext returns.
-		return sdkerr.Wrap("failed to create upload request", err)
+		// http.NewRequestWithContext returns, so SanitizeCause is applied
+		// explicitly (case (b) of its doc comment).
+		return sdkerr.Wrap("failed to create upload request", sdkerr.SanitizeCause(err))
 	}
 
 	// Set content type for binary data
@@ -1050,7 +1051,21 @@ func (p *Producer) uploadToPresignedURL(ctx context.Context, uploadURL string, d
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return sdkerr.Wrap("failed to upload to presigned URL", err)
+		if resp != nil {
+			// net/http pairs a non-nil Response with a non-nil error only
+			// when a CheckRedirect callback refuses to continue: the
+			// service DID answer, so this is not a genuine no-response
+			// transport failure and err's real type/fields must stay
+			// reachable exactly as they would have before SanitizeCause
+			// existed. net/http has already closed resp.Body itself
+			// before returning in this case (see Client.Do's doc), so
+			// closing it again here would double-Close it.
+			return sdkerr.Wrap("failed to upload to presigned URL", err)
+		}
+		// No response arrived at all (DNS, connection, TLS, timeout): a
+		// genuine no-response transport failure, case (a) of
+		// SanitizeCause's doc comment.
+		return sdkerr.Wrap("failed to upload to presigned URL", sdkerr.SanitizeCause(err))
 	}
 	defer resp.Body.Close()
 
@@ -1235,7 +1250,20 @@ func (p *Producer) sendSignedRequest(ctx context.Context, method, path string, b
 	// Execute request.
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return nil, sdkerr.Wrap("request failed", err)
+		if resp != nil {
+			// net/http pairs a non-nil Response with a non-nil error only
+			// when a CheckRedirect callback refuses to continue: the
+			// service DID answer, so this is not a genuine no-response
+			// transport failure and err's real type/fields must stay
+			// reachable exactly as they would have before SanitizeCause
+			// existed. net/http has already closed resp.Body itself
+			// before returning in this case (see Client.Do's doc), so
+			// closing it again here would double-Close it.
+			return nil, sdkerr.Wrap("request failed", err)
+		}
+		// No response arrived at all: a genuine no-response transport
+		// failure, case (a) of SanitizeCause's doc comment.
+		return nil, sdkerr.Wrap("request failed", sdkerr.SanitizeCause(err))
 	}
 
 	return resp, nil

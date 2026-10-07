@@ -9,8 +9,11 @@
 package sdkerr
 
 import (
+	"context"
 	"errors"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 )
 
@@ -80,16 +83,22 @@ func IdentityCheckTemporaryFailureMessage(statusCode int) string {
 const KeyCallerServiceFailure = "Helix credential service error: could not get working credentials for this API key"
 
 // Wrap returns an error whose Error() is exactly msg — cause's text is never
-// interpolated into it — and whose Unwrap() returns cause, so errors.Is and
-// errors.As still traverse to the original upstream error.
+// interpolated into it — and whose Unwrap() returns cause UNCHANGED, so
+// errors.Is and errors.As still traverse to the original upstream error.
+// Wrap never sanitizes cause itself: a call site that needs SanitizeCause's
+// no-host/no-URL guarantee (see its doc comment for the two cases that do)
+// applies it explicitly before calling Wrap — sdkerr.Wrap(msg,
+// sdkerr.SanitizeCause(cause)) — so that every other call site stays
+// byte-for-byte behavior-compatible with cause passed straight through.
 func Wrap(msg string, cause error) error {
 	return &wrapped{msg: msg, cause: cause}
 }
 
 // WrapMarked is Wrap plus a category marker: Error() is exactly msg,
-// Unwrap() is cause, and errors.Is(err, marker) also reports true, so a
-// caller further up can recognise the failure category without matching on
-// message text.
+// Unwrap() is cause UNCHANGED (see Wrap's doc comment — apply
+// SanitizeCause explicitly first if the call site needs it), and
+// errors.Is(err, marker) also reports true, so a caller further up can
+// recognise the failure category without matching on message text.
 func WrapMarked(msg string, marker, cause error) error {
 	return &wrapped{msg: msg, cause: cause, marker: marker}
 }
@@ -109,8 +118,10 @@ func (w *wrapped) Is(target error) bool { return w.marker != nil && target == w.
 // WrapSentinel returns an error whose Error() is exactly sentinel's message
 // and whose errors.Is/errors.As reach BOTH sentinel (so an existing exported
 // error category keeps matching, e.g. a package-level "not compressed"
-// marker) AND cause (the raw upstream error, for debugging) — via the
-// multi-error Unwrap() []error form errors.Is/As have followed since Go 1.20.
+// marker) AND cause UNCHANGED (the raw upstream error, for debugging — see
+// Wrap's doc comment: apply SanitizeCause explicitly first if the call site
+// needs it) — via the multi-error Unwrap() []error form errors.Is/As have
+// followed since Go 1.20.
 func WrapSentinel(sentinel, cause error) error {
 	return &sentinelWrapped{sentinel: sentinel, cause: cause}
 }
@@ -145,3 +156,248 @@ type markedChain struct {
 
 func (w *markedChain) Error() string   { return w.msg }
 func (w *markedChain) Unwrap() []error { return w.markers }
+
+// SanitizeCause returns cause unchanged unless its chain carries one of the
+// stdlib network-transport error types whose own Error() method embeds a
+// dialed host, a network address, or a request URL: *url.Error,
+// *net.OpError, *net.DNSError, *net.AddrError. Those appear not just at the
+// top of cause but also buried inside a generic wrapper that quotes its own
+// cause's text in its Error() method (an AWS SDK *smithy.OperationError or
+// *retry.MaxAttemptsError, for instance) — for a storage upload/download the
+// URL is a presigned link carrying its SigV4 credential, security token,
+// signature and bucket, and that text stays reachable through a plain
+// errors.Unwrap walk even though Wrap's own Error() never shows it.
+//
+// When a branch of cause carries one of those types anywhere in its chain,
+// the WHOLE branch is discarded — never just the host-bearing node itself —
+// and replaced with a fresh stand-in holding no pointer back into the
+// original tree: its Error() is a fixed, generic phrase with no host, URL,
+// query string or credential; its Timeout()/Temporary() answer exactly as
+// the innermost recognized node would have; and errors.Is against it
+// reports true for context.Canceled/context.DeadlineExceeded exactly when
+// the original branch did. Nothing else about the original branch survives
+// — a prior design kept whatever a host-bearing node wrapped (a context
+// sentinel, a redirect-refusal marker, a bare syscall errno) reachable
+// through the stand-in's own Unwrap(), but that "first unrecognized
+// descendant" can just as easily be an adversarial or merely-unfamiliar
+// error type whose own Error() text embeds the same sensitive data (a
+// custom RoundTripper returning fmt.Errorf("dial %s: %w", signedURL, …), for
+// instance) — see TestWrap_RoundTripperErrorWithOwnSensitiveText. Only two
+// relationships are preserved by design, and both without retaining any
+// error value: cancellation/deadline via errors.Is, and the net.Error
+// Timeout()/Temporary() answer.
+//
+// A branch with no such type anywhere in its chain (a response-bearing API
+// error, a local parse/crypto error, an authored sentinel) is never
+// network-transport-shaped and is returned unchanged.
+//
+// cause itself may be a joined error (errors.Join, Unwrap() []error), at any
+// depth — not just at the top: each direct branch of a join is sanitized
+// independently, so a safe sibling — a context sentinel, an SDK marker, or
+// an unrelated failure's message joined alongside a genuine transport
+// failure — stays fully reachable (both via errors.Is and in a dump of the
+// error) even though the transport-shaped branch next to it is replaced.
+// This holds even when the join sits BENEATH an ordinary single-cause
+// wrapper (ordinaryWrapper.Unwrap() returns errors.Join(transportErr,
+// safeSibling), rather than cause being the join itself): the wrapper's own
+// Error() can quote its cause's text exactly like the generic-wrapper case
+// above, so it cannot be trusted to survive untouched either, but the join
+// underneath it is still unwrapped down to and sanitized exactly as if it
+// had been cause directly — the wrapper is discarded, the join (with its
+// safe sibling intact) is what SanitizeCause returns instead of it.
+//
+// SanitizeCause is deliberately NOT applied automatically by Wrap/
+// WrapMarked/WrapSentinel — call it explicitly, and only at two kinds of
+// call sites: (a) wrapping an http.Client.Do error already confirmed to
+// have a nil *http.Response (a genuine no-response transport failure: DNS,
+// connection, TLS, or timeout — never a refused-redirect, which net/http
+// pairs with a non-nil Response instead); or (b) wrapping a request-
+// construction error (http.NewRequest/url.Parse) for a URL that carries a
+// query string or was itself returned by the API, e.g. a presigned storage
+// upload/download URL. Every other wrap site passes its cause to Wrap/
+// WrapMarked/WrapSentinel unchanged.
+func SanitizeCause(cause error) error {
+	return sanitizeTree(cause)
+}
+
+// sanitizeTree is SanitizeCause's recursive implementation.
+//
+// For a joined error (Unwrap() []error) it rebuilds the join — via the
+// stdlib errors.Join, which computes Error() dynamically from its current
+// members rather than baking text in at construction — from each branch's
+// own sanitized result, so a safe sibling of a sanitized branch is never
+// discarded; if none of the branches changed, e itself is returned,
+// unchanged.
+//
+// For anything else, it walks e's own single-cause chain (via
+// firstHostBearingOrJoin) looking for whichever comes first: a host-bearing
+// node, or a nested join.
+//   - A host-bearing node first: the whole of e is discarded and replaced
+//     with a fresh stand-in (buildTransportFailure) — e's own Error() method
+//     cannot be trusted not to quote the host-bearing node's text.
+//   - A join first (before any host-bearing node): e is discarded too (same
+//     reason), but recursing sanitizeTree on the join itself re-enters the
+//     branch above, so the join's branches — including any safe sibling —
+//     are preserved rather than collapsed into one opaque stand-in. If that
+//     recursion finds nothing to sanitize either, e is still returned
+//     unchanged: nothing in its chain needed replacing.
+//   - Neither: e is returned unchanged.
+//
+// sanitizeTree itself never compares error values with ==/!= to detect a
+// change — e's chain may hold a caller-supplied error type whose dynamic
+// type is not comparable (e.g. a struct carrying a slice or map field
+// stored by value), and comparing two interface values of an identical
+// non-comparable dynamic type panics at runtime even when the two values
+// are the exact same one (an unchanged branch is returned as itself, so
+// this is not a corner case: it is the common case). The actual work is
+// done by sanitizeTreeChanged, which reports whether anything changed as an
+// explicit bool instead.
+func sanitizeTree(e error) error {
+	sanitized, _ := sanitizeTreeChanged(e)
+	return sanitized
+}
+
+// sanitizeTreeChanged is sanitizeTree's implementation: same walk, same
+// result, plus an explicit bool reporting whether the returned error is the
+// same value as e (false) or a replacement (true) — see sanitizeTree's doc
+// comment for why that can never be answered with e/sc comparisons.
+func sanitizeTreeChanged(e error) (error, bool) {
+	if e == nil {
+		return nil, false
+	}
+	if multi, ok := e.(interface{ Unwrap() []error }); ok {
+		children := multi.Unwrap()
+		sanitized := make([]error, len(children))
+		changed := false
+		for i, child := range children {
+			sc, childChanged := sanitizeTreeChanged(child)
+			if childChanged {
+				changed = true
+			}
+			sanitized[i] = sc
+		}
+		if !changed {
+			return e, false
+		}
+		return errors.Join(sanitized...), true
+	}
+
+	hostNode, joinNode := firstHostBearingOrJoin(e)
+	switch {
+	case hostNode != nil:
+		return buildTransportFailure(e, hostNode), true
+	case joinNode != nil:
+		if sanitizedJoin, joinChanged := sanitizeTreeChanged(joinNode); joinChanged {
+			return sanitizedJoin, true
+		}
+		return e, false
+	default:
+		return e, false
+	}
+}
+
+// buildTransportFailure returns the sanitized stand-in for branch, whose
+// chain contains a host-bearing node starting at start (as found by
+// firstHostBearingOrJoin(branch)). timeout/temporary are copied by
+// flattening through every CONSECUTIVE host-bearing node from start — none
+// of the recognized host-bearing types use the multi-error Unwrap() []error
+// form, so a single-error walk is enough — landing on whatever they
+// wrapped, which is itself discarded, never retained. canceled/
+// deadlineExceeded are computed against the FULL original branch (not just
+// from start down), since a context sentinel commonly sits underneath a
+// *net.OpError that itself sits underneath the *url.Error
+// firstHostBearingOrJoin found.
+func buildTransportFailure(branch, start error) error {
+	var timeout, temporary bool
+	for node := start; node != nil; {
+		ne, inner, ok := hostBearing(node)
+		if !ok {
+			break
+		}
+		timeout, temporary = ne.Timeout(), ne.Temporary()
+		node = inner
+	}
+
+	return &transportFailure{
+		timeout:          timeout,
+		temporary:        temporary,
+		canceled:         errors.Is(branch, context.Canceled),
+		deadlineExceeded: errors.Is(branch, context.DeadlineExceeded),
+	}
+}
+
+// firstHostBearingOrJoin walks e's chain through ordinary single-cause
+// wrappers (Unwrap() error) looking for whichever comes first: a
+// host-bearing node (see hostBearing), returned as hostNode, or a node
+// exposing Unwrap() []error (a nested join), returned as joinNode. At most
+// one of the two return values is non-nil. Unlike an earlier version of
+// this walk, it never descends INTO a join looking for a host-bearing node
+// inside one of its branches — doing that let the caller discard the whole
+// branch up to and including the join, losing any safe sibling joined
+// alongside the transport failure (see sanitizeTree's doc comment on the
+// join case for why the join itself, not a node inside it, is what gets
+// handed back for the caller to recurse into instead).
+// Returns (nil, nil) if neither exists anywhere in e's single-cause chain.
+func firstHostBearingOrJoin(e error) (hostNode, joinNode error) {
+	for e != nil {
+		if _, _, ok := hostBearing(e); ok {
+			return e, nil
+		}
+		if _, ok := e.(interface{ Unwrap() []error }); ok {
+			return nil, e
+		}
+		e = errors.Unwrap(e)
+	}
+	return nil, nil
+}
+
+// hostBearing reports whether e is itself one of the stdlib types whose own
+// Error() text embeds a host, network address, or URL, returning its
+// net.Error view and the one error it directly wraps (nil for the two leaf
+// types, which wrap nothing).
+func hostBearing(e error) (net.Error, error, bool) {
+	switch v := e.(type) {
+	case *url.Error:
+		return v, v.Err, true
+	case *net.OpError:
+		return v, v.Err, true
+	case *net.DNSError:
+		return v, nil, true
+	case *net.AddrError:
+		return v, nil, true
+	}
+	return nil, nil, false
+}
+
+// transportFailure is the sanitized stand-in SanitizeCause returns for a raw
+// network-transport error. It carries no pointer back into the original
+// error tree — only booleans captured before that tree was discarded — so
+// no unrecognized descendant of the original cause, sensitive or not, stays
+// reachable through it.
+type transportFailure struct {
+	timeout, temporary         bool
+	canceled, deadlineExceeded bool
+}
+
+func (t *transportFailure) Error() string {
+	return "network transport failure: no usable response was received"
+}
+
+func (t *transportFailure) Timeout() bool   { return t.timeout }
+func (t *transportFailure) Temporary() bool { return t.temporary } //nolint:staticcheck // preserved for callers that still check it
+
+// Is reports true for context.Canceled or context.DeadlineExceeded exactly
+// when the original (now-discarded) branch matched them — the one
+// relationship, besides net.Error, that survives sanitizing without
+// retaining any error value from that branch. There is deliberately no
+// Unwrap: nothing else is reachable through the stand-in.
+func (t *transportFailure) Is(target error) bool {
+	switch target { //nolint:errorlint // intentional identity check against the two context sentinels
+	case context.Canceled:
+		return t.canceled
+	case context.DeadlineExceeded:
+		return t.deadlineExceeded
+	default:
+		return false
+	}
+}

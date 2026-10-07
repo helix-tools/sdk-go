@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -683,9 +684,22 @@ func TestMe_HTTPClientTimeout(t *testing.T) {
 	if err == nil {
 		t.Fatal("err=nil, want timeout")
 	}
-	// The http.Client timeout manifests as a url.Error whose
-	// message contains "Client.Timeout"; we don't pin to that text
-	// directly. Just ensure we did get *some* error.
+	// The http.Client timeout manifests as a url.Error whose message
+	// contains "Client.Timeout" (and the server URL); we don't pin to that
+	// text directly, and after sanitizing it must never appear in err at
+	// all. The net.Error Timeout() answer must still come through though —
+	// a caller using it to distinguish a timeout from any other transport
+	// failure keeps working exactly as before.
+	if strings.Contains(err.Error(), ts.URL()) {
+		t.Fatalf("err=%v, leaks the server URL", err)
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Fatalf("errors.As(*net.Error) = false, want true (err=%v)", err)
+	}
+	if !netErr.Timeout() {
+		t.Error("Timeout() = false, want true for an http.Client timeout")
+	}
 }
 
 func TestNewClient_AppliesOptions(t *testing.T) {

@@ -21,15 +21,27 @@ const arnAccountService = "arn:aws:iam::123456789012:user/test"
 
 // arnTransport fails every request with a raw transport error carrying an
 // ARN and account ID, mimicking what a real cloud SDK/HTTP failure can leak.
+// Used only by TestMint_NegativeControl, which needs the ARN embedded in the
+// upstream error's own text to prove the pre-fix shape really would leak it.
 type arnTransport struct{}
 
 func (arnTransport) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, fmt.Errorf("dial tcp: connection refused talking to a host serving %s", arnAccountService)
 }
 
+// connectionRefusedTransport fails every request with a generic
+// connection-refused error — the shape a real dial failure takes.
+// http.Client.Do wraps it in a *url.Error carrying the real (internal)
+// broker host in its URL field.
+type connectionRefusedTransport struct{}
+
+func (connectionRefusedTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("connection refused")
+}
+
 func TestMint_TransportFailureCauseNeverLeaksIntoMessage(t *testing.T) {
 	cfg := testBrokerConfig("https://broker.test")
-	cfg.HTTPClient = &http.Client{Transport: arnTransport{}}
+	cfg.HTTPClient = &http.Client{Transport: connectionRefusedTransport{}}
 	p, err := NewProvider(cfg)
 	if err != nil {
 		t.Fatalf("NewProvider: %v", err)
@@ -40,7 +52,7 @@ func TestMint_TransportFailureCauseNeverLeaksIntoMessage(t *testing.T) {
 	if err == nil {
 		t.Fatal("err = nil, want an error")
 	}
-	if strings.Contains(err.Error(), arnAccountService) || strings.Contains(err.Error(), "123456789012") {
+	if strings.Contains(err.Error(), "broker.test") {
 		t.Fatalf("Error() = %q, leaks the upstream transport error", err.Error())
 	}
 	if !strings.Contains(err.Error(), "credentials: mint request failed") {
@@ -52,15 +64,22 @@ func TestMint_TransportFailureCauseNeverLeaksIntoMessage(t *testing.T) {
 		t.Error("errors.Is(err, ErrCredentialServiceUnreachable) = false for a transport failure, want true")
 	}
 	// Unwrap through mintWithRetry's own "mint failed after N attempts" wrap
-	// (safe: it only embeds the already-clean inner message) down to the raw
-	// transport error, which must still carry the ARN for debugging.
+	// (safe: it only embeds the already-clean inner message) down to the
+	// sanitized cause: non-nil (still reachable for debugging), but never
+	// carrying the broker's host, at any depth.
 	inner := errors.Unwrap(err)
 	if inner == nil {
 		t.Fatal("errors.Unwrap(err) = nil at the first layer")
 	}
-	cause := errors.Unwrap(inner)
-	if cause == nil || !strings.Contains(cause.Error(), arnAccountService) {
-		t.Fatalf("unwrapped cause = %v, want the original ARN-carrying transport error reachable", cause)
+	depth := 0
+	for e := error(inner); e != nil; e = errors.Unwrap(e) {
+		depth++
+		if strings.Contains(e.Error(), "broker.test") {
+			t.Fatalf("chain node #%d (%T).Error() = %q, leaks the broker host nested deep", depth, e, e.Error())
+		}
+	}
+	if depth == 0 {
+		t.Fatal("errors.Unwrap(inner) = nil, want a sanitized cause still reachable for debugging")
 	}
 }
 

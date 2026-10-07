@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- When a network call gets no response at all (an outage, a timeout, a
+  canceled request), the connection detail that failure used to carry
+  internally — the host, the request URL, and for a storage upload or
+  download the full signed link — is no longer reachable by inspecting the
+  error's cause, including through an unfamiliar underlying error shape we
+  didn't specifically recognize. A call your own HTTP client chose to
+  refuse (for example, a redirect it declined to follow) is still treated
+  as what it is — the service DID answer — never folded into the
+  no-response case above. The error you see, and the category it reports
+  (a canceled request, a timeout, an unreachable credential service), are
+  unchanged.
+- A request whose own HTTP client refused a redirect it was offered no
+  longer closes the response body a second time. Closing it twice could
+  panic, or misbehave, against a response body that isn't safe to close
+  more than once.
+- Shipped test fixtures no longer carry a real company or customer id. No
+  code behaviour changes.
+
 ## 2026-10-07 (v2.22.2)
 
 ### Fixed
