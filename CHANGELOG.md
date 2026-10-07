@@ -18,9 +18,10 @@
   ran past a fixed duration. Now, a connection that keeps moving bytes
   succeeds however long it takes; a connection that goes quiet — no bytes in
   either direction, and no response — for about a minute still fails
-  cleanly. Connecting itself, including setting up a secure connection, is
-  still bounded to one quick step if the remote side doesn't respond — not
-  two stacked ones. Calls to the Helix API are unaffected.
+  cleanly. Connecting itself, including setting up a secure connection and,
+  when a proxy is configured, connecting through it, is still bounded to one
+  quick step if the remote side doesn't respond — not several stacked ones.
+  Calls to the Helix API are unaffected.
 
 ## 2026-10-07 (v2.22.3)
 

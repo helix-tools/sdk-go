@@ -9,10 +9,12 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"io"
 	"math/big"
 	"net"
 	"net/http"
+	"net/url"
 	"reflect"
 	"sync"
 	"testing"
@@ -111,6 +113,67 @@ func overrideTLSConfig(t *testing.T, cfg *tls.Config) {
 	t.Cleanup(func() { tlsConfig = orig })
 }
 
+// overrideProxyForRequest swaps the package's proxy-resolution function so a
+// test can point every request at a fixed proxy URL, never by setting
+// HTTP_PROXY/HTTPS_PROXY/NO_PROXY — see TestNew_PreservesEnvironmentProxy for
+// why a real env-var-based proxy test would depend on execution order within
+// the binary.
+func overrideProxyForRequest(t *testing.T, fn func(*http.Request) (*url.URL, error)) {
+	t.Helper()
+	orig := proxyForRequest
+	proxyForRequest = fn
+	t.Cleanup(func() { proxyForRequest = orig })
+}
+
+// readUntilBlankLine reads directly from conn, one byte at a time, until it
+// has seen the "\r\n\r\n" that ends an HTTP header block, then returns with
+// conn's read position exactly at the first byte after it. A bufio.Reader
+// would risk buffering ahead past that point and swallowing bytes that
+// belong to whatever comes next on the same connection (here, the client's
+// TLS ClientHello) — a plain net.Conn has no way to hand back over-read
+// bytes once buffered.
+func readUntilBlankLine(conn net.Conn) error {
+	var last4 [4]byte
+	buf := make([]byte, 1)
+	for {
+		if _, err := conn.Read(buf); err != nil {
+			return err
+		}
+		last4[0], last4[1], last4[2], last4[3] = last4[1], last4[2], last4[3], buf[0]
+		if last4 == [4]byte{'\r', '\n', '\r', '\n'} {
+			return nil
+		}
+	}
+}
+
+// newProxyTLSStub starts a stub that speaks the server side of an HTTP
+// forward proxy's CONNECT tunnel for exactly one connection: read the
+// CONNECT request, wait connectDelay, reply 200, wait handshakeDelay, then
+// hand the still-raw tunneled connection to handle to drive the TLS
+// handshake — the same contract as newTLSStub, but through a CONNECT tunnel
+// first, the shape a request through a configured HTTP proxy actually takes
+// on the wire.
+func newProxyTLSStub(t *testing.T, connectDelay, handshakeDelay time.Duration, handle func(net.Conn, tls.Certificate)) *stub {
+	t.Helper()
+
+	cert := newSelfSignedCert(t)
+	pool := x509.NewCertPool()
+	pool.AddCert(cert.Leaf)
+	overrideTLSConfig(t, &tls.Config{RootCAs: pool})
+
+	return newStub(t, func(conn net.Conn) {
+		if err := readUntilBlankLine(conn); err != nil {
+			return
+		}
+		time.Sleep(connectDelay)
+		if _, err := conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+			return
+		}
+		time.Sleep(handshakeDelay)
+		handle(conn, cert)
+	})
+}
+
 // newSelfSignedCert generates an ephemeral certificate valid for 127.0.0.1,
 // used by newTLSStub so TLS tests verify against a real trust root instead
 // of disabling certificate verification.
@@ -188,11 +251,13 @@ func TestNew_NoClientLevelTimeout(t *testing.T) {
 }
 
 // TestNew_ConnectTimeoutWiredToTransport pins that ConnectTimeout reaches
-// http.Transport.TLSHandshakeTimeout — the field Go falls back to only for a
-// proxied HTTPS connection (DialTLSContext drives every other case, and its
-// own combined dial+handshake budget is exercised behaviorally by
-// TestNew_TLSConnectBudget_SharedAcrossDialAndHandshake, not by inspecting a
-// field).
+// http.Transport.TLSHandshakeTimeout — the field Go falls back to only for
+// an HTTPS connection through a non-http-scheme proxy (an https:// or
+// socks5:// proxy URL). DialTLSContext drives every other case, including
+// the common HTTP-proxy one, and its own combined budget is exercised
+// behaviorally by TestNew_TLSConnectBudget_SharedAcrossDialAndHandshake and
+// TestNew_ProxiedTLS_ConnectBudget_SharedAcrossDialConnectAndHandshake, not
+// by inspecting a field.
 func TestNew_ConnectTimeoutWiredToTransport(t *testing.T) {
 	overrideConnectTimeout(t, 7*time.Second)
 
@@ -471,11 +536,16 @@ func TestNew_ConcurrentTransfers_IndependentIdleTimers(t *testing.T) {
 	}
 }
 
-// TestNew_PreservesEnvironmentProxy pins that the storage transport routes
-// through HTTP_PROXY/HTTPS_PROXY/NO_PROXY exactly like the http.Client it
-// replaced (which inherited http.DefaultTransport's default Proxy) — a
-// customer behind a corporate proxy that intermediates storage traffic would
-// otherwise have every upload and download start failing outright.
+// TestProxyForRequest_DefaultsToHTTPProxyFromEnvironment pins that the
+// package's own proxy-resolution seam defaults to the real
+// http.ProxyFromEnvironment in production — the actual mechanism by which a
+// customer's HTTP_PROXY/HTTPS_PROXY/NO_PROXY still governs a storage
+// transfer, exactly like the http.Client this package replaced (which
+// inherited http.DefaultTransport's default Proxy). New()'s Transport.Proxy
+// field is no longer this function directly (see
+// TestNew_ProxyFunc_DelegatesByScheme below): it wraps it to hand the
+// https-target-behind-an-http-proxy combination to DialTLSContext instead,
+// so identity has to be checked one level down, against the seam itself.
 //
 // This checks identity against the exact function net/http uses for its own
 // default transport, rather than setting the environment and making a
@@ -486,19 +556,76 @@ func TestNew_ConcurrentTransfers_IndependentIdleTimers(t *testing.T) {
 // before this one would run — a behavioral test here would pass or fail
 // depending on test execution order within this binary, not on this
 // package's own code.
-func TestNew_PreservesEnvironmentProxy(t *testing.T) {
-	c := New()
-	tr, ok := c.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("Transport is %T, want *http.Transport", c.Transport)
-	}
-	if tr.Proxy == nil {
-		t.Fatal("Transport.Proxy is nil, want http.ProxyFromEnvironment — a storage transfer would bypass a customer's configured proxy entirely")
-	}
-	got := reflect.ValueOf(tr.Proxy).Pointer()
+func TestProxyForRequest_DefaultsToHTTPProxyFromEnvironment(t *testing.T) {
+	got := reflect.ValueOf(proxyForRequest).Pointer()
 	want := reflect.ValueOf(http.ProxyFromEnvironment).Pointer()
 	if got != want {
-		t.Fatal("Transport.Proxy is set but is not http.ProxyFromEnvironment")
+		t.Fatal("proxyForRequest is not http.ProxyFromEnvironment by default — a storage transfer would bypass a customer's configured proxy entirely")
+	}
+}
+
+// TestNew_ProxyFunc_DelegatesByScheme exercises New()'s Transport.Proxy
+// wrapper across every combination of target scheme and resolved-proxy
+// scheme it has to tell apart. It must return nil ONLY for an HTTPS target
+// behind an http:// proxy — handing that one combination to DialTLSContext's
+// single shared ConnectTimeout budget — and otherwise must pass whatever
+// proxyForRequest resolved straight through unchanged, preserving
+// NO_PROXY/HTTP_PROXY/HTTPS_PROXY semantics for every other combination
+// exactly like the bare http.ProxyFromEnvironment this replaces.
+func TestNew_ProxyFunc_DelegatesByScheme(t *testing.T) {
+	httpProxy := &url.URL{Scheme: "http", Host: "proxy.example:3128"}
+	httpsProxy := &url.URL{Scheme: "https", Host: "proxy.example:3129"}
+	resolveErr := errors.New("boom")
+
+	tests := []struct {
+		name          string
+		targetScheme  string
+		resolvedProxy *url.URL
+		resolvedErr   error
+		wantNilProxy  bool
+	}{
+		{"no proxy configured, https target", "https", nil, nil, true},
+		{"no proxy configured, http target", "http", nil, nil, true},
+		{"https target behind http proxy delegates to DialTLSContext", "https", httpProxy, nil, true},
+		{"http target behind http proxy passes through unchanged", "http", httpProxy, nil, false},
+		{"https target behind https proxy passes through unchanged", "https", httpsProxy, nil, false},
+		{"resolution error propagates", "https", nil, resolveErr, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			overrideProxyForRequest(t, func(*http.Request) (*url.URL, error) {
+				return tc.resolvedProxy, tc.resolvedErr
+			})
+
+			c := New()
+			tr, ok := c.Transport.(*http.Transport)
+			if !ok {
+				t.Fatalf("Transport is %T, want *http.Transport", c.Transport)
+			}
+			req := &http.Request{URL: &url.URL{Scheme: tc.targetScheme, Host: "storage.example:443"}}
+
+			got, err := tr.Proxy(req)
+
+			if tc.resolvedErr != nil {
+				if !errors.Is(err, tc.resolvedErr) {
+					t.Fatalf("err = %v, want %v", err, tc.resolvedErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+			if tc.wantNilProxy {
+				if got != nil {
+					t.Fatalf("Proxy(...) = %v, want nil (net/http should fall through to DialTLSContext)", got)
+				}
+				return
+			}
+			if got != tc.resolvedProxy {
+				t.Fatalf("Proxy(...) = %v, want %v unchanged", got, tc.resolvedProxy)
+			}
+		})
 	}
 }
 
@@ -642,5 +769,107 @@ func TestNew_TLSConnectBudget_SharedAcrossDialAndHandshake(t *testing.T) {
 	// (~300ms) instead.
 	if elapsed > connectTimeout+200*time.Millisecond {
 		t.Fatalf("took %v to fail; a %v combined connect budget should have cut it well before dial+handshake's %v", elapsed, connectTimeout, dialDelay+handshakeDelay)
+	}
+}
+
+// TestNew_ProxiedTLS_SucceedsWithinBudget is the proxied-path companion to
+// TestNew_TLSConnectBudget_SucceedsWithinBudget: a proxy dial, a CONNECT
+// reply delay, and a TLS handshake delay that together stay under
+// ConnectTimeout must still succeed through an env-configured HTTP proxy —
+// proving the shared budget didn't just make every proxied TLS connect fail.
+func TestNew_ProxiedTLS_SucceedsWithinBudget(t *testing.T) {
+	const (
+		connectTimeout = 600 * time.Millisecond
+		dialDelay      = 50 * time.Millisecond
+		connectDelay   = 50 * time.Millisecond
+		handshakeDelay = 50 * time.Millisecond
+	)
+	overrideConnectTimeout(t, connectTimeout)
+	overrideDial(t, slowDial(dialDelay))
+
+	s := newProxyTLSStub(t, connectDelay, handshakeDelay, func(conn net.Conn, cert tls.Certificate) {
+		tlsConn := tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{cert}})
+		if err := tlsConn.Handshake(); err != nil {
+			return
+		}
+		defer func() { _ = tlsConn.Close() }()
+		buf := make([]byte, 4096)
+		_, _ = tlsConn.Read(buf)
+		_, _ = tlsConn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+	})
+	overrideProxyForRequest(t, func(*http.Request) (*url.URL, error) {
+		return &url.URL{Scheme: "http", Host: s.addr}, nil
+	})
+
+	client := New()
+	req, err := http.NewRequest(http.MethodGet, s.tlsURL("/object"), nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v (dial %v + CONNECT reply %v + handshake %v is well within the %v combined budget)",
+			err, dialDelay, connectDelay, handshakeDelay, connectTimeout)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(body) != "ok" {
+		t.Fatalf("body = %q, want %q", body, "ok")
+	}
+}
+
+// TestNew_ProxiedTLS_ConnectBudget_SharedAcrossDialConnectAndHandshake is the
+// proxied-path companion to TestNew_TLSConnectBudget_SharedAcrossDialAndHandshake:
+// with an HTTP proxy configured, the proxy dial, the CONNECT response wait,
+// and the TLS handshake must share ONE ConnectTimeout budget. Each of the
+// three stages here is individually well under ConnectTimeout, but their sum
+// is not — a client that times the dial, the CONNECT wait, and the handshake
+// separately (the CONNECT wait, left to net/http's own built-in handling,
+// rides its hardcoded 1-minute cap rather than ConnectTimeout) would let
+// this succeed at roughly their sum; a single shared budget must cut it off
+// close to ConnectTimeout instead.
+func TestNew_ProxiedTLS_ConnectBudget_SharedAcrossDialConnectAndHandshake(t *testing.T) {
+	const (
+		connectTimeout = 300 * time.Millisecond
+		dialDelay      = 150 * time.Millisecond
+		connectDelay   = 150 * time.Millisecond
+		handshakeDelay = 150 * time.Millisecond
+	)
+	overrideConnectTimeout(t, connectTimeout)
+	overrideDial(t, slowDial(dialDelay))
+
+	s := newProxyTLSStub(t, connectDelay, handshakeDelay, func(conn net.Conn, cert tls.Certificate) {
+		tlsConn := tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{cert}})
+		_ = tlsConn.Handshake()
+	})
+	overrideProxyForRequest(t, func(*http.Request) (*url.URL, error) {
+		return &url.URL{Scheme: "http", Host: s.addr}, nil
+	})
+
+	client := New()
+	req, err := http.NewRequest(http.MethodGet, s.tlsURL("/object"), nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	start := time.Now()
+	resp, err := client.Do(req)
+	elapsed := time.Since(start)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatalf("expected the proxied connect phase to fail: dial (%v) + CONNECT reply (%v) + handshake (%v) together exceed the %v combined budget",
+			dialDelay, connectDelay, handshakeDelay, connectTimeout)
+	}
+	// Separately-timed stages would let this succeed at roughly
+	// dialDelay+connectDelay+handshakeDelay (~450ms) or later. A single
+	// shared budget must cut it off close to ConnectTimeout (~300ms).
+	if elapsed > connectTimeout+200*time.Millisecond {
+		t.Fatalf("took %v to fail; a %v combined proxied-connect budget should have cut it well before dial+CONNECT+handshake's %v",
+			elapsed, connectTimeout, dialDelay+connectDelay+handshakeDelay)
 	}
 }
