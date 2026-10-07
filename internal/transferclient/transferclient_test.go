@@ -1,9 +1,19 @@
 package transferclient
 
 import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -80,6 +90,92 @@ func overrideConnectTimeout(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { ConnectTimeout = orig })
 }
 
+// overrideDial swaps the package's dial function so a test can inject a
+// deterministic connect-phase delay — real TCP dialing over loopback
+// completes in well under a millisecond, too fast to prove anything about a
+// shared dial+handshake budget without this seam.
+func overrideDial(t *testing.T, fn func(ctx context.Context, network, addr string) (net.Conn, error)) {
+	t.Helper()
+	orig := dial
+	dial = fn
+	t.Cleanup(func() { dial = orig })
+}
+
+// overrideTLSConfig swaps the base TLS config used for every storage TLS
+// connection so a test can supply trust roots for a local, self-signed stub
+// server.
+func overrideTLSConfig(t *testing.T, cfg *tls.Config) {
+	t.Helper()
+	orig := tlsConfig
+	tlsConfig = cfg
+	t.Cleanup(func() { tlsConfig = orig })
+}
+
+// newSelfSignedCert generates an ephemeral certificate valid for 127.0.0.1,
+// used by newTLSStub so TLS tests verify against a real trust root instead
+// of disabling certificate verification.
+func newSelfSignedCert(t *testing.T) tls.Certificate {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "transferclient test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("CreateCertificate: %v", err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("MarshalECPrivateKey: %v", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("X509KeyPair: %v", err)
+	}
+	cert.Leaf, err = x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("ParseCertificate: %v", err)
+	}
+	return cert
+}
+
+// newTLSStub starts a stub like newStub, but hands the accepted connection
+// to handle BEFORE any TLS handshake happens — the handler drives (or
+// delays) the server side of the handshake itself, so a test controls its
+// timing exactly. It also points overrideTLSConfig's trust root at the
+// generated certificate for the duration of the test.
+func newTLSStub(t *testing.T, handle func(net.Conn, tls.Certificate)) *stub {
+	t.Helper()
+
+	cert := newSelfSignedCert(t)
+
+	pool := x509.NewCertPool()
+	pool.AddCert(cert.Leaf)
+	overrideTLSConfig(t, &tls.Config{RootCAs: pool})
+
+	return newStub(t, func(conn net.Conn) { handle(conn, cert) })
+}
+
+func (s *stub) tlsURL(path string) string {
+	return "https://" + s.addr + path
+}
+
 // TestNew_NoClientLevelTimeout pins the core guarantee this package exists
 // to provide: nothing bounds total transfer duration. If a future change
 // reintroduces http.Client.Timeout here, a healthy slow transfer would fail
@@ -91,11 +187,12 @@ func TestNew_NoClientLevelTimeout(t *testing.T) {
 	}
 }
 
-// TestNew_ConnectTimeoutWiredToTransport pins that ConnectTimeout actually
-// reaches the transport construction (the TLS handshake bound is a directly
-// inspectable *http.Transport field; the dial timeout itself is exercised
-// behaviorally by net.Dialer, which this package relies on rather than
-// re-proving).
+// TestNew_ConnectTimeoutWiredToTransport pins that ConnectTimeout reaches
+// http.Transport.TLSHandshakeTimeout — the field Go falls back to only for a
+// proxied HTTPS connection (DialTLSContext drives every other case, and its
+// own combined dial+handshake budget is exercised behaviorally by
+// TestNew_TLSConnectBudget_SharedAcrossDialAndHandshake, not by inspecting a
+// field).
 func TestNew_ConnectTimeoutWiredToTransport(t *testing.T) {
 	overrideConnectTimeout(t, 7*time.Second)
 
@@ -371,5 +468,179 @@ func TestNew_ConcurrentTransfers_IndependentIdleTimers(t *testing.T) {
 				t.Errorf("healthy transfer: body = %q, want %q", r.body, "abc")
 			}
 		}
+	}
+}
+
+// TestNew_PreservesEnvironmentProxy pins that the storage transport routes
+// through HTTP_PROXY/HTTPS_PROXY/NO_PROXY exactly like the http.Client it
+// replaced (which inherited http.DefaultTransport's default Proxy) — a
+// customer behind a corporate proxy that intermediates storage traffic would
+// otherwise have every upload and download start failing outright.
+//
+// This checks identity against the exact function net/http uses for its own
+// default transport, rather than setting the environment and making a
+// request through a stub proxy: net/http caches the parsed proxy
+// environment for the lifetime of the process the first time ANY
+// Transport's Proxy function actually runs (the unexported envProxyOnce in
+// net/http), and several other tests in this file already call client.Do
+// before this one would run — a behavioral test here would pass or fail
+// depending on test execution order within this binary, not on this
+// package's own code.
+func TestNew_PreservesEnvironmentProxy(t *testing.T) {
+	c := New()
+	tr, ok := c.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport is %T, want *http.Transport", c.Transport)
+	}
+	if tr.Proxy == nil {
+		t.Fatal("Transport.Proxy is nil, want http.ProxyFromEnvironment — a storage transfer would bypass a customer's configured proxy entirely")
+	}
+	got := reflect.ValueOf(tr.Proxy).Pointer()
+	want := reflect.ValueOf(http.ProxyFromEnvironment).Pointer()
+	if got != want {
+		t.Fatal("Transport.Proxy is set but is not http.ProxyFromEnvironment")
+	}
+}
+
+// TestNew_TLS_HappyPath_Succeeds is the baseline sanity check that
+// DialTLSContext's manual dial-then-handshake path actually serves a normal
+// HTTPS storage transfer — none of the other tests in this file exercise
+// TLS at all.
+func TestNew_TLS_HappyPath_Succeeds(t *testing.T) {
+	s := newTLSStub(t, func(conn net.Conn, cert tls.Certificate) {
+		tlsConn := tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{cert}})
+		if err := tlsConn.Handshake(); err != nil {
+			return
+		}
+		defer func() { _ = tlsConn.Close() }()
+		buf := make([]byte, 4096)
+		_, _ = tlsConn.Read(buf)
+		_, _ = tlsConn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+	})
+
+	client := New()
+	req, err := http.NewRequest(http.MethodGet, s.tlsURL("/object"), nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(body) != "ok" {
+		t.Fatalf("body = %q, want %q", body, "ok")
+	}
+}
+
+// slowDial wraps the real dialer with a fixed delay before it ever attempts
+// the TCP connection — the deterministic stand-in for a slow dial phase that
+// loopback TCP cannot produce on its own (see the dial doc comment in
+// transferclient.go).
+func slowDial(delay time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	}
+}
+
+// TestNew_TLSConnectBudget_SucceedsWithinBudget is the companion sanity
+// check to TestNew_TLSConnectBudget_SharedAcrossDialAndHandshake: a dial
+// delay plus a handshake delay that together stay under ConnectTimeout must
+// still succeed, proving the combined budget didn't just make every TLS
+// connect fail.
+func TestNew_TLSConnectBudget_SucceedsWithinBudget(t *testing.T) {
+	const (
+		connectTimeout = 400 * time.Millisecond
+		dialDelay      = 50 * time.Millisecond
+		handshakeDelay = 50 * time.Millisecond
+	)
+	overrideConnectTimeout(t, connectTimeout)
+	overrideDial(t, slowDial(dialDelay))
+
+	s := newTLSStub(t, func(conn net.Conn, cert tls.Certificate) {
+		time.Sleep(handshakeDelay)
+		tlsConn := tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{cert}})
+		if err := tlsConn.Handshake(); err != nil {
+			return
+		}
+		defer func() { _ = tlsConn.Close() }()
+		buf := make([]byte, 4096)
+		_, _ = tlsConn.Read(buf)
+		_, _ = tlsConn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+	})
+
+	client := New()
+	req, err := http.NewRequest(http.MethodGet, s.tlsURL("/object"), nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v (dial %v + handshake %v is well within the %v combined budget)", err, dialDelay, handshakeDelay, connectTimeout)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(body) != "ok" {
+		t.Fatalf("body = %q, want %q", body, "ok")
+	}
+}
+
+// TestNew_TLSConnectBudget_SharedAcrossDialAndHandshake is the behavioral
+// proof that the dial phase and the TLS handshake phase share ONE
+// ConnectTimeout budget rather than each getting its own full one. A dial
+// delay and a handshake delay that are each individually well under
+// ConnectTimeout, but whose sum exceeds it, must still fail — and must fail
+// close to ConnectTimeout, not close to dialDelay+handshakeDelay (which is
+// what a separate-budget bug would let through).
+func TestNew_TLSConnectBudget_SharedAcrossDialAndHandshake(t *testing.T) {
+	const (
+		connectTimeout = 300 * time.Millisecond
+		dialDelay      = 200 * time.Millisecond
+		handshakeDelay = 200 * time.Millisecond
+	)
+	overrideConnectTimeout(t, connectTimeout)
+	overrideDial(t, slowDial(dialDelay))
+
+	s := newTLSStub(t, func(conn net.Conn, cert tls.Certificate) {
+		time.Sleep(handshakeDelay)
+		tlsConn := tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{cert}})
+		_ = tlsConn.Handshake()
+	})
+
+	client := New()
+	req, err := http.NewRequest(http.MethodGet, s.tlsURL("/object"), nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	start := time.Now()
+	resp, err := client.Do(req)
+	elapsed := time.Since(start)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatalf("expected the connect phase to fail: dial (%v) + handshake (%v) together exceed the %v combined budget", dialDelay, handshakeDelay, connectTimeout)
+	}
+	// A dial-only or handshake-only budget (each getting its own full
+	// ConnectTimeout) would let this succeed at roughly dialDelay+handshakeDelay
+	// (~400ms). A single shared budget must cut it off close to ConnectTimeout
+	// (~300ms) instead.
+	if elapsed > connectTimeout+200*time.Millisecond {
+		t.Fatalf("took %v to fail; a %v combined connect budget should have cut it well before dial+handshake's %v", elapsed, connectTimeout, dialDelay+handshakeDelay)
 	}
 }
