@@ -708,10 +708,10 @@ func TestUploadDataset_ConcurrentUploadsShareOneInFlightKeyLookup(t *testing.T) 
 //
 // Negative control: this specific shape (true concurrency, a released stub,
 // asserting exactly one request for the wave) is new in this revision —
-// round 2's version on head ac0d30d85d5540a95e7066d4f0a02cb749918272 ran the
-// canceled caller to completion before even starting the live one, so it
-// could not have caught a canceled-caller-poisons-the-lookup regression. Run
-// against head's producer.go (context.Background() in place of
+// an earlier version of this test ran the canceled caller to completion
+// before even starting the live one, so it could not have caught a
+// canceled-caller-poisons-the-lookup regression. Run against the current
+// producer.go (context.Background() in place of
 // context.WithoutCancel(ctx)) this test still passes — that substitution
 // does not change which context the shared lookup runs on from any given
 // waiter's point of view, only whether request-scoped values travel with
@@ -811,8 +811,8 @@ func waitForConfigCallCount(t *testing.T, api *producerConfigAPI, want int) {
 	}
 }
 
-// TestUploadDataset_CancelledWhileAlreadyWaitingOnStalledLookup is round 3's
-// requested test: both of round 2's cancellation tests
+// TestUploadDataset_CancelledWhileAlreadyWaitingOnStalledLookup complements
+// both of the cancellation tests above
 // (TestUploadDataset_CancelledWaiterSharesLiveWaitersOneInFlightLookup and
 // TestUploadDataset_CancelledWaiterLeavesNoGoroutineLeak) cancel their
 // context BEFORE calling UploadDataset, so an implementation that reads
@@ -831,7 +831,7 @@ func waitForConfigCallCount(t *testing.T, api *producerConfigAPI, want int) {
 // ctx.Err() once before the wait and then do a plain "<-call.done" (no
 // select on ctx.Done() while parked) makes this test fail — upload A never
 // returns within the 2s bound, because it is not watching ctx.Done() anymore
-// once it starts waiting. Confirmed by hand and reverted; see REPORT.md.
+// once it starts waiting. Confirmed by hand, then reverted.
 func TestUploadDataset_CancelledWhileAlreadyWaitingOnStalledLookup(t *testing.T) {
 	api := newProducerConfigAPI(t, http.StatusInternalServerError, `{"error":"boom"}`)
 	_, keyService := newKeyServiceRecorder(t)
@@ -859,8 +859,8 @@ func TestUploadDataset_CancelledWhileAlreadyWaitingOnStalledLookup(t *testing.T)
 	// goroutine's HTTP request reaching the fake server (confirmed here) can
 	// only happen after A has already moved on to waiting. Only now is A
 	// known to be parked on a confirmed-stalled lookup, so starting B and
-	// canceling A from this point on exercises exactly the gap round 3
-	// found: a cancellation that happens AFTER the wait has begun.
+	// canceling A from this point on exercises exactly the gap: a
+	// cancellation that happens AFTER the wait has begun.
 	waitForConfigCallCount(t, api, configCallsBefore+1)
 
 	bErrCh := make(chan error, 1)

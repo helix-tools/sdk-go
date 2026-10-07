@@ -224,7 +224,7 @@ func TestSanitizeCause_NegativeControl_RawDialFailureCarriesTheURL(t *testing.T)
 	}
 }
 
-// TestWrap_NoResponseCauseNeverLeaksHostOrURL reproduces F1 end-to-end: a
+// TestWrap_NoResponseCauseNeverLeaksHostOrURL is an end-to-end check: a
 // real failed PUT to an unreachable presigned-looking URL (127.0.0.1:1, a
 // reserved port that always refuses), wrapped the same way
 // uploadToPresignedURL wraps it — SanitizeCause applied explicitly, exactly

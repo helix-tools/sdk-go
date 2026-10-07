@@ -607,3 +607,58 @@ func TestNewProducer_StaticKeysIdentityCheckUnreachable(t *testing.T) {
 	}
 	assertNoUpstreamLeak(t, err)
 }
+
+// TestNewProducer_BlackHoleIdentityCheckIsBounded is the wiring test for the
+// case neither TestNewProducer_StaticKeysIdentityCheckUnreachable (a
+// connection refused immediately) nor TestNewProducer_StaticKeysIdentityCheckTemporaryFailure
+// (a connection that answers) covers: a connection ACCEPTED but never
+// answered. NewConsumer's identity check already bounds this via its own
+// AWS HTTP client timeout (consumer/consumer.go's awsHTTPClient, 25s) and
+// gives up in about 75s (3 default retry attempts); NewProducer must report
+// the same temporary-failure error within the same bound instead of
+// blocking on the OS-level TCP timeout (observed ~150s with no bound at
+// all). The assertion is deliberately well under that old bound, not tight
+// against the new one, so ordinary scheduling jitter in CI never flakes it.
+func TestNewProducer_BlackHoleIdentityCheckIsBounded(t *testing.T) {
+	if testing.Short() {
+		t.Skip("exercises the real AWS HTTP client timeout and default retry attempts; slow by design")
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			// Accept and hold the connection open; never write a response.
+			_ = conn
+		}
+	}()
+
+	isolateAWSEnv(t, "http://"+ln.Addr().String(), "http://127.0.0.1:1")
+
+	start := time.Now()
+	_, err = NewProducer(types.Config{
+		AWSAccessKeyID:     "AKIDTESTPRODUCER",
+		AWSSecretAccessKey: "fake-secret",
+		CustomerID:         "cust-1",
+		Region:             "us-east-1",
+	})
+	elapsed := time.Since(start)
+
+	want := sdkerr.IdentityCheckTemporaryFailureMessage(0)
+	if err == nil || err.Error() != want {
+		t.Fatalf("NewProducer error = %v, want exactly %q", err, want)
+	}
+	assertNoUpstreamLeak(t, err)
+
+	const bound = 100 * time.Second // well under the old ~150s unbounded hang.
+	if elapsed > bound {
+		t.Fatalf("NewProducer took %v to report the temporary failure, want it bounded like NewConsumer (~75s, not ~150s)", elapsed)
+	}
+}

@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- When a call to the encryption or notification services gets no response at
+  all (an outage, a timeout, a canceled request), the connection detail that
+  failure used to carry internally — the host and the request URL — is no
+  longer reachable by inspecting the error's cause. A call those services
+  actually answered (including with an error) is unchanged.
+- Starting a producer when the service that checks your credentials accepts
+  the connection but never answers no longer blocks indefinitely: it now
+  reports the same temporary-failure error, within the same bound, as
+  starting a consumer under the same condition.
+
 ## 2026-10-07 (v2.22.3)
 
 ### Fixed
