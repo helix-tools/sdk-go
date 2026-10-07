@@ -1,8 +1,12 @@
 # Changelog
 
-## Unreleased
+## 2026-10-07 (v2.22.3)
 
 ### Fixed
+- If the service that checks your credentials when a client starts is
+  briefly unavailable or doesn't answer, the error now says it is a
+  temporary failure you can retry, instead of reporting your credentials
+  as invalid.
 - When a network call gets no response at all (an outage, a timeout, a
   canceled request), the connection detail that failure used to carry
   internally — the host, the request URL, and for a storage upload or
