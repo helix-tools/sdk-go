@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-10-07 (v2.22.5)
 
 ### Security
 - When uploading or downloading a dataset stalls or is dropped mid-transfer,
