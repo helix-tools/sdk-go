@@ -616,21 +616,23 @@ func TestProxyForRequest_DefaultsToHTTPProxyFromEnvironment(t *testing.T) {
 // TestNew_ProxyFunc_DelegatesByScheme exercises New()'s Transport.Proxy
 // wrapper across every combination of target scheme and resolved-proxy
 // scheme it has to tell apart. It must return nil for an HTTPS target behind
-// an http:// OR an https:// proxy — handing either combination to
-// DialTLSContext's single shared ConnectTimeout budget — and otherwise must
-// pass whatever proxyForRequest resolved straight through unchanged,
-// preserving NO_PROXY/HTTP_PROXY/HTTPS_PROXY semantics for every other
-// combination exactly like the bare http.ProxyFromEnvironment this replaces.
-// A socks5 proxy is deliberately left passing through unchanged even for an
-// HTTPS target: net/http dials it as a plain TCP connection and performs the
-// SOCKS5 handshake itself afterward regardless of what Proxy returns, so
-// there is no CONNECT-tunnel path here to bypass (see dialTLSThroughProxy's
-// and isForwardProxyScheme's doc comments for how that case is still
-// bounded, just not by this unified budget).
+// an http://, https://, socks5://, or socks5h:// proxy — handing every one
+// of those combinations to DialTLSContext's single shared ConnectTimeout
+// budget (see dialTLSThroughProxy and dialThroughSOCKS5Proxy) — and
+// otherwise must pass whatever proxyForRequest resolved straight through
+// unchanged, preserving NO_PROXY/HTTP_PROXY/HTTPS_PROXY semantics for every
+// other combination exactly like the bare http.ProxyFromEnvironment this
+// replaces. A plain HTTP target behind a socks5 proxy is deliberately left
+// passing through unchanged: it has no TLS handshake stage for this
+// package to need to unify, so net/http's own built-in SOCKS5 handling
+// (reached via the unmodified DialContext path, which is already bound by
+// ConnectTimeout for the dial itself) is left in place for it, exactly as
+// review round 4 found it.
 func TestNew_ProxyFunc_DelegatesByScheme(t *testing.T) {
 	httpProxy := &url.URL{Scheme: "http", Host: "proxy.example:3128"}
 	httpsProxy := &url.URL{Scheme: "https", Host: "proxy.example:3129"}
 	socks5Proxy := &url.URL{Scheme: "socks5", Host: "proxy.example:1080"}
+	socks5hProxy := &url.URL{Scheme: "socks5h", Host: "proxy.example:1080"}
 	resolveErr := errors.New("boom")
 
 	tests := []struct {
@@ -646,7 +648,9 @@ func TestNew_ProxyFunc_DelegatesByScheme(t *testing.T) {
 		{"http target behind http proxy passes through unchanged", "http", httpProxy, nil, false},
 		{"https target behind https proxy delegates to DialTLSContext", "https", httpsProxy, nil, true},
 		{"http target behind https proxy passes through unchanged", "http", httpsProxy, nil, false},
-		{"https target behind socks5 proxy passes through unchanged", "https", socks5Proxy, nil, false},
+		{"https target behind socks5 proxy delegates to DialTLSContext", "https", socks5Proxy, nil, true},
+		{"https target behind socks5h proxy delegates to DialTLSContext", "https", socks5hProxy, nil, true},
+		{"http target behind socks5 proxy passes through unchanged", "http", socks5Proxy, nil, false},
 		{"resolution error propagates", "https", nil, resolveErr, false},
 	}
 
@@ -1044,6 +1048,170 @@ func TestNew_ProxiedHTTPSProxy_ConnectBudget_SharedAcrossAllStages(t *testing.T)
 	}
 }
 
+// newSOCKS5TLSStub starts a stub that speaks the server side of a SOCKS5
+// proxy handshake for exactly one connection: read the client's method
+// greeting and reply "no authentication required", wait handshakeDelay,
+// read the CONNECT request, wait connectDelay, reply with success, then
+// hand the still-raw tunneled connection to handle to drive the TLS
+// handshake — the SOCKS5 analogue of newProxyTLSStub's HTTP CONNECT tunnel.
+func newSOCKS5TLSStub(t *testing.T, handshakeDelay, connectDelay time.Duration, handle func(net.Conn, tls.Certificate)) *stub {
+	t.Helper()
+
+	cert := newSelfSignedCert(t)
+	pool := x509.NewCertPool()
+	pool.AddCert(cert.Leaf)
+	overrideTLSConfig(t, &tls.Config{RootCAs: pool})
+
+	return newStub(t, func(conn net.Conn) {
+		greeting := make([]byte, 2)
+		if _, err := io.ReadFull(conn, greeting); err != nil {
+			return
+		}
+		methods := make([]byte, greeting[1])
+		if _, err := io.ReadFull(conn, methods); err != nil {
+			return
+		}
+		if _, err := conn.Write([]byte{0x05, 0x00}); err != nil { // version 5, no auth required
+			return
+		}
+		time.Sleep(handshakeDelay)
+
+		head := make([]byte, 4)
+		if _, err := io.ReadFull(conn, head); err != nil {
+			return
+		}
+		var addrLen int
+		switch head[3] {
+		case 0x01:
+			addrLen = net.IPv4len
+		case 0x04:
+			addrLen = net.IPv6len
+		case 0x03:
+			lenByte := make([]byte, 1)
+			if _, err := io.ReadFull(conn, lenByte); err != nil {
+				return
+			}
+			addrLen = int(lenByte[0])
+		default:
+			return
+		}
+		if _, err := io.ReadFull(conn, make([]byte, addrLen+2)); err != nil {
+			return
+		}
+		time.Sleep(connectDelay)
+		// version 5, succeeded, reserved, IPv4 bound address 0.0.0.0:0.
+		if _, err := conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
+			return
+		}
+		handle(conn, cert)
+	})
+}
+
+// TestNew_SOCKS5TLS_SucceedsWithinBudget is the SOCKS5-proxy companion to
+// TestNew_ProxiedTLS_SucceedsWithinBudget: a dial, the SOCKS5 handshake, and
+// the target TLS handshake that together stay under ConnectTimeout must
+// still succeed through an env-configured SOCKS5 proxy — proving the
+// shared budget didn't just make every SOCKS5-proxied TLS connect fail.
+func TestNew_SOCKS5TLS_SucceedsWithinBudget(t *testing.T) {
+	const (
+		connectTimeout       = 600 * time.Millisecond
+		dialDelay            = 50 * time.Millisecond
+		handshakeDelay       = 50 * time.Millisecond
+		targetHandshakeDelay = 50 * time.Millisecond
+	)
+	overrideConnectTimeout(t, connectTimeout)
+	overrideDial(t, slowDial(dialDelay))
+
+	s := newSOCKS5TLSStub(t, handshakeDelay, targetHandshakeDelay, func(conn net.Conn, cert tls.Certificate) {
+		tlsConn := tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{cert}})
+		if err := tlsConn.Handshake(); err != nil {
+			return
+		}
+		defer func() { _ = tlsConn.Close() }()
+		buf := make([]byte, 4096)
+		_, _ = tlsConn.Read(buf)
+		_, _ = tlsConn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+	})
+	overrideProxyForRequest(t, func(*http.Request) (*url.URL, error) {
+		return &url.URL{Scheme: "socks5", Host: s.addr}, nil
+	})
+
+	client := New()
+	req, err := http.NewRequest(http.MethodGet, s.tlsURL("/object"), nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v (dial %v + socks5 handshake %v + target TLS handshake %v is well within the %v combined budget)",
+			err, dialDelay, handshakeDelay, targetHandshakeDelay, connectTimeout)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(body) != "ok" {
+		t.Fatalf("body = %q, want %q", body, "ok")
+	}
+}
+
+// TestNew_SOCKS5TLS_ConnectBudget_SharedAcrossDialHandshakeAndTLS is the
+// SOCKS5-proxy companion to
+// TestNew_ProxiedTLS_ConnectBudget_SharedAcrossDialConnectAndHandshake, and
+// review round 4's required test: with a socks5 proxy configured, the
+// proxy dial, the SOCKS5 handshake, and the target TLS handshake must share
+// ONE ConnectTimeout budget. Each of the three stages here is individually
+// well under ConnectTimeout, but their sum is not — net/http's own built-in
+// SOCKS5 handling (what this package left in place for this combination
+// before this fix) let the SOCKS5 handshake ride IdleTimeout and gave the
+// TLS handshake that follows a separate TLSHandshakeTimeout on top, so this
+// scenario used to succeed at roughly the stages' sum instead of failing
+// near ConnectTimeout.
+func TestNew_SOCKS5TLS_ConnectBudget_SharedAcrossDialHandshakeAndTLS(t *testing.T) {
+	const (
+		connectTimeout       = 300 * time.Millisecond
+		dialDelay            = 150 * time.Millisecond
+		handshakeDelay       = 150 * time.Millisecond
+		targetHandshakeDelay = 150 * time.Millisecond
+	)
+	overrideConnectTimeout(t, connectTimeout)
+	overrideDial(t, slowDial(dialDelay))
+
+	s := newSOCKS5TLSStub(t, handshakeDelay, targetHandshakeDelay, func(conn net.Conn, cert tls.Certificate) {
+		tlsConn := tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{cert}})
+		_ = tlsConn.Handshake()
+	})
+	overrideProxyForRequest(t, func(*http.Request) (*url.URL, error) {
+		return &url.URL{Scheme: "socks5", Host: s.addr}, nil
+	})
+
+	client := New()
+	req, err := http.NewRequest(http.MethodGet, s.tlsURL("/object"), nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	start := time.Now()
+	resp, err := client.Do(req)
+	elapsed := time.Since(start)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatalf("expected the SOCKS5-proxied connect phase to fail: dial (%v) + socks5 handshake (%v) + target TLS handshake (%v) together exceed the %v combined budget",
+			dialDelay, handshakeDelay, targetHandshakeDelay, connectTimeout)
+	}
+	// Separately-timed stages (net/http's own built-in SOCKS5 handling)
+	// would let this succeed at roughly the three stages' sum (~450ms) or
+	// later. A single shared budget must cut it off close to ConnectTimeout
+	// (~300ms).
+	if elapsed > connectTimeout+200*time.Millisecond {
+		t.Fatalf("took %v to fail; a %v combined SOCKS5-proxied-connect budget should have cut it well before the stages' sum of %v",
+			elapsed, connectTimeout, dialDelay+handshakeDelay+targetHandshakeDelay)
+	}
+}
+
 // TestIdleConn_MidBodyStall_UsesIdleTimeout is the self-attack's "upload
 // stalls before the whole body is handed off" case for the response-window
 // policy: a Write that blocks because the peer never reads must still fail
@@ -1059,12 +1227,11 @@ func TestIdleConn_MidBodyStall_UsesIdleTimeout(t *testing.T) {
 
 	signal := &bodyDoneSignal{} // never marked done: this is mid-body.
 	wrapped := &idleConn{
-		Conn:            client,
-		idleTimeout:     80 * time.Millisecond,
-		bodyDone:        signal,
-		responseTimeout: 10 * time.Second,
+		Conn:        client,
+		idleTimeout: 80 * time.Millisecond,
+		bodyDone:    signal,
 	}
-	signal.bind(wrapped, wrapped.responseTimeout)
+	signal.bind(wrapped, 10*time.Second)
 	if err := wrapped.SetDeadline(time.Now().Add(wrapped.idleTimeout)); err != nil {
 		t.Fatalf("SetDeadline: %v", err)
 	}
@@ -1081,7 +1248,7 @@ func TestIdleConn_MidBodyStall_UsesIdleTimeout(t *testing.T) {
 		t.Fatalf("err = %v (%T), want a net.Error reporting Timeout() == true", err, err)
 	}
 	if elapsed > 2*time.Second {
-		t.Fatalf("took %v to time out; an 80ms idle timeout should have cut it well before this (bodyDone unset means a 10s ResponseTimeout must not apply)", elapsed)
+		t.Fatalf("took %v to time out; an 80ms idle timeout should have cut it well before this (bodyDone unmarked means the fixed post-handoff window must not apply)", elapsed)
 	}
 }
 
@@ -1090,9 +1257,10 @@ func TestIdleConn_MidBodyStall_UsesIdleTimeout(t *testing.T) {
 // TestIdleConn_MidBodyStall_UsesIdleTimeout's doc comment for why a real
 // socket isn't used here): once bodyDone reports the whole request body
 // handed off, the wait that follows — the gap between the last successful
-// Write and the next successful Read — is governed by responseTimeout, not
-// idleTimeout, even though the deadline active entering that gap was set by
-// an EARLIER mid-body write under the shorter basis.
+// Write and the next successful Read — is governed by the fixed
+// post-handoff window markDone computed, not idleTimeout, even though the
+// deadline active entering that gap was set by an EARLIER mid-body write
+// under the shorter basis.
 func TestIdleConn_PostHandoff_ExtendsToResponseTimeout(t *testing.T) {
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
@@ -1100,12 +1268,11 @@ func TestIdleConn_PostHandoff_ExtendsToResponseTimeout(t *testing.T) {
 
 	signal := &bodyDoneSignal{}
 	wrapped := &idleConn{
-		Conn:            client,
-		idleTimeout:     80 * time.Millisecond,
-		bodyDone:        signal,
-		responseTimeout: 400 * time.Millisecond,
+		Conn:        client,
+		idleTimeout: 80 * time.Millisecond,
+		bodyDone:    signal,
 	}
-	signal.bind(wrapped, wrapped.responseTimeout)
+	signal.bind(wrapped, 400*time.Millisecond)
 	if err := wrapped.SetDeadline(time.Now().Add(wrapped.idleTimeout)); err != nil {
 		t.Fatalf("SetDeadline: %v", err)
 	}
@@ -1118,7 +1285,9 @@ func TestIdleConn_PostHandoff_ExtendsToResponseTimeout(t *testing.T) {
 		t.Fatalf("mid-body Write: %v", err)
 	}
 
-	// The body is now fully handed off — this is the final write.
+	// The body is now fully handed off — this is the final write. markDone
+	// fixes the post-handoff deadline at now+400ms (the responseTimeout
+	// bind captured above).
 	signal.markDone()
 	go func() { buf := make([]byte, 64); _, _ = server.Read(buf) }()
 	if _, err := wrapped.Write([]byte("final flush")); err != nil {
@@ -1126,9 +1295,9 @@ func TestIdleConn_PostHandoff_ExtendsToResponseTimeout(t *testing.T) {
 	}
 
 	// The wait for the response. A 150ms gap exceeds idleTimeout (80ms) but
-	// stays under responseTimeout (400ms) — it can only succeed if the
-	// deadline really did switch bases, either when markDone fired above or
-	// when the final-flush write above succeeded.
+	// stays under the fixed 400ms post-handoff window — it can only
+	// succeed if the deadline really did switch bases when markDone fired
+	// above.
 	go func() {
 		time.Sleep(150 * time.Millisecond)
 		_, _ = server.Write([]byte("resp"))
@@ -1138,7 +1307,7 @@ func TestIdleConn_PostHandoff_ExtendsToResponseTimeout(t *testing.T) {
 	_, err := wrapped.Read(buf)
 	elapsed := time.Since(start)
 	if err != nil {
-		t.Fatalf("Read: %v (a 150ms gap is within the 400ms post-handoff responseTimeout; an idleTimeout-bound deadline would have failed at ~80ms)", err)
+		t.Fatalf("Read: %v (a 150ms gap is within the fixed 400ms post-handoff window; an idleTimeout-bound deadline would have failed at ~80ms)", err)
 	}
 	if elapsed < 100*time.Millisecond {
 		t.Fatalf("Read returned in %v, expected it to have waited for the delayed response (~150ms)", elapsed)
@@ -1147,7 +1316,8 @@ func TestIdleConn_PostHandoff_ExtendsToResponseTimeout(t *testing.T) {
 
 // TestIdleConn_PostHandoff_FailsAtResponseTimeout is the other required
 // shape: once bodyDone fires, a response that never arrives at all must
-// still fail — bounded by responseTimeout, not left to hang forever.
+// still fail — bounded by the fixed post-handoff window, not left to hang
+// forever.
 func TestIdleConn_PostHandoff_FailsAtResponseTimeout(t *testing.T) {
 	client, _ := net.Pipe()
 	defer func() { _ = client.Close() }()
@@ -1155,17 +1325,13 @@ func TestIdleConn_PostHandoff_FailsAtResponseTimeout(t *testing.T) {
 	signal := &bodyDoneSignal{}
 	wrapped := &idleConn{
 		Conn: client,
-		// Deliberately long so only responseTimeout could plausibly cut
-		// this off.
-		idleTimeout:     3 * time.Second,
-		bodyDone:        signal,
-		responseTimeout: 100 * time.Millisecond,
+		// Deliberately long so only the fixed post-handoff window could
+		// plausibly cut this off.
+		idleTimeout: 3 * time.Second,
+		bodyDone:    signal,
 	}
-	signal.bind(wrapped, wrapped.responseTimeout)
+	signal.bind(wrapped, 100*time.Millisecond)
 	signal.markDone()
-	if err := wrapped.SetDeadline(time.Now().Add(wrapped.responseTimeout)); err != nil {
-		t.Fatalf("SetDeadline: %v", err)
-	}
 
 	start := time.Now()
 	buf := make([]byte, 4)
@@ -1179,7 +1345,155 @@ func TestIdleConn_PostHandoff_FailsAtResponseTimeout(t *testing.T) {
 		t.Fatalf("err = %v (%T), want a net.Error reporting Timeout() == true", err, err)
 	}
 	if elapsed > 2*time.Second {
-		t.Fatalf("took %v to time out; a 100ms responseTimeout should have cut it well before this", elapsed)
+		t.Fatalf("took %v to time out; a 100ms fixed post-handoff window should have cut it well before this", elapsed)
+	}
+}
+
+// TestIdleConn_PostHandoff_HeaderTrickle_CannotExtendFixedWindow is the
+// required negative case for the fix (review round 4's finding): once
+// bodyDone fires, a peer that keeps trickling a byte every gap — each gap
+// individually well under the fixed post-handoff window — must still fail
+// once the window's absolute point in time passes, instead of each
+// successful read pushing that deadline further out the way an
+// IdleTimeout-style sliding deadline would. idleTimeout is deliberately set
+// far longer than the window so only the fixed window could plausibly cut
+// this off: an IdleTimeout-based extension on every trickled byte would let
+// this run far past 2s.
+func TestIdleConn_PostHandoff_HeaderTrickle_CannotExtendFixedWindow(t *testing.T) {
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	signal := &bodyDoneSignal{}
+	wrapped := &idleConn{
+		Conn:        client,
+		idleTimeout: 3 * time.Second,
+		bodyDone:    signal,
+	}
+	const window = 200 * time.Millisecond
+	signal.bind(wrapped, window)
+	signal.markDone()
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for i := byte(0); ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if _, err := server.Write([]byte{i}); err != nil {
+				return
+			}
+			time.Sleep(60 * time.Millisecond)
+		}
+	}()
+
+	start := time.Now()
+	buf := make([]byte, 1)
+	var err error
+	for {
+		_, err = wrapped.Read(buf)
+		if err != nil {
+			break
+		}
+		if time.Since(start) > 2*time.Second {
+			t.Fatal("trickled bytes kept the read alive for over 2s; the fixed post-handoff window should have cut it off at ~200ms regardless of the trickle")
+		}
+	}
+	elapsed := time.Since(start)
+
+	netErr, ok := err.(net.Error)
+	if !ok || !netErr.Timeout() {
+		t.Fatalf("err = %v (%T), want a net.Error reporting Timeout() == true", err, err)
+	}
+	if elapsed > window+800*time.Millisecond {
+		t.Fatalf("took %v to time out; the fixed %v post-handoff window should have cut it off regardless of the trickle, not been extended by it", elapsed, window)
+	}
+}
+
+// TestIdleConn_PostHandoff_AfterHeadersReceived_UsesIdleTimeoutForBody is
+// the fix's other required half: once markHeadersReceived reports the
+// response's headers are fully read, a response BODY that arrives slowly —
+// each gap exceeding the now-irrelevant fixed post-handoff window but
+// comfortably under idleTimeout — must still succeed, because the
+// connection switches back to the normal sliding idleTimeout immediately
+// when headers are marked received (not only on the next successful read,
+// which would otherwise race against a header-wait deadline already on the
+// verge of (or past) expiring).
+func TestIdleConn_PostHandoff_AfterHeadersReceived_UsesIdleTimeoutForBody(t *testing.T) {
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	signal := &bodyDoneSignal{}
+	wrapped := &idleConn{
+		Conn:        client,
+		idleTimeout: 150 * time.Millisecond,
+		bodyDone:    signal,
+	}
+	// A short fixed window: letting it keep governing reads after headers
+	// are marked received would starve this test almost immediately.
+	signal.bind(wrapped, 80*time.Millisecond)
+	signal.markDone()
+	signal.markHeadersReceived()
+
+	go func() {
+		for i := byte(0); i < 3; i++ {
+			time.Sleep(100 * time.Millisecond)
+			_, _ = server.Write([]byte{i})
+		}
+	}()
+
+	start := time.Now()
+	buf := make([]byte, 1)
+	for i := 0; i < 3; i++ {
+		if _, err := wrapped.Read(buf); err != nil {
+			t.Fatalf("Read chunk %d: %v (each 100ms gap is within the 150ms idleTimeout that should govern a post-headers body read; the already-elapsed 80ms fixed window must not apply anymore)", i, err)
+		}
+	}
+	elapsed := time.Since(start)
+	if elapsed < 250*time.Millisecond {
+		t.Fatalf("finished in %v; expected it to span all three 100ms gaps (well past the 80ms fixed window) to be a meaningful proof", elapsed)
+	}
+}
+
+// TestIdleConn_HeadersReceivedBeforeBodyDone_MarkDoneDoesNotShortenDeadline
+// is a self-attack input the fix must not regress on: a storage service
+// that answers (an early validation error, say) before the request body
+// has finished sending, so markHeadersReceived fires BEFORE markDone does
+// — the reverse of every other test's ordering. markDone must not then
+// force the connection back down to the short, fixed header-wait window:
+// headers have already arrived, so the connection's deadline is already
+// correctly on the normal IdleTimeout basis, and markDone firing later must
+// leave it there.
+func TestIdleConn_HeadersReceivedBeforeBodyDone_MarkDoneDoesNotShortenDeadline(t *testing.T) {
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	signal := &bodyDoneSignal{}
+	wrapped := &idleConn{
+		Conn:        client,
+		idleTimeout: 400 * time.Millisecond,
+		bodyDone:    signal,
+	}
+	// A short fixed window: if markDone wrongly re-imposed it below, the
+	// 200ms wait further down would fail.
+	signal.bind(wrapped, 80*time.Millisecond)
+
+	signal.markHeadersReceived() // headers arrive first...
+	signal.markDone()            // ...then the body finishes being sent.
+
+	go func() {
+		time.Sleep(200 * time.Millisecond) // > the 80ms fixed window, < the 400ms idleTimeout
+		_, _ = server.Write([]byte("x"))
+	}()
+
+	buf := make([]byte, 1)
+	if _, err := wrapped.Read(buf); err != nil {
+		t.Fatalf("Read: %v (a 200ms gap is within the 400ms idleTimeout that should still govern this read; markDone must not have forced the deadline back down to the 80ms fixed window after headers already arrived)", err)
 	}
 }
 

@@ -21,6 +21,7 @@ package producer
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -236,43 +237,97 @@ func TestUploadToPresignedURL_StorageDrop_MidResponse(t *testing.T) {
 	}
 }
 
-// TestUploadToPresignedURL_SlowButHealthy_Succeeds proves the fix does not
-// newly truncate an upload whose response is merely slow to arrive: the
-// server writes its (otherwise instant) response in small chunks, each gap
-// under both the idle timeout and the response window, summing to well over
-// either. ResponseTimeout is overridden to the same short value as
-// IdleTimeout here (rather than left at its real default) so this remains a
-// meaningful per-gap proof under whichever of the two now governs the wait
-// for this response — the whole body is tiny and handed off essentially
-// immediately, so in practice that's ResponseTimeout.
-func TestUploadToPresignedURL_SlowButHealthy_Succeeds(t *testing.T) {
-	overrideStorageIdleTimeout(t, 80*time.Millisecond)
-	overrideStorageResponseTimeout(t, 80*time.Millisecond)
+// TestUploadToPresignedURL_HeaderTrickle_CannotExtendFixedWindow is the
+// required negative case for review round 4's second finding: once the
+// whole request body has been handed off, a peer that trickles the
+// response's status line and headers one byte at a time — each gap
+// individually well under the response window, but their sum spanning
+// several multiples of it — must still fail once the fixed window elapses.
+// This replaces the previous version of this test, which asserted the
+// opposite (that such a trickle succeeds) — exactly the sliding-window bug
+// review round 4 found: a peer drip-feeding an incomplete response could
+// extend the wait forever.
+func TestUploadToPresignedURL_HeaderTrickle_CannotExtendFixedWindow(t *testing.T) {
+	overrideStorageIdleTimeout(t, 3*time.Second) // deliberately long: only the fixed response window should cut this off
+	overrideStorageResponseTimeout(t, 100*time.Millisecond)
 
-	const gap = 25 * time.Millisecond
 	resp := "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
 
-	healthy := newRawStub(t, func(conn net.Conn) {
+	trickle := newRawStub(t, func(conn net.Conn) {
 		buf := make([]byte, 4096)
 		_, _ = conn.Read(buf)
-		for i := 0; i < len(resp); i += 5 {
-			time.Sleep(gap)
-			end := min(i+5, len(resp))
-			_, _ = conn.Write([]byte(resp[i:end]))
+		// One byte every 25ms: each gap is a fifth of the 100ms window, but
+		// the full response (39 bytes) takes ~975ms to send — several
+		// multiples of the window a sliding deadline would have tolerated.
+		for i := 0; i < len(resp); i++ {
+			time.Sleep(25 * time.Millisecond)
+			if _, err := conn.Write([]byte{resp[i]}); err != nil {
+				return
+			}
 		}
 	})
 
 	p := &Producer{storageClient: transferclient.New()}
 
 	start := time.Now()
-	err := p.uploadToPresignedURL(context.Background(), healthy.url("/object"), []byte("payload"))
+	err := p.uploadToPresignedURL(context.Background(), trickle.url("/object"), []byte("payload"))
 	elapsed := time.Since(start)
 
-	if err != nil {
-		t.Fatalf("uploadToPresignedURL failed: %v", err)
+	if err == nil {
+		t.Fatal("expected the upload to fail: a trickle of response bytes must not be able to extend the fixed post-handoff window indefinitely")
 	}
-	if elapsed < 2*80*time.Millisecond {
-		t.Fatalf("upload finished in %v; expected it to span multiple idle-timeout windows to be a meaningful proof", elapsed)
+	if elapsed > 1*time.Second {
+		t.Fatalf("took %v to fail; the fixed 100ms response window should have cut it off well before the full ~975ms trickle completed", elapsed)
+	}
+}
+
+// TestUploadToPresignedURL_PostHeaders_SlowBody_Succeeds is the fix's other
+// required half: once response headers have arrived, a response BODY that
+// trickles in slowly — each gap exceeding the (now-irrelevant) fixed
+// response window but comfortably under the idle timeout — must still
+// succeed, because the connection switches back to the normal sliding idle
+// timeout once headers are received (see
+// transferclient.MarkResponseHeadersReceived). This uses a non-2xx status
+// so uploadToPresignedURL actually reads resp.Body — the success path
+// never does, since it only closes the body without reading it.
+func TestUploadToPresignedURL_PostHeaders_SlowBody_Succeeds(t *testing.T) {
+	overrideStorageIdleTimeout(t, 300*time.Millisecond)
+	overrideStorageResponseTimeout(t, 80*time.Millisecond)
+
+	const errBody = "access denied"
+
+	slowBody := newRawStub(t, func(conn net.Conn) {
+		buf := make([]byte, 4096)
+		_, _ = conn.Read(buf)
+		header := fmt.Sprintf("HTTP/1.1 403 Forbidden\r\nContent-Length: %d\r\n\r\n", len(errBody))
+		if _, err := conn.Write([]byte(header)); err != nil {
+			return
+		}
+		// Each byte of the body arrives 150ms apart: individually within
+		// idleTimeout (300ms), but the whole body (14 bytes) takes ~2.1s —
+		// well past the 80ms response window that governed only the
+		// preceding wait for the headers just sent above.
+		for i := 0; i < len(errBody); i++ {
+			time.Sleep(150 * time.Millisecond)
+			_, _ = conn.Write([]byte{errBody[i]})
+		}
+	})
+
+	p := &Producer{storageClient: transferclient.New()}
+
+	start := time.Now()
+	err := p.uploadToPresignedURL(context.Background(), slowBody.url("/object"), []byte("payload"))
+	elapsed := time.Since(start)
+
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		t.Fatalf("err = %v (%T), want *APIError", err, err)
+	}
+	if apiErr.Body != errBody {
+		t.Fatalf("APIError.Body = %q, want %q (a slow-but-moving body must still be read in full)", apiErr.Body, errBody)
+	}
+	if elapsed < 1*time.Second {
+		t.Fatalf("upload finished in %v; expected it to span the ~2.1s body trickle to be a meaningful proof", elapsed)
 	}
 }
 

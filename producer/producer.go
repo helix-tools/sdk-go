@@ -1086,6 +1086,16 @@ func (p *Producer) uploadToPresignedURL(ctx context.Context, uploadURL string, d
 	req.ContentLength = int64(len(data))
 
 	resp, err := p.storageHTTPClient().Do(req)
+	if resp != nil {
+		// Do/RoundTrip returning a non-nil Response means storage's status
+		// line and headers are fully read — exactly the event the storage
+		// client's fixed post-handoff response window is waiting on. Tell
+		// it so now, before any read of resp.Body below, so that read (if
+		// any) is bound by the normal inactivity timeout again instead of
+		// the fixed window that only ever governed this preceding wait —
+		// see transferclient.MarkResponseHeadersReceived's doc comment.
+		transferclient.MarkResponseHeadersReceived(uploadCtx)
+	}
 	if err != nil {
 		if resp != nil {
 			// net/http pairs a non-nil Response with a non-nil error only
@@ -1119,12 +1129,12 @@ func (p *Producer) uploadToPresignedURL(ctx context.Context, uploadURL string, d
 
 // UploadDataset uploads a dataset, always compressed and then encrypted.
 // FLOW (process-before-POST, still catalog-record-before-storage-upload):
-// 1. Process file (compress + encrypt) — no upload yet, so the real sizes
-//    are known.
-// 2. POST to /v1/datasets with those sizes plus version/record_count/
-//    metadata to create the record and get a presigned URL.
-// 3. PUT the processed bytes to the presigned URL.
-// 4. GET the dataset record and return it.
+//  1. Process file (compress + encrypt) — no upload yet, so the real sizes
+//     are known.
+//  2. POST to /v1/datasets with those sizes plus version/record_count/
+//     metadata to create the record and get a presigned URL.
+//  3. PUT the processed bytes to the presigned URL.
+//  4. GET the dataset record and return it.
 //
 // Step 2 still happens before any bytes reach storage, so the race the original
 // POST-first refactor closed (a storage event firing before the catalog record
