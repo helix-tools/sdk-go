@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -55,7 +56,9 @@ type Producer struct {
 
 	// This producer's own encryption key id, supplied by the Helix API
 	// when the Producer is created. Empty means it could not be
-	// resolved, and every UploadDataset call fails until it is.
+	// resolved, and every UploadDataset call fails until it is. A failed
+	// lookup is retried on the next upload (see ensureEncryptionKeyID)
+	// unless the API gave a definitive "no key configured" answer.
 	KMSKeyID string
 
 	Region string
@@ -64,6 +67,36 @@ type Producer struct {
 	httpClient *http.Client
 	kmsClient  *kms.Client
 	s3Client   *s3.Client
+
+	// keyLookupAttempted is set once NewProducer has made its
+	// construction-time key lookup, gating the retry in
+	// ensureEncryptionKeyID: a Producer built directly (bypassing
+	// NewProducer, as tests do but production code never does) never sets
+	// it, so an empty KMSKeyID keeps failing the same local, network-free
+	// check it always has rather than reaching out to an API endpoint the
+	// caller never configured.
+	keyLookupAttempted bool
+
+	keyLookupMu sync.Mutex
+	// keyLookupDefinitiveNoKey caches a definitive "no key configured"
+	// answer (a 404): that is never retried, same as before this field
+	// existed. A clean 200 with a missing, empty, or blank key is NOT
+	// definitive — the account's key may simply not be provisioned yet —
+	// so it is never cached here; the next upload retries it.
+	keyLookupDefinitiveNoKey bool
+	// keyLookupInFlight is the currently-running lookup, if any, so
+	// concurrent callers share its one result instead of each firing their
+	// own request at the API.
+	keyLookupInFlight *keyLookupCall
+}
+
+// keyLookupCall is one in-flight (or just-finished) encryption-key lookup,
+// shared by every caller that asked while it was running.
+type keyLookupCall struct {
+	done            chan struct{}
+	keyID           string
+	definitiveNoKey bool
+	err             error
 }
 
 // APIError represents an error returned by the Helix API with status code.
@@ -191,12 +224,17 @@ func NewProducer(cfg types.Config) (*Producer, error) {
 
 	// Get the producer's encryption key id from the API. Without one the
 	// Producer is still built (non-upload calls work) but every UploadDataset
-	// call fails: encryption is never skipped.
-	kmsKeyID, err := p.resolveEncryptionKeyID(context.Background())
-	if err != nil {
+	// call fails: encryption is never skipped. A failure here that got no
+	// definitive answer (a transient outage, say) is not permanent: the
+	// next upload retries it instead of failing closed until a new Producer
+	// is constructed (see ensureEncryptionKeyID). keyLookupAttempted is set
+	// here, before p is shared with anything else, so ensureEncryptionKeyID
+	// knows this call must actually ask the API rather than treating it as
+	// a hand-built Producer that never attempted a lookup at all.
+	p.keyLookupAttempted = true
+	if _, _, err := p.ensureEncryptionKeyID(context.Background()); err != nil {
 		fmt.Printf("Warning: %v\n", err)
 	}
-	p.KMSKeyID = kmsKeyID
 
 	return p, nil
 }
@@ -221,6 +259,19 @@ const maxProducerConfigBytes = 64 << 10
 // told: uploads fail, they are never sent unencrypted.
 const errEncryptionKeyUnresolved = "encryption key configuration could not be resolved, uploads will fail until it is"
 
+// errKeyLookupNoResponse marks a resolveEncryptionKeyID failure that got no
+// definitive answer from the API: a network/transport failure, a timeout, a
+// non-200 status other than 404, a malformed or oversized body, a redirect,
+// or a clean 200 whose encryption_key_id is missing, empty, or blank — the
+// account's key may simply not be provisioned yet, so this is never treated
+// as permanent. A lookup marked with it is never cached — ensureEncryptionKeyID
+// retries it on the next upload instead of treating a transient or
+// not-yet-provisioned state as permanent. The only failure NOT marked with
+// it is a 404: that is the API's definitive answer that this account
+// genuinely has no key configured, and it is cached like any other resolved
+// answer.
+var errKeyLookupNoResponse = errors.New("encryption key lookup got no definitive answer")
+
 // producerConfig is the body of GET /v1/self/producer-config.
 type producerConfig struct {
 	EncryptionKeyID string `json:"encryption_key_id"`
@@ -237,7 +288,7 @@ func (p *Producer) resolveEncryptionKeyID(ctx context.Context) (string, error) {
 
 	resp, err := p.sendSignedRequest(ctx, http.MethodGet, producerConfigPath, nil)
 	if err != nil {
-		return "", sdkerr.Wrap(errEncryptionKeyUnresolved, err)
+		return "", sdkerr.WrapMarked(errEncryptionKeyUnresolved, errKeyLookupNoResponse, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -245,33 +296,133 @@ func (p *Producer) resolveEncryptionKeyID(ctx context.Context) (string, error) {
 	// than silently truncated into something that parses.
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxProducerConfigBytes+1))
 	if err != nil {
-		return "", sdkerr.Wrap(errEncryptionKeyUnresolved, err)
+		return "", sdkerr.WrapMarked(errEncryptionKeyUnresolved, errKeyLookupNoResponse, err)
 	}
 	if len(raw) > maxProducerConfigBytes {
-		return "", sdkerr.Wrap(errEncryptionKeyUnresolved, errors.New("producer configuration answer is too large"))
+		return "", sdkerr.WrapMarked(errEncryptionKeyUnresolved, errKeyLookupNoResponse, errors.New("producer configuration answer is too large"))
+	}
+
+	// A 404 is the API's definitive answer that this account has no
+	// encryption key configured. Cached below like any other resolved
+	// answer and never retried; the underlying APIError (never surfaced
+	// in Error()) stays reachable via errors.As for debugging.
+	if resp.StatusCode == http.StatusNotFound {
+		return "", sdkerr.Wrap(errEncryptionKeyUnresolved, &APIError{StatusCode: resp.StatusCode, Body: string(raw)})
 	}
 
 	// Only the route's own 200 answer counts: not another 2xx, and not an
 	// answer reached by following a redirect.
 	if resp.StatusCode != http.StatusOK {
-		return "", sdkerr.Wrap(errEncryptionKeyUnresolved, &APIError{StatusCode: resp.StatusCode, Body: string(raw)})
+		return "", sdkerr.WrapMarked(errEncryptionKeyUnresolved, errKeyLookupNoResponse, &APIError{StatusCode: resp.StatusCode, Body: string(raw)})
 	}
 	if resp.Request != nil && resp.Request.Response != nil {
-		return "", sdkerr.Wrap(errEncryptionKeyUnresolved, errors.New("producer configuration request was redirected"))
+		return "", sdkerr.WrapMarked(errEncryptionKeyUnresolved, errKeyLookupNoResponse, errors.New("producer configuration request was redirected"))
 	}
 
 	// json.Unmarshal, unlike a streaming decode, refuses trailing data after
 	// the object.
 	var cfg producerConfig
 	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return "", sdkerr.Wrap(errEncryptionKeyUnresolved, err)
+		return "", sdkerr.WrapMarked(errEncryptionKeyUnresolved, errKeyLookupNoResponse, err)
 	}
 
+	// A clean 200 with a missing, empty, or blank key is NOT the same as a
+	// 404: the API answered, but the account's key may simply not be
+	// provisioned yet. Marked with errKeyLookupNoResponse like any other
+	// non-definitive failure, so ensureEncryptionKeyID retries it on the
+	// next upload instead of caching it as permanent.
 	if strings.TrimSpace(cfg.EncryptionKeyID) == "" {
-		return "", errors.New(errEncryptionKeyUnresolved)
+		return "", sdkerr.WrapMarked(errEncryptionKeyUnresolved, errKeyLookupNoResponse, errors.New("producer configuration answer carries no encryption key"))
 	}
 
 	return cfg.EncryptionKeyID, nil
+}
+
+// ensureEncryptionKeyID returns the producer's encryption key id, resolving
+// it via resolveEncryptionKeyID when needed. A successful lookup, or a
+// definitive "no key configured" answer (a 404), is cached on p and never
+// looked up again. Any other failure (network, timeout, non-200 other than
+// 404, malformed/oversized body, redirect, or a clean 200 with a missing,
+// empty, or blank key) is NOT cached: the next call retries it, so a
+// transient outage — or an account whose key simply is not provisioned yet
+// — does not fail every upload forever.
+//
+// Concurrent callers while a lookup is running share its one result instead
+// of each firing their own request at the API. The lookup itself runs in its
+// own goroutine (started by whichever caller finds none already in flight),
+// on a context derived from that caller's own ctx via context.WithoutCancel
+// — preserving any request-scoped values it carries — further bounded by
+// resolveEncryptionKeyID's own producerConfigTimeout. No caller's
+// cancellation can ever cancel or poison the shared lookup for the others
+// waiting on it. Each caller waits on its own ctx instead: if ctx is done
+// first, ensureEncryptionKeyID returns ctx.Err() promptly without waiting
+// for the lookup to finish, leaving the lookup to keep running for whoever
+// else is still waiting (or to be found cached by the next caller).
+//
+// A Producer built directly, bypassing NewProducer (as production code never
+// does but tests do), never has keyLookupAttempted set: it is reported as a
+// definitive non-key exactly like before this method existed, with no
+// network call, so a hand-built Producer with no APIEndpoint/httpClient
+// never panics or reaches out to an API it was never configured to call.
+func (p *Producer) ensureEncryptionKeyID(ctx context.Context) (keyID string, definitiveNoKey bool, err error) {
+	p.keyLookupMu.Lock()
+
+	if p.KMSKeyID != "" {
+		keyID := p.KMSKeyID
+		p.keyLookupMu.Unlock()
+		return keyID, false, nil
+	}
+	if p.keyLookupDefinitiveNoKey || !p.keyLookupAttempted {
+		p.keyLookupMu.Unlock()
+		return "", true, errors.New(errEncryptionKeyUnresolved)
+	}
+
+	call := p.keyLookupInFlight
+	if call == nil {
+		call = &keyLookupCall{done: make(chan struct{})}
+		p.keyLookupInFlight = call
+		// context.WithoutCancel(ctx) carries this caller's request-scoped
+		// values into the shared lookup without its cancellation (or any
+		// other waiter's) ever canceling or poisoning it — that is the bug
+		// this function exists to fix, see its doc comment. It cannot leak
+		// or accumulate: at most one runs at a time (single-flight, guarded
+		// by keyLookupMu) and resolveEncryptionKeyID already bounds it with
+		// producerConfigTimeout.
+		go p.runKeyLookup(call, context.WithoutCancel(ctx))
+	}
+	p.keyLookupMu.Unlock()
+
+	select {
+	case <-call.done:
+		return call.keyID, call.definitiveNoKey, call.err
+	case <-ctx.Done():
+		return "", false, ctx.Err()
+	}
+}
+
+// runKeyLookup performs one shared encryption-key lookup for call and
+// publishes its result by closing call.done. lookupCtx is the triggering
+// caller's own ctx with context.WithoutCancel already applied (see
+// ensureEncryptionKeyID), so request-scoped values travel with it while it
+// runs to completion — bounded only by resolveEncryptionKeyID's own
+// producerConfigTimeout — regardless of whether any (or all) of the callers
+// waiting on call have since had their own ctx canceled.
+func (p *Producer) runKeyLookup(call *keyLookupCall, lookupCtx context.Context) {
+	resolvedKeyID, lookupErr := p.resolveEncryptionKeyID(lookupCtx)
+	definitive := lookupErr != nil && !errors.Is(lookupErr, errKeyLookupNoResponse)
+
+	p.keyLookupMu.Lock()
+	p.keyLookupInFlight = nil
+	switch {
+	case lookupErr == nil:
+		p.KMSKeyID = resolvedKeyID
+	case definitive:
+		p.keyLookupDefinitiveNoKey = true
+	}
+	p.keyLookupMu.Unlock()
+
+	call.keyID, call.definitiveNoKey, call.err = resolvedKeyID, definitive, lookupErr
+	close(call.done)
 }
 
 // loadAWSConfig wraps config.LoadDefaultConfig, an AWS SDK call: on failure
@@ -626,7 +777,7 @@ func (p *Producer) createDatasetRecord(ctx context.Context, filePath string, opt
 // off, or that has no encryption key, fails here, before the file is read or
 // anything reaches the network.
 func (p *Producer) processFile(ctx context.Context, filePath string, opts UploadOptions) (*ProcessedFileData, error) {
-	if err := p.validateUploadOptions(opts); err != nil {
+	if err := p.validateUploadOptions(ctx, opts); err != nil {
 		return nil, err
 	}
 
@@ -694,9 +845,13 @@ const minDescriptionLength = 10
 
 // validateUploadOptions enforces the upload invariant: every upload is
 // compressed and then encrypted, and no option turns either off. It runs
-// before the file is read and before any network call (the key lookup included), and it
-// refuses:
-//   - a Producer without an encryption key,
+// before the file is read, and it refuses:
+//   - a Producer without an encryption key: if a prior lookup (at
+//     construction or a previous upload) got no definitive answer, this
+//     retries it — a transient outage does not fail every upload forever —
+//     but a Producer built directly with no lookup ever attempted, or one
+//     the API has definitively said has no key configured, fails this
+//     check locally, with no network call,
 //   - Metadata or DatasetOverrides — top-level or under "metadata" — that set
 //     one of the record's encryption/compression flags to anything but true,
 //     or that give "metadata" as something other than an object,
@@ -706,9 +861,15 @@ const minDescriptionLength = 10
 //
 // UploadOptions.Encrypt and UploadOptions.Compress are deprecated and ignored,
 // so leaving them false is accepted.
-func (p *Producer) validateUploadOptions(opts UploadOptions) error {
-	if p.KMSKeyID == "" {
-		return errors.New("encryption requested but no encryption key configured for this account")
+func (p *Producer) validateUploadOptions(ctx context.Context, opts UploadOptions) error {
+	// Always routed through ensureEncryptionKeyID — never a direct,
+	// unsynchronized read of p.KMSKeyID — because a concurrent upload can be
+	// caching a just-resolved key under its lock at the same moment.
+	if _, definitiveNoKey, err := p.ensureEncryptionKeyID(ctx); err != nil {
+		if definitiveNoKey {
+			return errors.New("encryption requested but no encryption key configured for this account")
+		}
+		return err
 	}
 
 	if err := rejectDisabledFlags("UploadOptions.Metadata", opts.Metadata); err != nil {
