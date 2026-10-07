@@ -6,7 +6,7 @@
 ## TL;DR
 
 ```bash
-go get github.com/helix-tools/sdk-go/v2@v2.22.3
+go get github.com/helix-tools/sdk-go/v2@v2.22.4
 ```
 
 No code changes required.
